@@ -183,7 +183,13 @@ export function CommitDialog({
             style={{ height: 96 }}
             data={worktrees.data}
             computeItemKey={(_, worktree) => worktree.path}
-            itemContent={(_, worktree) => <p className="break-all py-1">{worktree.branch ?? worktree.head.slice(0, 12)} · {worktree.path}{worktree.locked ? ` · ${t('commit.locked')}` : ''}</p>}
+            itemContent={(_, worktree) => <div className="py-1">
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate">{worktree.branch ?? worktree.head.slice(0, 12)}</span>
+                {worktree.locked && <span className="shrink-0 whitespace-nowrap text-muted-foreground">{t('commit.locked')}</span>}
+              </div>
+              <p className="break-all text-[10px] text-muted-foreground">{worktree.path}</p>
+            </div>}
           />
         </details>}
         <textarea
