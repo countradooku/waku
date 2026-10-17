@@ -365,11 +365,12 @@ export async function collectWorkspaceDiff(
   client: WakuClient,
   cwd: string,
   source: ReviewDiffSource = 'uncommitted',
+  ignoreWhitespace = false,
 ): Promise<ReviewDiffData> {
   const response = expectResponse(
     await client.request({
       type: 'workspace',
-      operation: { type: 'collectReviewDiff', cwd, source },
+      operation: { type: 'collectReviewDiff', cwd, source, ignore_whitespace: ignoreWhitespace },
     }),
     'workspace',
   );

@@ -56,3 +56,34 @@ pub struct CreatedWorktree {
     pub path: PathBuf,
     pub branch: String,
 }
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct GitStatusFile {
+    pub path: String,
+    pub previous_path: Option<String>,
+    pub index_status: String,
+    pub worktree_status: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct GitStatus {
+    #[ts(type = "string")]
+    pub repository: PathBuf,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: u64,
+    pub behind: u64,
+    pub files: Vec<GitStatusFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct GitWorktree {
+    #[ts(type = "string")]
+    pub path: PathBuf,
+    pub head: String,
+    pub branch: Option<String>,
+    pub bare: bool,
+    pub locked: bool,
+    pub prunable: bool,
+}

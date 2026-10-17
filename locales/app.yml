@@ -1,5 +1,8 @@
 _version: 2
 
+diff.ignore_whitespace:
+  en: Ignore whitespace
+
 menu.about:
   en: About %{app}
 menu.check_for_updates:
@@ -1542,6 +1545,20 @@ commit.commit_and_push:
   en: Commit and push
 commit.push:
   en: Push
+commit.pull:
+  en: Pull (fast-forward only)
+commit.pulling:
+  en: Pulling…
+commit.pulled:
+  en: Pulled successfully
+commit.stage:
+  en: Stage
+commit.unstage:
+  en: Unstage
+commit.worktrees:
+  en: Worktrees
+commit.locked:
+  en: Locked
 commit.generating_message:
   en: Generating commit message…
 commit.committing:

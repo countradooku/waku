@@ -1,6 +1,8 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { AgentSession, Project } from '@waku/client'
-import { useEffect, useState, type RefObject } from 'react'
+import { inspectGitStatus, isGitFileStaged, stageGitFiles, pullGitBranch, listGitWorktrees } from '@waku/client'
+import { useEffect, useRef, useState, type RefObject } from 'react'
+import { Virtuoso } from 'react-virtuoso'
 import { toast } from 'sonner'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { WakuIcon, type WakuIconName } from '@/components/waku-icon'
@@ -19,7 +21,7 @@ import { useI18n } from '@/lib/i18n'
 import { usePrimaryShortcut } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
-type CommitAction = 'commit' | 'commitAndPush' | 'push'
+type CommitAction = 'commit' | 'commitAndPush' | 'push' | 'pull' | 'stage'
 
 export function CommitDialog({
   open,
@@ -41,6 +43,12 @@ export function CommitDialog({
   const [includeUnstaged, setIncludeUnstaged] = useState(true)
   const [pending, setPending] = useState<CommitAction | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const operationPending = useRef(false)
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
   const commitShortcut = usePrimaryShortcut('⌘↩', 'Ctrl+Enter')
   const cwd = session && project ? sessionCwd(session, project) : undefined
 
@@ -49,12 +57,21 @@ export function CommitDialog({
     queryFn: () => inspectWorkspaceCommit(requireClient(client), cwd!),
     enabled: open && phase === 'connected' && Boolean(client && config && cwd),
   })
+  const gitStatus = useQuery({
+    queryKey: ['daemon', config?.address, 'git-status', cwd],
+    queryFn: () => inspectGitStatus(requireClient(client), cwd!),
+    enabled: open && phase === 'connected' && Boolean(client && cwd),
+  })
+  const worktrees = useQuery({
+    queryKey: ['daemon', config?.address, 'git-worktrees', cwd],
+    queryFn: () => listGitWorktrees(requireClient(client), cwd!),
+    enabled: open && phase === 'connected' && Boolean(client && cwd),
+  })
 
   useEffect(() => {
     if (!open) return
     setMessage('')
     setIncludeUnstaged(true)
-    setPending(null)
     setError(null)
   }, [open, cwd])
 
@@ -64,18 +81,45 @@ export function CommitDialog({
   const deletions = includeUnstaged
     ? snapshot.data?.deletions ?? 0
     : snapshot.data?.staged_deletions ?? 0
-  const canCommit = !snapshot.isPending && Boolean(
+  const available = phase === 'connected' && !pending && !snapshot.isError && !gitStatus.isError
+  const canCommit = available && !snapshot.isFetching && Boolean(
     snapshot.data?.has_staged || (includeUnstaged && snapshot.data?.has_unstaged),
   )
-  const canPush = !snapshot.isPending && Boolean(snapshot.data?.can_push)
+  const canPush = available && !snapshot.isFetching && Boolean(snapshot.data?.can_push)
+  const canPull = available && !gitStatus.isFetching && Boolean(gitStatus.data?.upstream && gitStatus.data.branch && gitStatus.data.files.length === 0)
+
+  async function stageFile(path: string, stage: boolean) {
+    if (!client || !cwd || operationPending.current) return
+    operationPending.current = true
+    setPending('stage')
+    setError(null)
+    // Explicit file selection must never be overridden by "include all".
+    setIncludeUnstaged(false)
+    try {
+      await stageGitFiles(client, cwd, [path], stage)
+    } catch (cause) {
+      setError(errorMessage(cause))
+    } finally {
+      await Promise.all([
+        snapshot.refetch(),
+        gitStatus.refetch(),
+        queryClient.invalidateQueries({ queryKey: ['daemon', config?.address, 'workspace-diff'] }),
+      ])
+      operationPending.current = false
+      setPending(null)
+    }
+  }
 
   async function run(action: CommitAction) {
-    if (!client || !config || !cwd || pending) return
+    if (!client || !config || !cwd || operationPending.current || action === 'stage') return
+    operationPending.current = true
     setPending(action)
     setError(null)
     try {
       if (action === 'push') {
         await pushWorkspace(client, cwd)
+      } else if (action === 'pull') {
+        await pullGitBranch(client, cwd)
       } else {
         let commitMessage = message.trim()
         if (!commitMessage) {
@@ -104,29 +148,44 @@ export function CommitDialog({
         queryClient.invalidateQueries({ queryKey: ['daemon', config.address, 'workspace'] }),
         queryClient.invalidateQueries({ queryKey: ['daemon', config.address, 'workspace-tree'] }),
         queryClient.invalidateQueries({ queryKey: ['daemon', config.address, 'workspace-diff'] }),
+        queryClient.invalidateQueries({ queryKey: ['daemon', config.address, 'git-status'] }),
+        queryClient.invalidateQueries({ queryKey: ['daemon', config.address, 'commit'] }),
       ])
+      if (!mounted.current) return
       toast.success(t(action === 'commit'
         ? 'commit.committed'
         : action === 'commitAndPush'
           ? 'commit.committed_and_pushed'
-          : 'commit.pushed'))
+          : action === 'pull' ? 'commit.pulled' : 'commit.pushed'))
       onOpenChange(false)
     } catch (cause) {
       setError(errorMessage(cause))
       void snapshot.refetch()
+      void gitStatus.refetch()
     } finally {
+      operationPending.current = false
       setPending(null)
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(value) => { if (!operationPending.current) onOpenChange(value) }}>
       <DialogContent className="max-w-[420px] overflow-hidden rounded-[18px] bg-[var(--raised)] p-0" finalFocus={returnFocus}>
         <DialogTitle className="sr-only">{t('environment.commit_or_push')}</DialogTitle>
         <div className="flex h-12 items-center gap-2.5 px-4 text-[14px]">
           <WakuIcon className="size-[15px]" name="gitBranch" />
           <span className="min-w-0 flex-1 truncate">{snapshot.data?.branch ?? 'HEAD'}</span>
         </div>
+        {gitStatus.data?.upstream && <p className="px-4 text-xs text-muted-foreground">{gitStatus.data.upstream} · ↑{gitStatus.data.ahead} ↓{gitStatus.data.behind}</p>}
+        {worktrees.data && worktrees.data.length > 1 && <details className="px-4 py-1 text-xs">
+          <summary>{t('commit.worktrees')} ({worktrees.data.length})</summary>
+          <Virtuoso
+            style={{ height: 96 }}
+            data={worktrees.data}
+            computeItemKey={(_, worktree) => worktree.path}
+            itemContent={(_, worktree) => <p className="break-all py-1">{worktree.branch ?? worktree.head.slice(0, 12)} · {worktree.path}{worktree.locked ? ` · ${t('commit.locked')}` : ''}</p>}
+          />
+        </details>}
         <textarea
           autoFocus
           aria-label={t('commit.message')}
@@ -164,9 +223,21 @@ export function CommitDialog({
             </span>
           </button>
         </div>
-        {(error || snapshot.error) && (
+        {gitStatus.data && gitStatus.data.files.length > 0 && <Virtuoso
+          style={{ height: Math.min(gitStatus.data.files.length, 5) * 36 }}
+          data={gitStatus.data.files}
+          computeItemKey={(_, file) => file.path}
+          itemContent={(_, file) => {
+            const staged = isGitFileStaged(file.index_status)
+            return <label className="flex h-9 items-center gap-2 px-4 text-xs" title={file.previous_path ? `${file.previous_path} → ${file.path}` : file.path}>
+              <input type="checkbox" aria-label={`${staged ? t('commit.unstage') : t('commit.stage')} ${file.path}`} checked={staged} disabled={!available || gitStatus.isFetching} onChange={() => void stageFile(file.path, !staged)} />
+              <span className="min-w-0 flex-1 truncate">{file.path}</span><code>{file.index_status}{file.worktree_status}</code>
+            </label>
+          }}
+        />}
+        {(error || snapshot.error || gitStatus.error || worktrees.error) && (
           <p className="px-5 pb-2 text-[11.5px] leading-4 text-destructive">
-            {error ?? errorMessage(snapshot.error)}
+            {error ?? errorMessage(snapshot.error ?? gitStatus.error ?? worktrees.error)}
           </p>
         )}
         <div className="mx-2 mt-1 border-t" />
@@ -197,6 +268,7 @@ export function CommitDialog({
             pending={pending === 'push'}
             onClick={() => void run('push')}
           />
+          <CommitActionRow enabled={canPull} icon="gitBranch" label={t(pending === 'pull' ? 'commit.pulling' : 'commit.pull')} pending={pending === 'pull'} onClick={() => void run('pull')} />
         </div>
       </DialogContent>
     </Dialog>

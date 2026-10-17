@@ -1,5 +1,27 @@
 # Waku
 
+> **Built on [Waku](https://github.com/egoist/waku), created by
+> [egoist](https://github.com/egoist).** This is an independent community fork.
+> Waku's native Rust/GPUI application, agent integrations, daemon architecture,
+> and desktop, web, and mobile clients are the work of egoist and Waku's
+> contributors. Please visit the original project, give it a star, and
+> [support egoist](https://github.com/sponsors/egoist).
+
+This fork builds on that foundation with additional Git and review workflows,
+informed by [T3 Code](https://github.com/pingdotgg/t3code) and adapted to Waku's
+architecture. It is maintained independently; it is not an official Waku or
+T3 Code release. Original history, authorship, and license notices are retained.
+
+The first increment adds file staging and unstaging, fast-forward-only pull,
+worktree inspection, worktree creation checks, and an ignore-whitespace review
+option. See [the workflow guide](docs/source-control.md) for availability and
+limits, and [the parity roadmap](docs/parity-roadmap.md) for remaining work.
+Full T3 Code feature parity is a continuing goal, not a current claim.
+
+**This fork has no published binary release yet.** Build this checkout using
+the Development instructions below to try its changes. The Install links below
+are for the original Waku releases and do not include this fork's additions.
+
 Waku is a fast, native desktop app for working with local coding agents. It is
 built in Rust with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)
 and keeps projects, sessions, transcripts on your machine.
@@ -113,7 +135,9 @@ Release maintainers should also read [RELEASING.md](RELEASING.md).
 
 ## Sponsorship
 
-You can support the project development via [GitHub Sponsors](https://github.com/sponsors/egoist).
+Please support **egoist, Waku's original author**, via
+[GitHub Sponsors](https://github.com/sponsors/egoist). This link supports the
+upstream project that makes this fork possible.
 
 ## License
 

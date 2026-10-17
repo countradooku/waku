@@ -1,5 +1,15 @@
 _version: 1
 
+diff.ignore_whitespace: 空白の変更を無視
+
+commit.pull: プル（早送りのみ）
+commit.pulling: プル中…
+commit.pulled: プルしました
+commit.stage: ステージ
+commit.unstage: ステージ解除
+commit.worktrees: ワークツリー
+commit.locked: ロック中
+
 menu.about: "%{app} について"
 menu.check_for_updates: アップデートを確認…
 menu.settings: 設定…

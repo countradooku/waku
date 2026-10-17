@@ -38,10 +38,10 @@ const CODEX_COMMIT_MODEL: &str = "gpt-5.6-luna";
 // `unsupported_value`, listing `none` as the lowest it accepts.
 const CODEX_COMMIT_EFFORT: &str = r#"model_reasoning_effort="none""#;
 
-struct CapturedOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub(crate) struct CapturedOutput {
+    pub(crate) status: ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
 }
 
 pub fn inspect(cwd: &Path) -> anyhow::Result<Snapshot> {
@@ -564,7 +564,10 @@ fn git_capture(cwd: &Path, args: &[&str]) -> anyhow::Result<CapturedOutput> {
     run_capture(&mut command, GIT_TIMEOUT)
 }
 
-fn run_capture(command: &mut Command, timeout: Duration) -> anyhow::Result<CapturedOutput> {
+pub(crate) fn run_capture(
+    command: &mut Command,
+    timeout: Duration,
+) -> anyhow::Result<CapturedOutput> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -582,9 +585,20 @@ fn run_capture(command: &mut Command, timeout: Duration) -> anyhow::Result<Captu
     let stdout_reader = thread::spawn(move || read_bounded(stdout, MAX_STDOUT_BYTES));
     let stderr_reader = thread::spawn(move || read_bounded(stderr, MAX_STDERR_BYTES));
     let deadline = Instant::now() + timeout;
+    let mut exit_status = None;
+    // Short Git commands should not each pay the long-running agent polling
+    // interval. Back off quickly so slow commands still use very few wakeups.
+    let mut poll_interval = Duration::from_millis(1);
     let status = loop {
-        if let Some(status) = child.try_wait().context("could not wait for process")? {
-            break status;
+        if exit_status.is_none() {
+            exit_status = child.try_wait().context("could not wait for process")?;
+        }
+        // A hook/helper may inherit these pipes after the parent exits. Keep
+        // their draining within the same deadline instead of joining forever.
+        if let Some(status) = exit_status {
+            if stdout_reader.is_finished() && stderr_reader.is_finished() {
+                break status;
+            }
         }
         if Instant::now() >= deadline {
             #[cfg(unix)]
@@ -593,11 +607,12 @@ fn run_capture(command: &mut Command, timeout: Duration) -> anyhow::Result<Captu
             }
             let _ = child.kill();
             let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
+            // Dropping reader handles does not block if a descendant still
+            // owns a pipe (in particular on platforms without process groups).
             bail!("process timed out after {} seconds", timeout.as_secs());
         }
-        thread::sleep(PROCESS_POLL_INTERVAL);
+        thread::sleep(poll_interval.min(deadline.saturating_duration_since(Instant::now())));
+        poll_interval = (poll_interval * 2).min(PROCESS_POLL_INTERVAL);
     };
     Ok(CapturedOutput {
         status,
@@ -616,7 +631,8 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> Vec<u8> {
         if read == 0 {
             break;
         }
-        let remaining = limit.saturating_sub(kept.len());
+        // Keep a sentinel byte so structured callers can reject partial output.
+        let remaining = (limit + 1).saturating_sub(kept.len());
         kept.extend_from_slice(&chunk[..read.min(remaining)]);
     }
     kept
@@ -639,6 +655,17 @@ fn command_error(output: &CapturedOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn capture_deadline_includes_pipes_inherited_by_helpers() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 3 & exit 0"]);
+        let started = Instant::now();
+        let result = run_capture(&mut command, Duration::from_millis(120));
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     fn run_git(cwd: &Path, args: &[&str]) {
         let output = crate::command_env::plain_command("git")

@@ -61,11 +61,38 @@ fn create_in(
         .map(str::to_owned)
         .map(Ok)
         .unwrap_or_else(|| default_base_ref(&repository))?;
-    git_stdout(
+    // Pin a validated commit before creating anything. Never pass a client
+    // supplied revision as an option to `git worktree add`.
+    let base_commit = git_stdout(
         &repository,
-        &["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base_ref}^{{commit}}"),
+        ],
     )
     .with_context(|| format!("base branch `{base_ref}` is unavailable"))?;
+    if !project_relative.as_os_str().is_empty() {
+        let tree_path = project_relative
+            .components()
+            .map(|component| {
+                component
+                    .as_os_str()
+                    .to_str()
+                    .context("project path must be UTF-8")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .join("/");
+        let kind = git_stdout(
+            &repository,
+            &["cat-file", "-t", &format!("{base_commit}:{tree_path}")],
+        )
+        .context("the selected base does not contain the project directory")?;
+        if kind != "tree" {
+            bail!("the selected base does not contain a project directory");
+        }
+    }
     let project_worktrees = worktree_root.join(project_id.to_string());
     fs::create_dir_all(&project_worktrees).with_context(|| {
         format!(
@@ -87,7 +114,7 @@ fn create_in(
             .args(["worktree", "add", "-b"])
             .arg(&branch)
             .arg(&path)
-            .arg(&base_ref)
+            .arg(&base_commit)
             .current_dir(&repository)
             .output()
             .context("failed to execute git worktree add")?;
@@ -120,7 +147,7 @@ fn create_in(
         .args(["worktree", "add", "-b"])
         .arg(&branch)
         .arg(&path)
-        .arg(&base_ref)
+        .arg(&base_commit)
         .current_dir(&repository)
         .output()
         .context("failed to execute git worktree add")?;
@@ -360,5 +387,52 @@ mod tests {
             "fix-project-worktree-picker"
         );
         assert!(worktree_slug(&"a".repeat(100)).len() <= MAX_SLUG_BYTES);
+    }
+
+    #[test]
+    fn missing_project_directory_and_invalid_base_leave_no_worktree() {
+        let root = std::env::temp_dir().join(format!("waku-worktree-preflight-{}", Uuid::new_v4()));
+        let repository = root.join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&repository, &["init", "-b", "main"]);
+        fs::write(repository.join("README"), "root\n").unwrap();
+        run_git(&repository, &["add", "."]);
+        run_git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Waku Tests",
+                "-c",
+                "user.email=waku@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        let project = repository.join("subproject");
+        fs::create_dir(&project).unwrap();
+        for base in ["main", "--help", "does-not-exist"] {
+            assert!(
+                create_in(
+                    &project,
+                    &root.join("worktrees"),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    "test",
+                    Some(base)
+                )
+                .is_err()
+            );
+            assert_eq!(
+                crate::git_workflow::list_worktrees(&repository)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(!root.join("worktrees").exists());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 }

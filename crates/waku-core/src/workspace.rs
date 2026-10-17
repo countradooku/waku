@@ -18,6 +18,20 @@ pub use waku_protocol::workspace::{
 };
 
 pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult> {
+    let repository_lock = match &operation {
+        WorkspaceOperation::StageFiles { cwd, .. }
+        | WorkspaceOperation::Pull { cwd }
+        | WorkspaceOperation::Commit { cwd, .. }
+        | WorkspaceOperation::Push { cwd }
+        | WorkspaceOperation::CheckoutBranch { cwd, .. } => {
+            Some(crate::git_workflow::repository_lock(cwd)?)
+        }
+        WorkspaceOperation::CreateWorktree { project_path, .. } => {
+            Some(crate::git_workflow::repository_lock(project_path)?)
+        }
+        _ => None,
+    };
+    let _repository_guard = repository_lock.as_ref().map(|lock| lock.lock());
     Ok(match operation {
         WorkspaceOperation::ListTree {
             root,
@@ -119,6 +133,20 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
         WorkspaceOperation::InspectCommit { cwd } => WorkspaceResult::CommitSnapshot {
             snapshot: crate::git_commit::inspect(&cwd)?,
         },
+        WorkspaceOperation::GitStatus { cwd } => WorkspaceResult::GitStatus {
+            status: crate::git_workflow::status(&cwd)?,
+        },
+        WorkspaceOperation::StageFiles { cwd, paths, stage } => {
+            crate::git_workflow::stage_files(&cwd, &paths, stage)?;
+            WorkspaceResult::Ack
+        }
+        WorkspaceOperation::Pull { cwd } => {
+            crate::git_workflow::pull(&cwd)?;
+            WorkspaceResult::Ack
+        }
+        WorkspaceOperation::ListWorktrees { cwd } => WorkspaceResult::Worktrees {
+            worktrees: crate::git_workflow::list_worktrees(&cwd)?,
+        },
         WorkspaceOperation::GenerateCommitMessage {
             cwd,
             include_unstaged,
@@ -211,8 +239,12 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
             )?;
             WorkspaceResult::Ack
         }
-        WorkspaceOperation::CollectReviewDiff { cwd, source } => WorkspaceResult::ReviewDiff {
-            data: collect_review_diff(&cwd, source)?,
+        WorkspaceOperation::CollectReviewDiff {
+            cwd,
+            source,
+            ignore_whitespace,
+        } => WorkspaceResult::ReviewDiff {
+            data: collect_review_diff(&cwd, source, ignore_whitespace)?,
         },
     })
 }
@@ -306,15 +338,22 @@ struct DiffRange {
     to: String,
 }
 
-fn collect_review_diff(cwd: &Path, source: ReviewDiffSource) -> anyhow::Result<ReviewDiffData> {
+fn collect_review_diff(
+    cwd: &Path,
+    source: ReviewDiffSource,
+    ignore_whitespace: bool,
+) -> anyhow::Result<ReviewDiffData> {
     ensure_repository(cwd)?;
     let range = resolve_diff_range(cwd, source)?;
-    let numstat = diff_output(cwd, &range, &["--numstat"])?;
-    let hydrated = diff_output(cwd, &range, &["--unified=2147483647"])?;
+    let numstat = diff_output(cwd, &range, &["--numstat"], ignore_whitespace)?;
+    let hydrated = diff_output(cwd, &range, &["--unified=2147483647"], ignore_whitespace)?;
     let (patch, complete_context) = if hydrated.len() <= MAX_HYDRATED_PATCH_BYTES {
         (hydrated, true)
     } else {
-        (diff_output(cwd, &range, &["--unified=3"])?, false)
+        (
+            diff_output(cwd, &range, &["--unified=3"], ignore_whitespace)?,
+            false,
+        )
     };
     Ok(ReviewDiffData {
         source,
@@ -425,7 +464,12 @@ fn index_tree(cwd: &Path) -> anyhow::Result<String> {
     }
 }
 
-fn diff_output(cwd: &Path, range: &DiffRange, modes: &[&str]) -> anyhow::Result<String> {
+fn diff_output(
+    cwd: &Path,
+    range: &DiffRange,
+    modes: &[&str],
+    ignore_whitespace: bool,
+) -> anyhow::Result<String> {
     let output = crate::command_env::plain_command("git")
         .args([
             "-c",
@@ -435,6 +479,11 @@ fn diff_output(cwd: &Path, range: &DiffRange, modes: &[&str]) -> anyhow::Result<
             "--no-color",
         ])
         .args(modes)
+        .args(if ignore_whitespace {
+            &["--ignore-all-space"][..]
+        } else {
+            &[]
+        })
         .arg("--no-renames")
         .arg(&range.from)
         .arg(&range.to)
@@ -543,6 +592,7 @@ mod tests {
         let WorkspaceResult::ReviewDiff { data } = execute(WorkspaceOperation::CollectReviewDiff {
             cwd: root.to_path_buf(),
             source,
+            ignore_whitespace: false,
         })
         .unwrap() else {
             panic!("unexpected workspace response")
@@ -679,6 +729,50 @@ mod tests {
         assert_eq!(numstat_summary(&uncommitted.numstat), (2, 3, 0));
         assert_eq!(numstat_summary(&branch.numstat), (2, 4, 1));
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ignore_whitespace_filters_patch_and_counts_without_hiding_code_changes() {
+        let root = repository();
+        let filtered = |source| {
+            let WorkspaceResult::ReviewDiff { data } =
+                execute(WorkspaceOperation::CollectReviewDiff {
+                    cwd: root.clone(),
+                    source,
+                    ignore_whitespace: true,
+                })
+                .unwrap()
+            else {
+                panic!("unexpected workspace response")
+            };
+            data
+        };
+        fs::write(root.join("src/lib.rs"), "fn  baseline() { }\n").unwrap();
+        assert!(
+            !collect(&root, ReviewDiffSource::Uncommitted)
+                .patch
+                .is_empty()
+        );
+        for source in [ReviewDiffSource::Unstaged, ReviewDiffSource::Uncommitted] {
+            let data = filtered(source);
+            assert!(data.patch.is_empty());
+            assert!(data.numstat.is_empty());
+        }
+        git_ok(&root, &["add", "src/lib.rs"]);
+        assert!(filtered(ReviewDiffSource::Staged).patch.is_empty());
+        fs::write(
+            root.join("src/lib.rs"),
+            "fn  baseline() { }\nfn added() {}\n",
+        )
+        .unwrap();
+        let data = filtered(ReviewDiffSource::Uncommitted);
+        assert!(data.patch.contains("+fn added() {}"));
+        assert_eq!(numstat_summary(&data.numstat), (1, 1, 0));
+        assert_eq!(
+            fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+            "fn  baseline() { }\nfn added() {}\n"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

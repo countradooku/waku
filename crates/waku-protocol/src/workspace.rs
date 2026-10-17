@@ -5,7 +5,9 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::composer::{FileEntry, SlashCommand};
-use crate::git::{AgentInvocation, BranchSnapshot, CommitSnapshot, CreatedWorktree};
+use crate::git::{
+    AgentInvocation, BranchSnapshot, CommitSnapshot, CreatedWorktree, GitStatus, GitWorktree,
+};
 use crate::model::{Checkpoint, ProviderKind};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -111,6 +113,24 @@ pub enum WorkspaceOperation {
         #[ts(type = "string")]
         cwd: PathBuf,
     },
+    GitStatus {
+        #[ts(type = "string")]
+        cwd: PathBuf,
+    },
+    StageFiles {
+        #[ts(type = "string")]
+        cwd: PathBuf,
+        paths: Vec<String>,
+        stage: bool,
+    },
+    Pull {
+        #[ts(type = "string")]
+        cwd: PathBuf,
+    },
+    ListWorktrees {
+        #[ts(type = "string")]
+        cwd: PathBuf,
+    },
     GenerateCommitMessage {
         #[ts(type = "string")]
         cwd: PathBuf,
@@ -188,6 +208,8 @@ pub enum WorkspaceOperation {
         #[ts(type = "string")]
         cwd: PathBuf,
         source: ReviewDiffSource,
+        #[serde(default)]
+        ignore_whitespace: bool,
     },
 }
 
@@ -233,6 +255,12 @@ pub enum WorkspaceResult {
     },
     CommitSnapshot {
         snapshot: CommitSnapshot,
+    },
+    GitStatus {
+        status: GitStatus,
+    },
+    Worktrees {
+        worktrees: Vec<GitWorktree>,
     },
     CommitMessage {
         message: String,

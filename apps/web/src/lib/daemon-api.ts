@@ -453,11 +453,13 @@ export async function collectWorkspaceDiff(
   client: WakuClient,
   cwd: string,
   source: ReviewDiffSource = 'uncommitted',
+  ignoreWhitespace = false,
 ): Promise<ReviewDiffData> {
   const result = await workspaceRequest(client, {
     type: 'collectReviewDiff',
     cwd,
     source,
+    ignore_whitespace: ignoreWhitespace,
   })
   if (result.type !== 'reviewDiff') throw new Error('The daemon returned an unexpected diff response')
   return result.data

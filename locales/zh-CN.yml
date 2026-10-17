@@ -1,5 +1,15 @@
 _version: 1
 
+diff.ignore_whitespace: 忽略空白更改
+
+commit.pull: 拉取（仅快进）
+commit.pulling: 正在拉取…
+commit.pulled: 拉取成功
+commit.stage: 暂存
+commit.unstage: 取消暂存
+commit.worktrees: 工作树
+commit.locked: 已锁定
+
 menu.about: 关于 %{app}
 menu.check_for_updates: 检查更新…
 menu.settings: 设置…

@@ -32,6 +32,7 @@ enum CommitAction {
     Commit,
     CommitAndPush,
     Push,
+    Pull,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +61,7 @@ fn commit_pending_status_label(pending: CommitPending) -> String {
             tr!("commit.committing_and_pushing")
         }
         CommitPending::Git(CommitAction::Push) => tr!("commit.pushing"),
+        CommitPending::Git(CommitAction::Pull) => tr!("commit.pulling"),
     }
 }
 
@@ -76,6 +78,13 @@ pub(super) struct CommitDialogState {
     commit_focus: FocusHandle,
     commit_push_focus: FocusHandle,
     push_focus: FocusHandle,
+    pull_focus: FocusHandle,
+    file_focus: Vec<FocusHandle>,
+    previous_focus: FocusHandle,
+    next_focus: FocusHandle,
+    file_page: usize,
+    git_status: Option<waku_protocol::git::GitStatus>,
+    staging: bool,
 }
 
 impl CommitDialogState {
@@ -169,6 +178,13 @@ impl Waku {
             commit_focus: cx.focus_handle(),
             commit_push_focus: cx.focus_handle(),
             push_focus: cx.focus_handle(),
+            pull_focus: cx.focus_handle(),
+            file_focus: (0..5).map(|_| cx.focus_handle()).collect(),
+            previous_focus: cx.focus_handle(),
+            next_focus: cx.focus_handle(),
+            file_page: 0,
+            git_status: None,
+            staging: false,
         });
         // Like Waku's other deferred surfaces, the modal joins the dispatch
         // tree only after it has drawn. Focus it two frames later so typing
@@ -187,7 +203,18 @@ impl Waku {
                         cwd: workspace.clone(),
                     }) {
                         Ok(waku_client::WorkspaceResult::CommitSnapshot { snapshot }) => {
-                            Ok(snapshot)
+                            match workspace_client.request(
+                                waku_client::WorkspaceOperation::GitStatus { cwd: workspace },
+                            ) {
+                                Ok(waku_client::WorkspaceResult::GitStatus { status }) => {
+                                    Ok((snapshot, status))
+                                }
+                                Ok(_) => {
+                                    Err("the daemon returned an invalid Git status response"
+                                        .to_owned())
+                                }
+                                Err(error) => Err(error.to_string()),
+                            }
                         }
                         Ok(_) => Err("the daemon returned an invalid Git response".to_owned()),
                         Err(error) => Err(error.to_string()),
@@ -201,7 +228,10 @@ impl Waku {
                 };
                 dialog.snapshot_loading = false;
                 match result {
-                    Ok(snapshot) => dialog.snapshot = snapshot,
+                    Ok((snapshot, status)) => {
+                        dialog.snapshot = snapshot;
+                        dialog.git_status = Some(status);
+                    }
                     Err(error) => dialog.error = Some(error),
                 }
                 cx.notify();
@@ -211,6 +241,13 @@ impl Waku {
     }
 
     fn close_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .commit_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.staging)
+        {
+            return;
+        }
         if self.commit_dialog.take().is_none() {
             return;
         }
@@ -226,6 +263,9 @@ impl Waku {
         let Some(dialog) = self.commit_dialog.as_mut() else {
             return;
         };
+        if dialog.snapshot_loading {
+            return;
+        }
         dialog.include_unstaged = !dialog.include_unstaged;
         dialog.error = None;
         cx.notify();
@@ -246,6 +286,14 @@ impl Waku {
         let enabled = match action {
             CommitAction::Commit | CommitAction::CommitAndPush => dialog.can_commit(),
             CommitAction::Push => dialog.can_push(),
+            CommitAction::Pull => {
+                !dialog.snapshot_loading
+                    && dialog.git_status.as_ref().is_some_and(|status| {
+                        status.branch.is_some()
+                            && status.upstream.is_some()
+                            && status.files.is_empty()
+                    })
+            }
         };
         if !enabled {
             return;
@@ -258,7 +306,9 @@ impl Waku {
         let message = dialog.message.read(cx).content().trim().to_owned();
         let window_handle = window.window_handle();
 
-        if action != CommitAction::Push && message.is_empty() {
+        if matches!(action, CommitAction::Commit | CommitAction::CommitAndPush)
+            && message.is_empty()
+        {
             let Some(invocation) = invocation else {
                 if let Some(dialog) = self.commit_dialog.as_mut() {
                     dialog.error = Some(tr!("commit.agent_unavailable"));
@@ -427,6 +477,9 @@ impl Waku {
                         CommitAction::Push => waku_client::WorkspaceOperation::Push {
                             cwd: operation_workspace.clone(),
                         },
+                        CommitAction::Pull => waku_client::WorkspaceOperation::Pull {
+                            cwd: operation_workspace.clone(),
+                        },
                     };
                     let result = match workspace_client.request(operation) {
                         Ok(waku_client::WorkspaceResult::Ack) => Ok(()),
@@ -482,6 +535,7 @@ impl Waku {
                             CommitAction::Commit => tr!("commit.committed"),
                             CommitAction::CommitAndPush => tr!("commit.committed_and_pushed"),
                             CommitAction::Push => tr!("commit.pushed"),
+                            CommitAction::Pull => tr!("commit.pulled"),
                         });
                         dialog_was_open.then(|| waku.composer_focus(cx))
                     }
@@ -513,6 +567,101 @@ impl Waku {
         .detach();
     }
 
+    fn page_commit_files(&mut self, next: bool, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.commit_dialog {
+            let last = dialog
+                .git_status
+                .as_ref()
+                .map_or(0, |status| status.files.len().saturating_sub(1) / 5);
+            dialog.file_page = if next {
+                (dialog.file_page + 1).min(last)
+            } else {
+                dialog.file_page.saturating_sub(1)
+            };
+            cx.notify();
+        }
+    }
+
+    fn stage_commit_file(&mut self, path: String, stage: bool, cx: &mut Context<Self>) {
+        if self.commit_operation.is_some() {
+            return;
+        }
+        let Some(dialog) = &mut self.commit_dialog else {
+            return;
+        };
+        if dialog.snapshot_loading {
+            return;
+        }
+        let id = dialog.id;
+        let cwd = dialog.workspace.clone();
+        dialog.include_unstaged = false;
+        dialog.snapshot_loading = true;
+        dialog.staging = true;
+        dialog.error = None;
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let mutation =
+                        match workspace.request(waku_client::WorkspaceOperation::StageFiles {
+                            cwd: cwd.clone(),
+                            paths: vec![path],
+                            stage,
+                        }) {
+                            Ok(waku_client::WorkspaceResult::Ack) => Ok(()),
+                            Ok(_) => Err(anyhow::anyhow!("invalid Git staging response")),
+                            Err(error) => Err(error),
+                        };
+                    // Refresh even on error: Git may have updated the index before
+                    // a timeout or transport failure became visible to the client.
+                    let snapshot =
+                        workspace.request(waku_client::WorkspaceOperation::InspectCommit {
+                            cwd: cwd.clone(),
+                        });
+                    let status =
+                        workspace.request(waku_client::WorkspaceOperation::GitStatus { cwd });
+                    (mutation, snapshot, status)
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                let Some(dialog) = waku.commit_dialog.as_mut().filter(|dialog| dialog.id == id)
+                else {
+                    return;
+                };
+                dialog.staging = false;
+                dialog.snapshot_loading = false;
+                dialog.error = result.0.err().map(|error| error.to_string());
+                match result.1 {
+                    Ok(waku_client::WorkspaceResult::CommitSnapshot { snapshot }) => {
+                        dialog.snapshot = snapshot
+                    }
+                    _ => {
+                        dialog.snapshot_loading = true;
+                        dialog.error = Some(
+                            "Could not refresh Git status. Close and reopen this dialog.".into(),
+                        );
+                    }
+                }
+                match result.2 {
+                    Ok(waku_client::WorkspaceResult::GitStatus { status }) => {
+                        dialog.git_status = Some(status)
+                    }
+                    _ => {
+                        dialog.snapshot_loading = true;
+                        dialog.error = Some(
+                            "Could not refresh Git status. Close and reopen this dialog.".into(),
+                        );
+                    }
+                }
+                waku.invalidate_workspace_queries(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub(super) fn render_commit_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.commit_dialog.as_ref()?;
         let theme = Theme::current(cx);
@@ -524,10 +673,14 @@ impl Waku {
             .as_ref()
             .filter(|operation| operation.id == dialog.id)
             .map(|operation| operation.pending);
-        let include_enabled = pending.is_none();
+        let include_enabled = pending.is_none() && !dialog.snapshot_loading;
         let (additions, deletions) = dialog.displayed_counts();
         let can_commit = pending.is_none() && dialog.can_commit();
         let can_push = pending.is_none() && dialog.can_push();
+        let can_pull = include_enabled
+            && dialog.git_status.as_ref().is_some_and(|status| {
+                status.branch.is_some() && status.upstream.is_some() && status.files.is_empty()
+            });
         let pending_status = pending.map(commit_pending_status_label);
         let error = dialog.error.clone();
         let weak = cx.entity().downgrade();
@@ -672,7 +825,7 @@ impl Waku {
             &dialog.push_focus,
             "icons/cloud-upload.svg",
             if push_active {
-                pending_status.unwrap_or_else(|| tr!("commit.push"))
+                pending_status.clone().unwrap_or_else(|| tr!("commit.push"))
             } else {
                 tr!("commit.push")
             },
@@ -680,9 +833,135 @@ impl Waku {
             push_active,
             None,
             CommitAction::Push,
-            weak,
+            weak.clone(),
             &theme,
         );
+        let pull_active = pending == Some(CommitPending::Git(CommitAction::Pull));
+        let pull = render_commit_action_row(
+            "commit-dialog-pull",
+            &dialog.pull_focus,
+            "icons/git-branch.svg",
+            tr!(if pull_active {
+                "commit.pulling"
+            } else {
+                "commit.pull"
+            }),
+            can_pull,
+            pull_active,
+            None,
+            CommitAction::Pull,
+            weak.clone(),
+            &theme,
+        );
+        // A fixed page bounds both rendering and keyboard targets, even in a
+        // repository with thousands of changes. No Git work occurs here.
+        let files = dialog.git_status.as_ref().map(|status| &status.files);
+        let file_count = files.map_or(0, Vec::len);
+        let page_count = file_count.div_ceil(5).max(1);
+        let page = dialog.file_page.min(page_count - 1);
+        let file_rows = files
+            .into_iter()
+            .flatten()
+            .skip(page * 5)
+            .take(5)
+            .enumerate()
+            .map(|(index, file)| {
+                let staged = !matches!(file.index_status.as_str(), "." | "?");
+                let path = file.path.clone();
+                let key_path = path.clone();
+                let click_weak = weak.clone();
+                let key_weak = weak.clone();
+                div()
+                    .id(("commit-file", index))
+                    .track_focus(&dialog.file_focus[index])
+                    .when(include_enabled, |row| row.tab_index(0))
+                    .h(px(32.0))
+                    .px(px(16.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .text_size(sp(12.0))
+                    .text_color(theme.text)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .child(icon(
+                        if staged {
+                            "icons/check.svg"
+                        } else {
+                            "icons/plus.svg"
+                        },
+                        12.0,
+                        theme.text_secondary,
+                    ))
+                    .child(div().flex_1().min_w_0().truncate().child(file.path.clone()))
+                    .child(format!("{}{}", file.index_status, file.worktree_status))
+                    .child(tr!(if staged {
+                        "commit.unstage"
+                    } else {
+                        "commit.stage"
+                    }))
+                    .when(include_enabled, |row| {
+                        row.hover(|style| style.bg(theme.overlay))
+                            .on_click(move |_, _, cx| {
+                                let _ = click_weak.update(cx, |waku, cx| {
+                                    waku.stage_commit_file(path.clone(), !staged, cx)
+                                });
+                            })
+                            .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                                if !event.keystroke.modifiers.modified()
+                                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                {
+                                    let _ = key_weak.update(cx, |waku, cx| {
+                                        waku.stage_commit_file(key_path.clone(), !staged, cx)
+                                    });
+                                    cx.stop_propagation();
+                                }
+                            })
+                    })
+            })
+            .collect::<Vec<_>>();
+        let pager = (page_count > 1).then(|| {
+            let controls = [
+                (false, &dialog.previous_focus, "‹"),
+                (true, &dialog.next_focus, "›"),
+            ]
+            .into_iter()
+            .map(|(next, focus, label)| {
+                let click_weak = weak.clone();
+                let key_weak = weak.clone();
+                div()
+                    .id(if next {
+                        "commit-next-files"
+                    } else {
+                        "commit-previous-files"
+                    })
+                    .track_focus(focus)
+                    .tab_index(0)
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .child(label)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .on_click(move |_, _, cx| {
+                        let _ = click_weak.update(cx, |waku, cx| waku.page_commit_files(next, cx));
+                    })
+                    .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            let _ =
+                                key_weak.update(cx, |waku, cx| waku.page_commit_files(next, cx));
+                            cx.stop_propagation();
+                        }
+                    })
+            });
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(sp(12.0))
+                .text_color(theme.text)
+                .child(format!("{} / {}", page + 1, page_count))
+                .children(controls)
+        });
 
         let card = div()
             .id("commit-dialog-card")
@@ -728,6 +1007,8 @@ impl Waku {
                     .child(message),
             )
             .child(div().px(px(8.0)).child(include))
+            .children(file_rows)
+            .children(pager)
             .when_some(error, |card, error| {
                 card.child(
                     div()
@@ -748,7 +1029,8 @@ impl Waku {
                     .gap(px(2.0))
                     .child(commit)
                     .child(commit_and_push)
-                    .child(push),
+                    .child(push)
+                    .child(pull),
             );
 
         let scrim = if theme.is_dark {

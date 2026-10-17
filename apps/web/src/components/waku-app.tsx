@@ -1198,6 +1198,7 @@ export function WakuApp() {
       })}
 
       <CommitDialog
+        key={`${config?.address}:${activeSession?.id}`}
         open={commitDialogOpen}
         project={activeProject}
         returnFocus={commitDialogReturnFocus}

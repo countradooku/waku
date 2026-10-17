@@ -37,6 +37,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppSymbol } from "@/components/app-symbol";
 import { DiffView } from "@/components/diff-view";
+import { GitSurface } from "@/components/git-surface";
 import { liquidGlass } from "@/components/glass-surface";
 import { MonoFont, NativeTint, Radius } from "@/constants/theme";
 import { useTheme } from "@/hooks/use-theme";
@@ -56,7 +57,7 @@ import {
   type ReviewPatchFile,
 } from "@/lib/task-surfaces";
 
-export type TaskSurface = "terminal" | "files" | "review";
+export type TaskSurface = "terminal" | "files" | "review" | "git";
 
 type ReviewPatchSection = ReviewPatchFile & { data: ReviewPatchFile[] };
 
@@ -71,6 +72,11 @@ const SURFACE_DETAILS: Record<
     icon: Parameters<typeof AppSymbol>[0]["name"];
   }
 > = {
+  git: {
+    title: "Source control",
+    subtitle: "Stage, commit, and pull",
+    icon: { ios: "arrow.triangle.branch", android: "difference", web: "difference" },
+  },
   terminal: {
     title: "Terminal",
     subtitle: "Shell in this task’s workspace",
@@ -144,7 +150,11 @@ function SurfaceBody({
   session: AgentSession;
   project: Project | undefined;
 }) {
+  const daemon = useDaemon();
   const root = project ? sessionCwd(session, project) : null;
+  if (surface === "git") {
+    return <GitSurface key={`${daemon.activeProfile?.id}:${root}`} root={root} />;
+  }
   if (surface === "terminal") {
     return <TerminalSurface root={root} />;
   }
@@ -569,12 +579,16 @@ function ReviewSurface({
   const profileId = daemon.activeProfile?.id ?? "disconnected";
   const lastTurn = useMemo(() => latestReviewTurnSource(session), [session]);
   const [source, setSource] = useState<ReviewDiffSource>("uncommitted");
+  const [ignoreWhitespace, setIgnoreWhitespace] = useState(false);
 
   useEffect(() => setSource("uncommitted"), [session.id]);
 
   const diff = useQuery({
-    queryKey: daemonKeys.workspaceDiff(profileId, root ?? "none", source),
-    queryFn: () => collectWorkspaceDiff(daemon.client!, root!, source),
+    queryKey: [
+      ...daemonKeys.workspaceDiff(profileId, root ?? "none", source),
+      ignoreWhitespace,
+    ],
+    queryFn: () => collectWorkspaceDiff(daemon.client!, root!, source, ignoreWhitespace),
     enabled: Boolean(daemon.client && daemon.phase === "connected" && root),
     placeholderData: keepPreviousData,
   });
@@ -608,8 +622,13 @@ function ReviewSurface({
         title: reviewDiffSourceLabel(item.source),
         state: source === item.source ? ("on" as const) : ("off" as const),
       })),
+      {
+        id: "ignore-whitespace",
+        title: "Ignore whitespace",
+        state: ignoreWhitespace ? ("on" as const) : ("off" as const),
+      },
     ],
-    [lastTurn, source],
+    [lastTurn, source, ignoreWhitespace],
   );
 
   if (!root) {
@@ -642,6 +661,10 @@ function ReviewSurface({
         <MenuView
           actions={actions}
           onPressAction={({ nativeEvent }) => {
+            if (nativeEvent.event === "ignore-whitespace") {
+              setIgnoreWhitespace((value) => !value);
+              return;
+            }
             if (nativeEvent.event === "last-turn" && lastTurn) {
               setSource(lastTurn);
               return;

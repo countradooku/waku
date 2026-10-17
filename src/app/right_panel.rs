@@ -1856,6 +1856,7 @@ impl Waku {
             file_tree_width: self.right_panel_file_tree_width,
             file_editors: std::mem::take(&mut self.right_panel_file_editors),
             diff_source: self.right_panel_diff_source,
+            diff_ignore_whitespace: self.right_panel_diff_ignore_whitespace,
             diff_snapshot: self.right_panel_diff_snapshot.take(),
             diff_selected_file: self.right_panel_diff_selected_file.take(),
             diff_expanded_paths: std::mem::take(&mut self.right_panel_diff_expanded_paths),
@@ -1875,6 +1876,7 @@ impl Waku {
         self.right_panel_diff_generation = self.right_panel_diff_generation.wrapping_add(1);
         self.right_panel_diff_selection.clear();
         self.right_panel_diff_source = state.diff_source;
+        self.right_panel_diff_ignore_whitespace = state.diff_ignore_whitespace;
         self.right_panel_diff_snapshot = state.diff_snapshot;
         self.right_panel_diff_loading = false;
         self.right_panel_diff_error = None;
@@ -3542,6 +3544,7 @@ impl Waku {
     fn render_right_panel_diff_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
         let selected = self.right_panel_diff_source;
+        let ignore_whitespace = self.right_panel_diff_ignore_whitespace;
         let latest_turn = self.latest_review_turn_source();
         let source_label = self.review_diff_source_label(selected);
         let weak = cx.entity().downgrade();
@@ -3602,6 +3605,18 @@ impl Waku {
                         .selected(choice == selected),
                     );
                 }
+                items.push(MenuItem::Separator);
+                let weak = weak.clone();
+                items.push(
+                    MenuItem::new(tr!("diff.ignore_whitespace"), move |_, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.right_panel_diff_ignore_whitespace = !ignore_whitespace;
+                            this.right_panel_diff_snapshot = None;
+                            this.refresh_right_panel_diff(cx);
+                        });
+                    })
+                    .selected(ignore_whitespace),
+                );
                 items
             },
         );
@@ -4520,6 +4535,7 @@ impl Waku {
         self.right_panel_diff_generation = self.right_panel_diff_generation.wrapping_add(1);
         let generation = self.right_panel_diff_generation;
         let source = self.right_panel_diff_source;
+        let ignore_whitespace = self.right_panel_diff_ignore_whitespace;
         let had_snapshot = self.right_panel_diff_snapshot.is_some();
         let previous_directories = self
             .right_panel_diff_snapshot
@@ -4548,6 +4564,7 @@ impl Waku {
                             waku_client::WorkspaceOperation::CollectReviewDiff {
                                 cwd: project_path,
                                 source: crate::review_diff::wire_source(source),
+                                ignore_whitespace,
                             },
                         )? {
                             waku_client::WorkspaceResult::ReviewDiff { data } => {
@@ -4567,6 +4584,7 @@ impl Waku {
                 let still_current = waku.state.selected_session == Some(session_id)
                     && waku.right_panel_diff_generation == generation
                     && waku.right_panel_diff_source == source
+                    && waku.right_panel_diff_ignore_whitespace == ignore_whitespace
                     && waku
                         .selected_workspace_path()
                         .is_some_and(|path| path == project_path);

@@ -963,6 +963,7 @@ function ChangesPanel({
   const [files, setFiles] = useState<DiffSurfaceFile[]>([])
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [focusedDiffRow, setFocusedDiffRow] = useState<string | null>(null)
+  const [ignoreWhitespace, setIgnoreWhitespace] = useState(false)
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
   const [filter, setFilter] = useState('')
   const [treeWidth, setTreeWidth] = useState(() => readStoredWidth('waku.diffTreeWidth', 184, 140, 360))
@@ -972,8 +973,8 @@ function ChangesPanel({
   const latestTurnSource = latestReviewTurnSource(session)
   const sourceLabel = reviewDiffSourceLabel(diffSource, latestTurnSource, t)
   const diff = useQuery({
-    queryKey: daemonKeys.workspaceDiff(config?.address ?? 'disconnected', root ?? 'none', diffSource),
-    queryFn: () => collectWorkspaceDiff(requireClient(client), root!, diffSource),
+    queryKey: [...daemonKeys.workspaceDiff(config?.address ?? 'disconnected', root ?? 'none', diffSource), ignoreWhitespace],
+    queryFn: () => collectWorkspaceDiff(requireClient(client), root!, diffSource, ignoreWhitespace),
     enabled: phase === 'connected' && Boolean(client && config && root),
   })
   const reviewFiles = mergeReviewDiffFiles(files, diff.data?.numstat ?? '') as DiffSurfaceFile[]
@@ -1093,6 +1094,13 @@ function ChangesPanel({
       label: t('diff.source_branch'),
       selected: diffSource === 'branch',
       onSelect: () => selectSource('branch'),
+    },
+    {
+      id: 'ignore-whitespace',
+      label: t('diff.ignore_whitespace'),
+      separatorBefore: true,
+      selected: ignoreWhitespace,
+      onSelect: () => setIgnoreWhitespace((value) => !value),
     },
   ]
 
