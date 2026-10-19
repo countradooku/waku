@@ -312,6 +312,9 @@ mod tests {
             let path =
                 std::env::temp_dir().join(format!("waku-git-workflow-{}", uuid::Uuid::new_v4()));
             fs::create_dir(&path).unwrap();
+            // Git reports canonical paths; on macOS the temp dir is under the
+            // `/var` -> `/private/var` symlink, so compare against the real path.
+            let path = path.canonicalize().unwrap();
             git(&path, &["init", "-b", "main"]).unwrap();
             git(&path, &["config", "user.name", "Waku Tests"]).unwrap();
             git(&path, &["config", "user.email", "waku@example.com"]).unwrap();

@@ -619,7 +619,7 @@ Commands that are internal in T3 (`thread.stop`, `checkpoint.rollback.fail`, and
 - **Wire projection** (#57). Command output, dynamic-tool results and inline file-change bodies are omitted from `TurnItem`s on the stream, with `outputOmitted` and `outputIndicatesFailure` set. Dynamic values over the limit become a summary of at most 160 characters. Images inside tool output become `BlobRef`s, never data URLs. Full bodies come from `threads.turnItem`.
 - **Streaming text.**
   - `delta` items are live-only. They are neither sequenced nor persisted, and never replayed.
-  - The orchestrator coalesces provider deltas in 8–16 ms windows. It commits a `turnItemUpdated` snapshot of a streaming item at item completion and otherwise at most once per second.
+  - The orchestrator coalesces provider deltas in 8–16 ms windows. It commits a `turnItemUpdated` snapshot of a streaming item at item completion, on status changes, and otherwise at finished Markdown lines at most every 250 ms (RFC 0001 R12).
   - Each snapshot carries `streamRev`, the count of deltas folded into it.
   - A client applies a `delta` only when `delta.rev == streamRev + 1` and then increments `streamRev`. On a gap it ignores deltas until the next snapshot.
   - The client therefore never computes offsets in an encoding-specific unit.
