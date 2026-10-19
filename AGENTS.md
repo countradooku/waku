@@ -1,5 +1,34 @@
 # Waku development guidance
 
+## Fork workflow
+
+This repository is a fork of `egoist/waku`. Its goal is full feature parity with T3 Code, while beating it on CPU, memory and frame pacing. The plan is [docs/fork/PLAN.md](docs/fork/PLAN.md), and every unit of work is a GitHub issue.
+
+### Picking and scoping work
+- Work on one issue per session, in its own git worktree and branch.
+- Pick an open issue whose "Depends on" issues are all closed.
+- Read the issue's references before writing code: the audit sections in `docs/fork/audit/` and the RFCs in `docs/fork/rfcs/`.
+- Keep the PR to that issue. Put `Closes #N` in the body, and tick only the acceptance criteria you actually met.
+
+### Contracts and references
+- RFCs are the contract. If the code needs to diverge from an RFC, update the RFC in the same PR and say why.
+- For parity issues, T3 Code at the commit in `docs/fork/T3_PIN` is the behavioural reference. Port its semantics, not its code; this repository is GPL-3.0.
+  - Code copied from T3 (MIT) must keep its MIT notice.
+- The daemon speaks our own protocol (`waku-protocol`, RFC 0003). Do not add T3 wire-compatibility code.
+
+### Performance rules
+- Performance acceptance criteria must be shown with numbers. For `perf` issues, include before/after `perf-counters` or bench-harness output in the PR.
+- These are hard rules:
+  - nothing heavy on the UI thread;
+  - no continuously repainting animation;
+  - redraw only the entity that changed, never `window.refresh()` for local changes;
+  - large payloads stay off event streams;
+  - every cache has a bound.
+
+### Before opening a PR
+- Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and the tests for the crates you touched.
+- Run `bun run protocol:check` when wire types change.
+
 ## Development runtime
 
 - Assume `bun ./scripts/dev.ts` is already running and owns the current
