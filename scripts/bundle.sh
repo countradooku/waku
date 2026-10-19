@@ -189,6 +189,20 @@ plutil -replace CFBundleDisplayName -string "$app_name" "$contents/Info.plist"
 plutil -replace CFBundleExecutable -string "$app_name" "$contents/Info.plist"
 plutil -replace CFBundleIdentifier -string "$bundle_identifier" "$contents/Info.plist"
 plutil -replace CFBundleName -string "$app_name" "$contents/Info.plist"
+# Sparkle reads its feed and trusted key from Info.plist. Both come from the
+# same build environment build.rs compiles into the binary, so a bundle built
+# without them has no Sparkle configuration and the app disables updates.
+releases_url=$(printf '%s' "${WAKU_RELEASES_URL:-}" | tr -d '[:space:]')
+while [ "${releases_url%/}" != "$releases_url" ]; do
+  releases_url="${releases_url%/}"
+done
+sparkle_public_key=$(printf '%s' "${WAKU_SPARKLE_PUBLIC_ED_KEY:-}" | tr -d '[:space:]')
+if [ -n "$releases_url" ] && [ -n "$sparkle_public_key" ]; then
+  plutil -replace SUFeedURL -string "$releases_url/appcast.xml" "$contents/Info.plist"
+  plutil -replace SUPublicEDKey -string "$sparkle_public_key" "$contents/Info.plist"
+elif [ -n "$releases_url$sparkle_public_key" ]; then
+  echo "warning: set both WAKU_RELEASES_URL and WAKU_SPARKLE_PUBLIC_ED_KEY to enable in-app updates" >&2
+fi
 cp -R "$cached_helper_bundle" "$helper_bundle"
 # Finder info and resource forks on copied resources make codesign reject the
 # bundle as "detritus"; strip extended attributes before signing.

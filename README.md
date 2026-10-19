@@ -28,12 +28,15 @@ and keeps projects, sessions, transcripts on your machine.
 
 ## Install
 
-On macOS, [download the signed `.dmg`](https://waku.sh). It updates itself.
+Download builds from [GitHub Releases](https://github.com/countradooku/waku/releases).
+This fork's release host and update feeds are configured per
+[docs/fork/RELEASING.md](docs/fork/RELEASING.md); builds made without that
+configuration do not update themselves.
 
-On Linux:
+On Linux, once releases are published:
 
 ```sh
-curl -fsSL https://waku.sh/install.sh | sh
+curl -fsSL "$WAKU_RELEASES_URL/install.sh" | sh
 ```
 
 The script installs into `~/.local` without root. See
@@ -41,8 +44,8 @@ The script installs into `~/.local` without root. See
 uninstalling.
 
 On Windows, run `Waku-<version>-<arch>-Setup.exe` from the
-[latest release](https://github.com/egoist/waku/releases/latest). It installs
-per-user and updates itself. A portable `.zip` is published alongside it. See
+[latest release](https://github.com/countradooku/waku/releases/latest). It
+installs per-user. A portable `.zip` is published alongside it. See
 [docs/windows.md](docs/windows.md) for requirements and what is not available
 there yet.
 

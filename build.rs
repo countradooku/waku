@@ -1,12 +1,12 @@
 //! Platform build metadata.
 //!
-//! Every native updater verifies the public release key exported here. On
-//! Windows, Explorer, the taskbar, and the Programs list also read the icon
-//! and version block out of the PE image itself.
+//! Every native updater reads its release host and public key from the values
+//! exported here. On Windows, Explorer, the taskbar, and the Programs list
+//! also read the icon and version block out of the PE image itself.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    export_sparkle_public_key();
+    export_release_configuration();
 
     #[cfg(target_os = "windows")]
     {
@@ -17,29 +17,61 @@ fn main() {
     }
 }
 
-/// Republish `SUPublicEDKey` from the macOS Info.plist as a compile-time
-/// constant.
+/// Export where this build looks for updates and which key it trusts.
 ///
-/// The Linux and Windows updaters verify the same EdDSA signatures
-/// `generate_appcast` writes, against the same key. Reading the plist here
-/// rather than repeating the key in Rust means the platforms cannot drift
-/// into a feed the app rejects.
-fn export_sparkle_public_key() {
-    const PLIST: &str = "resources/Info.plist";
-    const KEY: &str = "<key>SUPublicEDKey</key>";
+/// Both values come from the build environment, so the source tree carries no
+/// release endpoint or key (see `docs/fork/RELEASING.md`):
+///
+/// - `WAKU_RELEASES_URL`: the release host's base URL, for example
+///   `https://releases.example.com`. Every feed lives directly under it
+///   (`appcast.xml`, `appcast-linux-<arch>.xml`, `appcast-windows-<arch>.xml`).
+/// - `WAKU_SPARKLE_PUBLIC_ED_KEY`: the base64 Ed25519 public key that
+///   Sparkle's `generate_keys -p` prints. `scripts/bundle.sh` writes the same
+///   value into the macOS Info.plist; Linux and Windows verify against this
+///   compiled-in copy.
+///
+/// When either is missing, both are exported empty and `Updater::init` leaves
+/// in-app updates disabled.
+fn export_release_configuration() {
+    const RELEASES_URL: &str = "WAKU_RELEASES_URL";
+    const PUBLIC_ED_KEY: &str = "WAKU_SPARKLE_PUBLIC_ED_KEY";
 
-    println!("cargo:rerun-if-changed={PLIST}");
+    println!("cargo:rerun-if-env-changed={RELEASES_URL}");
+    println!("cargo:rerun-if-env-changed={PUBLIC_ED_KEY}");
 
-    let plist = std::fs::read_to_string(PLIST).expect("read the app Info.plist");
-    let value = plist
-        .split_once(KEY)
-        .and_then(|(_, rest)| rest.split_once("<string>"))
-        .and_then(|(_, rest)| rest.split_once("</string>"))
-        .map(|(value, _)| value.trim())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| panic!("{PLIST} has no SUPublicEDKey"));
+    let read = |name: &str| std::env::var(name).unwrap_or_default().trim().to_owned();
+    let releases_url = read(RELEASES_URL).trim_end_matches('/').to_owned();
+    let public_key = read(PUBLIC_ED_KEY);
 
-    println!("cargo:rustc-env=WAKU_SPARKLE_PUBLIC_ED_KEY={value}");
+    // A value that is set but malformed is a release mistake rather than a
+    // choice to build without updates, so it fails the build instead of
+    // shipping an updater that can never succeed.
+    if !releases_url.is_empty()
+        && (!releases_url.starts_with("https://")
+            || releases_url.len() <= "https://".len()
+            || releases_url.chars().any(char::is_whitespace))
+    {
+        panic!("{RELEASES_URL} must be an https:// URL without whitespace, got {releases_url:?}");
+    }
+    if public_key.chars().any(char::is_whitespace) {
+        panic!("{PUBLIC_ED_KEY} must be the single base64 line `generate_keys -p` prints");
+    }
+
+    let configured = !releases_url.is_empty() && !public_key.is_empty();
+    if !configured && (!releases_url.is_empty() || !public_key.is_empty()) {
+        println!(
+            "cargo:warning=only one of {RELEASES_URL} and {PUBLIC_ED_KEY} is set; \
+             in-app updates are disabled in this build"
+        );
+    }
+    let (releases_url, public_key) = if configured {
+        (releases_url.as_str(), public_key.as_str())
+    } else {
+        ("", "")
+    };
+
+    println!("cargo:rustc-env={RELEASES_URL}={releases_url}");
+    println!("cargo:rustc-env={PUBLIC_ED_KEY}={public_key}");
 }
 
 #[cfg(target_os = "windows")]

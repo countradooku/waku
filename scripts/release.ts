@@ -11,7 +11,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { defaultDownloadUrlPrefix, generateAppcast } from "./appcast";
+import {
+  appPublicKey,
+  defaultDownloadUrlPrefix,
+  generateAppcast,
+  releasesBaseUrl,
+} from "./appcast";
 import { extractReleaseNotes } from "./changelog";
 
 const appName = "Waku";
@@ -30,8 +35,12 @@ Usage:
 
 The default run builds a signed, notarized DMG, packages the Sparkle update
 archive, regenerates the signed appcast (with binary deltas against recent
-releases), and uploads everything to Cloudflare R2 — the bucket behind
-https://releases.waku.sh. One-time setup lives in RELEASING.md.
+releases), and uploads everything to the Cloudflare R2 bucket served at
+WAKU_RELEASES_URL. One-time setup lives in docs/fork/RELEASING.md.
+
+Without WAKU_RELEASES_URL and WAKU_SPARKLE_PUBLIC_ED_KEY the app is built
+with in-app updates disabled and no appcast is generated; publishing
+requires both.
 
 Options:
   --local                       Build, notarize, and write the DMG + zip
@@ -56,10 +65,13 @@ Environment:
   WAKU_SIGNING_IDENTITY         Developer ID Application identity selector
   WAKU_ANALYTICS_ENDPOINT       analytics endpoint embedded at build time
   WAKU_ANALYTICS_WEBSITE_ID     analytics website ID embedded at build time
+  WAKU_RELEASES_URL             release host base URL, compiled into the app
+                                (e.g. https://releases.example.com)
+  WAKU_SPARKLE_PUBLIC_ED_KEY    Sparkle EdDSA public key, compiled into the app
   WAKU_R2_REMOTE                rclone remote name (default: r2)
-  WAKU_R2_BUCKET                R2 bucket name (default: waku-releases)
+  WAKU_R2_BUCKET                R2 bucket name (required to publish)
   WAKU_DOWNLOAD_URL_PREFIX      base URL served by the bucket
-                                (default: ${defaultDownloadUrlPrefix})
+                                (default: $WAKU_RELEASES_URL/)
   WAKU_HISTORY_COUNT            prior archives pulled for deltas (default: 15)
   WAKU_NO_HISTORY=1             skip pulling prior archives (no deltas)
   SPARKLE_BIN                   Sparkle tools dir (default: the bundle.sh cache
@@ -68,7 +80,7 @@ Environment:
 
 Before the first production release:
   xcrun notarytool store-credentials NOTARY   # notarization credentials
-  See RELEASING.md for the R2 bucket, rclone remote, and Sparkle key setup.
+  See docs/fork/RELEASING.md for the signing, Sparkle key, and hosting setup.
 `;
 
 const { values } = parseArgs({
@@ -153,13 +165,29 @@ const force = values.force ?? false;
 const publishing = !localOnly && !adhoc && !skipNotarize;
 
 const r2Remote = process.env.WAKU_R2_REMOTE ?? "r2";
-const r2Bucket = process.env.WAKU_R2_BUCKET ?? "waku-releases";
+const r2Bucket = process.env.WAKU_R2_BUCKET?.trim() ?? "";
 const r2Destination = `${r2Remote}:${r2Bucket}`;
 // A bucket-scoped R2 API token cannot create buckets, and rclone otherwise
 // checks/creates one before writing. The bucket must already exist.
 const rcloneFlags = ["--s3-no-check-bucket"];
-const downloadUrlPrefix =
-  process.env.WAKU_DOWNLOAD_URL_PREFIX ?? defaultDownloadUrlPrefix;
+// The release host and public key are compiled into the app (build.rs) and
+// written into its Info.plist (bundle.sh). Without both the build has
+// updates disabled, so there is no feed to generate; publishing needs both.
+const updatesConfigured = Boolean(
+  process.env.WAKU_RELEASES_URL?.trim() &&
+    process.env.WAKU_SPARKLE_PUBLIC_ED_KEY?.trim(),
+);
+if (publishing) {
+  releasesBaseUrl();
+  appPublicKey();
+  if (!r2Bucket) {
+    throw new Error(
+      "WAKU_R2_BUCKET is not set. Name the R2 bucket served at " +
+        "WAKU_RELEASES_URL (see docs/fork/RELEASING.md), or build with --local.",
+    );
+  }
+}
+const downloadUrlPrefix = updatesConfigured ? defaultDownloadUrlPrefix() : null;
 const historyCount = Number(process.env.WAKU_HISTORY_COUNT ?? "15");
 const skipHistory = process.env.WAKU_NO_HISTORY === "1";
 
@@ -244,8 +272,9 @@ if (publishing) {
     if (detail.includes("directory not found")) {
       throw new Error(
         `R2 bucket "${r2Bucket}" does not exist on remote "${r2Remote}". ` +
-          "Create it in the Cloudflare dashboard and attach the " +
-          "releases.waku.sh custom domain (see RELEASING.md), then re-run.",
+          "Create it in the Cloudflare dashboard and attach the custom " +
+          "domain WAKU_RELEASES_URL points at (see docs/fork/RELEASING.md), " +
+          "then re-run.",
       );
     }
     throw new Error(`Cannot reach ${r2Destination}: ${detail}`);
@@ -649,9 +678,16 @@ try {
       : `No "${version}" section in CHANGELOG.md — attached fallback notes.`,
   );
 
-  logStep("Generating the signed appcast");
-  await generateAppcast(updatesDirectory, downloadUrlPrefix);
-  await $`ditto ${join(updatesDirectory, "appcast.xml")} ${join(projectRoot, "dist", "appcast.xml")}`;
+  if (downloadUrlPrefix) {
+    logStep("Generating the signed appcast");
+    await generateAppcast(updatesDirectory, downloadUrlPrefix);
+    await $`ditto ${join(updatesDirectory, "appcast.xml")} ${join(projectRoot, "dist", "appcast.xml")}`;
+  } else {
+    console.warn(
+      "\nSkipping the appcast: WAKU_RELEASES_URL and WAKU_SPARKLE_PUBLIC_ED_KEY " +
+        "are not both set, so this build has in-app updates disabled.",
+    );
+  }
 
   if (publishing) {
     // Archives and the DMG are immutable once published → cache forever.
@@ -669,7 +705,7 @@ try {
     console.log(`\nWaku ${version} (build ${buildNumber}) is live:`);
     console.log(`  download : ${downloadUrlPrefix}${dmgName}`);
     console.log(`  update   : ${downloadUrlPrefix}${zipName}`);
-    console.log(`  feed     : ${downloadUrlPrefix}appcast.xml`);
+    console.log(`  feed     : ${releasesBaseUrl()}/appcast.xml`);
   }
 
   console.log(`\nDMG ready: ${outputPath}`);

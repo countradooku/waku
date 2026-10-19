@@ -1,7 +1,13 @@
 # Releasing Waku
 
+> **Fork setup:** the release host, signing certificates, Sparkle key and CI
+> secrets are the owner's own and are configured per
+> [docs/fork/RELEASING.md](docs/fork/RELEASING.md). Builds without that
+> configuration have in-app updates disabled.
+
 Waku ships signed in-app updates on macOS, Linux, and Windows. Releases live in
-a **Cloudflare R2** bucket served at **`https://releases.waku.sh`**. macOS uses
+a **Cloudflare R2** bucket (or GitHub Releases) served at
+**`$WAKU_RELEASES_URL`**, a build-time value. macOS uses
 [Sparkle](https://sparkle-project.org), including binary deltas when available;
 the native Linux and Windows updaters read architecture-specific feeds and
 verify artifacts with the same EdDSA key. One release workflow produces all
@@ -18,8 +24,10 @@ bun run release
   Windows. Available updates appear in the sidebar footer; **Check for
   Updates…** lives in the app menu, and **Automatic updates** lives in
   Settings → General.
-- Feed URL + public key: [`resources/Info.plist`](resources/Info.plist)
-  (`SUFeedURL`, `SUPublicEDKey`).
+- Feed URL + public key: the build-time `WAKU_RELEASES_URL` and
+  `WAKU_SPARKLE_PUBLIC_ED_KEY`. [`build.rs`](build.rs) compiles both in, and
+  [`scripts/bundle.sh`](scripts/bundle.sh) writes `SUFeedURL` and
+  `SUPublicEDKey` into the bundle's Info.plist only when both are set.
 - Framework embedding + pinned Sparkle version:
   [`scripts/bundle.sh`](scripts/bundle.sh) (bump `sparkle_version` and
   `sparkle_sha256` together; the distribution is cached under
@@ -45,11 +53,9 @@ The release runs on [Bun](https://bun.sh) and needs
 ### 1. Sparkle signing keys
 
 Updates are signed with an ed25519 key; the private half stays in the login
-keychain and the public half ships in Info.plist as `SUPublicEDKey`.
-
-**This Mac already has the key** — Waku signs with the same default-account
-Sparkle key as kero, and the matching public key is already in Info.plist.
-Nothing to do.
+keychain and the public half is the build-time `WAKU_SPARKLE_PUBLIC_ED_KEY`
+(written into Info.plist as `SUPublicEDKey`). Generating the fork's key pair
+is covered in [docs/fork/RELEASING.md](docs/fork/RELEASING.md#2-generate-the-sparkle-eddsa-key-pair).
 
 On a fresh machine, restore the key from the password-manager backup with the
 Sparkle tools (they land in `.waku-cache/sparkle/<version>/bin` after any
@@ -59,14 +65,14 @@ build, or download the release from
 ```sh
 ./bin/generate_keys -f sparkle_private_key.txt   # import the backed-up key
 ./bin/generate_keys -p                            # prints the public key — must
-                                                  # match SUPublicEDKey
+                                                  # match WAKU_SPARKLE_PUBLIC_ED_KEY
 ```
 
 > ⚠️ Lose the private key and existing installs can never update again. Keep
 > the backup current.
 
-To split Waku onto its own key later: `generate_keys --account waku`, put the
-new public key in Info.plist, and pass `--account waku` through to
+To split Waku onto its own key later: `generate_keys --account waku`, set the
+new public key as `WAKU_SPARKLE_PUBLIC_ED_KEY`, and pass `--account waku` through to
 `generate_appcast` in `scripts/appcast.ts`. Users on old builds only trust the
 old key, so do this on a release that still signs with the old key… in other
 words, don't do it casually.
@@ -87,21 +93,14 @@ xcrun notarytool store-credentials NOTARY \
 Override the environment with `--signing-identity`, or change the notary
 profile with `--notary-profile` / `WAKU_NOTARY_PROFILE`.
 
-### 3. Cloudflare R2 bucket + domain  ← **still to do once**
+### 3. Release hosting
 
-1. Create the bucket **`waku-releases`** (Cloudflare dashboard → R2 → Create
-   bucket). The release script will not create it — a bucket-scoped API token
-   can't.
-2. Attach the custom domain **`releases.waku.sh`** to the bucket (bucket →
-   Settings → Custom Domains). This serves objects publicly at
-   `https://releases.waku.sh/<file>`.
-3. Make sure the R2 API token behind the `r2` rclone remote covers this bucket
-   (R2 → Manage API Tokens → Object Read & Write). The remote already exists
-   for kero; if `rclone lsf r2:waku-releases --s3-no-check-bucket` returns
-   *AccessDenied* after the bucket exists, extend the token's bucket list.
-
-The rclone remote itself (`~/.config/rclone/rclone.conf`, type S3, provider
-Cloudflare, `no_check_bucket = true`) is shared with kero and needs no change.
+Create the R2 bucket and its custom domain (or choose GitHub Releases) as
+described in [docs/fork/RELEASING.md](docs/fork/RELEASING.md#1-choose-where-releases-live),
+then export `WAKU_RELEASES_URL` and `WAKU_R2_BUCKET`. The release script will
+not create the bucket — a bucket-scoped API token can't. The rclone remote
+(`~/.config/rclone/rclone.conf`, default name `r2`, type S3, provider
+Cloudflare, `no_check_bucket = true`) must hold a token that covers it.
 
 ---
 
@@ -129,7 +128,7 @@ section as release notes, regenerates the signed `appcast.xml`, and uploads
 everything with immutable cache headers (the appcast itself stays
 `max-age=300`). When it finishes:
 
-- **Download link**: `https://releases.waku.sh/Waku-<version>.dmg`
+- **Download link**: `$WAKU_RELEASES_URL/Waku-<version>.dmg`
 - **In-app updates**: served from the same origin via the appcast.
 
 Test by keeping an older build around, launching it, and choosing
@@ -193,15 +192,16 @@ rolls back if the replacement cannot open its main window.
 
 - **One feed per architecture.** A Sparkle appcast cannot say which binary an
   item is for, and the client picks its feed at compile time.
-- **Same key as macOS.** `build.rs` reads `SUPublicEDKey` out of
-  `resources/Info.plist` and compiles it in, so the three platforms cannot
-  drift onto different keys.
+- **Same key as macOS.** `build.rs` compiles in `WAKU_SPARKLE_PUBLIC_ED_KEY`,
+  the same value `scripts/bundle.sh` writes into the macOS Info.plist, so the
+  three platforms cannot drift onto different keys. Feeds are read from
+  `WAKU_RELEASES_URL`, and enclosures must stay on that host.
 - [`scripts/appcast-windows.ts`](scripts/appcast-windows.ts) and
   [`scripts/appcast-linux.ts`](scripts/appcast-linux.ts) sign the feeds in the
   draft-release job — the only one holding all native artifacts. They sign
   with Node's Ed25519 over the same `SPARKLE_PRIVATE_KEY`, and refuse to run
-  when the key does not derive `SUPublicEDKey` (signing with the wrong key
-  ships a feed the app rejects).
+  when the key does not derive `WAKU_SPARKLE_PUBLIC_ED_KEY` (signing with the
+  wrong key ships a feed the app rejects).
 - The step pulls the live feeds down first and merges, so previously published
   releases keep their entries.
 
@@ -219,30 +219,18 @@ assets — including every signed update feed — to R2.
 `latest-linux.txt`, and `latest-windows.txt` are the bucket's mutable pointers
 and upload with a short cache lifetime; everything else is versioned and
 cached forever. Linux users install from that bucket via
-[`website/public/install.sh`](website/public/install.sh), served at
-`https://waku.sh/install.sh` — see [docs/linux.md](docs/linux.md).
+[`website/public/install.sh`](website/public/install.sh), which the draft
+release also carries as `install.sh` with the release host filled in — see
+[docs/linux.md](docs/linux.md).
 
 Publishing that GitHub release (or running **Sync release** from Actions)
-uploads the assets to the `waku-releases` R2 bucket. Configure these repository
-secrets first:
+uploads the assets to the R2 bucket named by `R2_BUCKET`.
 
-| Secret | Purpose |
-| --- | --- |
-| `WAKU_ANALYTICS_ENDPOINT` | embedded in every desktop CI build |
-| `WAKU_ANALYTICS_WEBSITE_ID` | embedded in every desktop CI build |
-| `WAKU_SIGNING_IDENTITY` | Developer ID identity selector |
-| `APPLE_CERTIFICATE` | base64-encoded Developer ID Application `.p12` |
-| `APPLE_CERTIFICATE_PASSWORD` | password for that `.p12` |
-| `APPLE_ID` | Apple ID used by `notarytool` |
-| `APPLE_APP_SPECIFIC_PASSWORD` | app-specific password for that Apple ID |
-| `APPLE_TEAM_ID` | Developer Team ID |
-| `SPARKLE_PRIVATE_KEY` | EdDSA private key for `generate_appcast` |
-| `WINDOWS_CERTIFICATE` | optional; base64-encoded Authenticode `.pfx` |
-| `WINDOWS_CERTIFICATE_PASSWORD` | optional; password for that `.pfx` |
-| `R2_ACCOUNT_ID` | Cloudflare account id for the R2 API |
-| `R2_ACCESS_KEY_ID` | R2 Object Read & Write token |
-| `R2_SECRET_ACCESS_KEY` | matching secret |
-| `R2_BUCKET` | optional; defaults to `waku-releases` |
+The repository variables (`WAKU_RELEASES_URL`, `WAKU_SPARKLE_PUBLIC_ED_KEY`,
+optional `WAKU_RELEASE_HOSTING`) and secrets (Apple signing and notarization,
+`SPARKLE_PRIVATE_KEY`, optional Windows certificate, `R2_*`, analytics) are
+listed, with where each value comes from, in
+[docs/fork/RELEASING.md](docs/fork/RELEASING.md#5-configure-github).
 
 ### Options
 
@@ -253,9 +241,11 @@ secrets first:
 | `--adhoc`, `--skip-notarize` | — | local test builds (imply `--local`) |
 | `--skip-build` | — | reuse existing release binaries |
 | `--build-number <n>` / `WAKU_BUILD_NUMBER` | derived | `CFBundleVersion` override |
+| `WAKU_RELEASES_URL` | — | release host base URL; required to publish |
+| `WAKU_SPARKLE_PUBLIC_ED_KEY` | — | public update key; required to publish |
 | `WAKU_R2_REMOTE` | `r2` | rclone remote name |
-| `WAKU_R2_BUCKET` | `waku-releases` | R2 bucket |
-| `WAKU_DOWNLOAD_URL_PREFIX` | `https://releases.waku.sh/` | base URL in the appcast |
+| `WAKU_R2_BUCKET` | — | R2 bucket; required to publish |
+| `WAKU_DOWNLOAD_URL_PREFIX` | `$WAKU_RELEASES_URL/` | base URL in the appcast |
 | `WAKU_HISTORY_COUNT` | `15` | recent archives pulled for delta generation |
 | `WAKU_NO_HISTORY=1` | — | skip pulling old archives (full updates only) |
 | `SPARKLE_BIN` | the `.waku-cache` copy | Sparkle tools directory |

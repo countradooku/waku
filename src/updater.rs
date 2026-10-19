@@ -44,6 +44,210 @@ pub enum UpdaterEvent {
     QuitAndInstall,
 }
 
+/// Where this build looks for updates and which key it trusts.
+///
+/// `build.rs` compiles both in from `WAKU_RELEASES_URL` and
+/// `WAKU_SPARKLE_PUBLIC_ED_KEY`. The source tree carries neither, so a build
+/// made without them has no updater at all instead of one that falls back to
+/// somebody else's feed. See `docs/fork/RELEASING.md`.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code)
+)]
+mod release {
+    use base64::Engine as _;
+
+    const RELEASES_URL: &str = env!("WAKU_RELEASES_URL");
+    const PUBLIC_ED_KEY: &str = env!("WAKU_SPARKLE_PUBLIC_ED_KEY");
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(super) struct ReleaseConfig {
+        /// `https://host[:port][/path]` with no trailing slash.
+        base: String,
+        host: String,
+        port: Option<u16>,
+        public_key_base64: String,
+        public_key: [u8; 32],
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) enum ConfigError {
+        Missing,
+        InvalidUrl,
+        InvalidKey,
+    }
+
+    impl std::fmt::Display for ConfigError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(match self {
+                Self::Missing => "this build has no WAKU_RELEASES_URL / WAKU_SPARKLE_PUBLIC_ED_KEY",
+                Self::InvalidUrl => "WAKU_RELEASES_URL is not a plain https:// URL",
+                Self::InvalidKey => "WAKU_SPARKLE_PUBLIC_ED_KEY is not a base64 Ed25519 key",
+            })
+        }
+    }
+
+    impl ReleaseConfig {
+        /// The compiled-in configuration, or `None` with one line on stderr
+        /// saying why updates are off.
+        pub(super) fn embedded() -> Option<Self> {
+            match Self::parse(RELEASES_URL, PUBLIC_ED_KEY) {
+                Ok(config) => Some(config),
+                Err(error) => {
+                    eprintln!("Waku updater: {error}; in-app updates are disabled");
+                    None
+                }
+            }
+        }
+
+        pub(super) fn parse(releases_url: &str, public_key: &str) -> Result<Self, ConfigError> {
+            let releases_url = releases_url.trim().trim_end_matches('/');
+            let public_key_base64 = public_key.trim();
+            if releases_url.is_empty() || public_key_base64.is_empty() {
+                return Err(ConfigError::Missing);
+            }
+
+            let url = url::Url::parse(releases_url).map_err(|_| ConfigError::InvalidUrl)?;
+            let host = url
+                .host_str()
+                .filter(|host| !host.is_empty())
+                .ok_or(ConfigError::InvalidUrl)?;
+            if url.scheme() != "https"
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(ConfigError::InvalidUrl);
+            }
+
+            let public_key = base64::engine::general_purpose::STANDARD
+                .decode(public_key_base64)
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                .ok_or(ConfigError::InvalidKey)?;
+
+            Ok(Self {
+                base: releases_url.to_owned(),
+                host: host.to_owned(),
+                port: url.port_or_known_default(),
+                public_key_base64: public_key_base64.to_owned(),
+                public_key,
+            })
+        }
+
+        /// A feed published directly under the release host.
+        pub(super) fn feed_url(&self, file_name: &str) -> String {
+            format!("{}/{file_name}", self.base)
+        }
+
+        #[cfg_attr(target_os = "macos", allow(dead_code))]
+        pub(super) fn public_key(&self) -> &[u8; 32] {
+            &self.public_key
+        }
+
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+        pub(super) fn public_key_base64(&self) -> &str {
+            &self.public_key_base64
+        }
+
+        /// A signed feed can still only send the updater to the release host
+        /// this build was configured with, over https.
+        #[cfg_attr(target_os = "macos", allow(dead_code))]
+        pub(super) fn validate_download_url(&self, value: &str) -> anyhow::Result<()> {
+            let url = url::Url::parse(value)?;
+            anyhow::ensure!(
+                url.scheme() == "https"
+                    && url.host_str() == Some(self.host.as_str())
+                    && url.port_or_known_default() == self.port
+                    && url.username().is_empty()
+                    && url.password().is_none(),
+                "the update feed points outside {}",
+                self.host
+            );
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const KEY: &str = "7gZ3dbx+MPQD4vc2dk7olL9QU66JIjpJ1iqNNafU2lQ=";
+
+        #[test]
+        fn an_unconfigured_build_has_no_release_configuration() {
+            assert_eq!(ReleaseConfig::parse("", ""), Err(ConfigError::Missing));
+            assert_eq!(
+                ReleaseConfig::parse("https://releases.example.test", ""),
+                Err(ConfigError::Missing)
+            );
+            assert_eq!(ReleaseConfig::parse("", KEY), Err(ConfigError::Missing));
+        }
+
+        #[test]
+        fn feeds_live_directly_under_the_configured_base() {
+            let config = ReleaseConfig::parse(" https://releases.example.test/ ", KEY).unwrap();
+            assert_eq!(
+                config.feed_url("appcast-linux-x86_64.xml"),
+                "https://releases.example.test/appcast-linux-x86_64.xml"
+            );
+
+            let nested = ReleaseConfig::parse(
+                "https://example.test/owner/repo/releases/latest/download",
+                KEY,
+            )
+            .unwrap();
+            assert_eq!(
+                nested.feed_url("appcast.xml"),
+                "https://example.test/owner/repo/releases/latest/download/appcast.xml"
+            );
+        }
+
+        #[test]
+        fn malformed_values_are_rejected() {
+            for url in [
+                "http://releases.example.test",
+                "releases.example.test",
+                "https://user:secret@releases.example.test",
+                "https://releases.example.test/?feed=1",
+            ] {
+                assert_eq!(
+                    ReleaseConfig::parse(url, KEY),
+                    Err(ConfigError::InvalidUrl),
+                    "{url}"
+                );
+            }
+            for key in ["not base64!", "c2hvcnQ="] {
+                assert_eq!(
+                    ReleaseConfig::parse("https://releases.example.test", key),
+                    Err(ConfigError::InvalidKey),
+                    "{key}"
+                );
+            }
+        }
+
+        #[test]
+        fn downloads_must_stay_on_the_configured_host() {
+            let config = ReleaseConfig::parse("https://releases.example.test", KEY).unwrap();
+            assert!(
+                config
+                    .validate_download_url("https://releases.example.test/waku-1.0.0.tar.gz")
+                    .is_ok()
+            );
+            for url in [
+                "http://releases.example.test/waku-1.0.0.tar.gz",
+                "https://releases.example.test:8443/waku-1.0.0.tar.gz",
+                "https://evil.example.test/waku-1.0.0.tar.gz",
+                "https://user@releases.example.test/waku-1.0.0.tar.gz",
+                "not a url",
+            ] {
+                assert!(config.validate_download_url(url).is_err(), "{url}");
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::cell::{Cell, RefCell};
@@ -582,8 +786,10 @@ mod macos {
 
     impl Updater {
         /// Load Sparkle and start its updater. Returns `None` when this build
-        /// cannot update itself: debug builds unless forced, and binaries
-        /// running outside a bundle with an embedded framework.
+        /// cannot update itself: debug builds unless forced, builds without a
+        /// release configuration, bundles whose Sparkle keys disagree with
+        /// it, and binaries running outside a bundle with an embedded
+        /// framework.
         pub fn init() -> Option<Self> {
             let preview = cfg!(debug_assertions)
                 && std::env::var_os("WAKU_PREVIEW_UPDATE").is_some_and(|value| value == "1");
@@ -592,7 +798,33 @@ mod macos {
                 return None;
             }
 
+            // Decide before Sparkle is ever loaded: an unconfigured build has
+            // no feed of its own and must never start Sparkle. Preview mode
+            // only fakes the sidebar result, so it still works without one.
+            let Some(release) = super::release::ReleaseConfig::embedded() else {
+                return preview.then(Self::preview);
+            };
+
             let mtm = MainThreadMarker::new()?;
+            let bundle_class = AnyClass::get(c"NSBundle")?;
+            let main_bundle: *mut AnyObject = unsafe { msg_send![bundle_class, mainBundle] };
+            let main_bundle = unsafe { main_bundle.as_ref() }?;
+            // Sparkle reads its feed and key from Info.plist, which
+            // `scripts/bundle.sh` writes from the same environment as the
+            // compiled-in values. A bundle that disagrees (or has neither)
+            // would update from somewhere this binary was not built for.
+            if info_string(main_bundle, "SUFeedURL").as_deref()
+                != Some(release.feed_url("appcast.xml").as_str())
+                || info_string(main_bundle, "SUPublicEDKey").as_deref()
+                    != Some(release.public_key_base64())
+            {
+                eprintln!(
+                    "Waku updater: Info.plist SUFeedURL/SUPublicEDKey do not match this \
+                     build's release configuration; in-app updates are disabled"
+                );
+                return None;
+            }
+
             let library = sparkle_library_path()?;
             let library_c =
                 std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(library.as_os_str()))
@@ -611,13 +843,8 @@ mod macos {
                 return None;
             }
 
-            let bundle_class = AnyClass::get(c"NSBundle")?;
             let updater_class = AnyClass::get(c"SPUUpdater")?;
             let standard_driver_class = AnyClass::get(c"SPUStandardUserDriver")?;
-            let main_bundle: *mut AnyObject = unsafe { msg_send![bundle_class, mainBundle] };
-            if main_bundle.is_null() {
-                return None;
-            }
 
             let standard_driver = unsafe {
                 let allocated: *mut AnyObject = msg_send![standard_driver_class, alloc];
@@ -737,7 +964,7 @@ mod macos {
             }
         }
 
-        #[cfg(test)]
+        /// The sidebar-only preview without Sparkle behind it.
         fn preview() -> Self {
             let status = Rc::new(Cell::new(UpdateStatus::Available));
             let (preview_events, events) = smol::channel::unbounded();
@@ -764,6 +991,14 @@ mod macos {
         unsafe { description.as_ref() }
             .map(ToString::to_string)
             .unwrap_or_else(|| "Unknown updater error".to_owned())
+    }
+
+    /// A string value from the bundle's Info.plist.
+    fn info_string(bundle: &AnyObject, key: &str) -> Option<String> {
+        let key = NSString::from_str(key);
+        let value: *mut AnyObject = unsafe { msg_send![bundle, objectForInfoDictionaryKey: &*key] };
+        let value = unsafe { value.as_ref() }?;
+        Some(value.downcast_ref::<NSString>()?.to_string())
     }
 
     /// The embedded framework's dylib next to the running executable
@@ -915,12 +1150,12 @@ mod feed {
     <item>
       <title>0.1.4</title>
       <sparkle:shortVersionString>0.1.4</sparkle:shortVersionString>
-      <enclosure url="https://releases.waku.sh/Waku-0.1.4-x86_64-Setup.exe" length="1024" type="application/octet-stream" sparkle:edSignature="oldsig" />
+      <enclosure url="https://releases.example.test/Waku-0.1.4-x86_64-Setup.exe" length="1024" type="application/octet-stream" sparkle:edSignature="oldsig" />
     </item>
     <item>
       <title>0.2.0</title>
       <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
-      <enclosure url="https://releases.waku.sh/Waku-0.2.0-x86_64-Setup.exe" length="2048" type="application/octet-stream" sparkle:edSignature="newsig" />
+      <enclosure url="https://releases.example.test/Waku-0.2.0-x86_64-Setup.exe" length="2048" type="application/octet-stream" sparkle:edSignature="newsig" />
     </item>
   </channel>
 </rss>"#;
@@ -969,8 +1204,9 @@ mod feed {
 ///
 /// There is no Sparkle to hand the work to, so this module runs the same
 /// contract itself: read a Sparkle-format appcast, compare versions, download
-/// the installer, verify its EdDSA signature against the very key
-/// `SUPublicEDKey` names, and hand it to Inno Setup in silent mode. The
+/// the installer, verify its EdDSA signature against the build's
+/// `WAKU_SPARKLE_PUBLIC_ED_KEY` (the same key macOS writes into
+/// `SUPublicEDKey`), and hand it to Inno Setup in silent mode. The
 /// installer closes the running app, replaces it, and starts it again.
 ///
 /// Nothing here touches the UI thread. Checks and downloads run on their own
@@ -988,19 +1224,17 @@ mod windows {
     use ed25519_dalek::{Signature, VerifyingKey};
 
     use super::feed::{self, AppcastItem};
+    use super::release::ReleaseConfig;
     use super::{UpdateStatus, UpdaterEvent};
 
-    /// One feed per architecture. A Sparkle appcast has no way to say which
-    /// binary an item is for, and guessing from the enclosure filename would
-    /// be a contract hiding in a string.
+    /// One feed per architecture, published directly under the build's
+    /// `WAKU_RELEASES_URL`. A Sparkle appcast has no way to say which binary
+    /// an item is for, and guessing from the enclosure filename would be a
+    /// contract hiding in a string.
     #[cfg(target_arch = "aarch64")]
-    const FEED_URL: &str = "https://releases.waku.sh/appcast-windows-aarch64.xml";
+    const FEED_NAME: &str = "appcast-windows-aarch64.xml";
     #[cfg(not(target_arch = "aarch64"))]
-    const FEED_URL: &str = "https://releases.waku.sh/appcast-windows-x86_64.xml";
-
-    /// Read out of `resources/Info.plist` by the build script, so macOS and
-    /// Windows cannot end up trusting different keys.
-    const PUBLIC_ED_KEY: &str = env!("WAKU_SPARKLE_PUBLIC_ED_KEY");
+    const FEED_NAME: &str = "appcast-windows-x86_64.xml";
 
     /// Windows 10 1803 and later ship curl in System32. The absolute path
     /// keeps a shadowed `curl` on `PATH` out of the update path; the download
@@ -1017,6 +1251,8 @@ mod windows {
     }
 
     pub struct Updater {
+        release: ReleaseConfig,
+        key: VerifyingKey,
         status: Arc<Mutex<UpdateStatus>>,
         staged: Arc<Mutex<Option<StagedUpdate>>>,
         /// A check is running. Separate from `status` because a silent check
@@ -1041,15 +1277,20 @@ mod windows {
             if cfg!(debug_assertions) && !forced {
                 return None;
             }
-            if verifying_key().is_none() {
-                eprintln!("Waku updater: SUPublicEDKey is not a valid ed25519 key");
+            // No configured release host or key means no updater, never a
+            // fallback feed.
+            let release = ReleaseConfig::embedded()?;
+            let Some(key) = verifying_key(&release) else {
+                eprintln!("Waku updater: WAKU_SPARKLE_PUBLIC_ED_KEY is not a valid ed25519 key");
                 return None;
-            }
+            };
 
             let preference_path = preference_path()?;
             let automatic = Arc::new(AtomicBool::new(read_automatic_preference(&preference_path)));
             let (events, receiver) = smol::channel::unbounded();
             let updater = Self {
+                release,
+                key,
                 status: Arc::new(Mutex::new(UpdateStatus::Idle)),
                 staged: Arc::new(Mutex::new(None)),
                 checking: Arc::new(AtomicBool::new(false)),
@@ -1117,10 +1358,12 @@ mod windows {
                 let _ = events.try_send(UpdaterEvent::StatusChanged(next));
             };
             let events = self.events.clone();
+            let release = self.release.clone();
+            let key = self.key;
             let spawned = std::thread::Builder::new()
                 .name("waku-updater-check".into())
                 .spawn(move || {
-                    let outcome = fetch_and_stage();
+                    let outcome = fetch_and_stage(&release, &key);
                     // Read once the work is done, so a request that arrived
                     // meanwhile is honored.
                     let report = explicit_check.load(Ordering::Relaxed);
@@ -1237,19 +1480,22 @@ mod windows {
     }
 
     /// Resolve the feed, and stage the installer when it names a newer build.
-    fn fetch_and_stage() -> anyhow::Result<Option<PathBuf>> {
-        let document = http_get(FEED_URL)?;
+    fn fetch_and_stage(
+        release: &ReleaseConfig,
+        key: &VerifyingKey,
+    ) -> anyhow::Result<Option<PathBuf>> {
+        let document = http_get(&release.feed_url(FEED_NAME))?;
         let Some(item) = feed::newest_item(&document) else {
             anyhow::bail!("the update feed has no signed release");
         };
         if !feed::is_newer(&item.version, env!("CARGO_PKG_VERSION")) {
             return Ok(None);
         }
-        Ok(Some(download_and_verify(&item)?))
+        release.validate_download_url(&item.url)?;
+        Ok(Some(download_and_verify(&item, key)?))
     }
 
-    fn download_and_verify(item: &AppcastItem) -> anyhow::Result<PathBuf> {
-        let key = verifying_key().ok_or_else(|| anyhow::anyhow!("SUPublicEDKey is unusable"))?;
+    fn download_and_verify(item: &AppcastItem, key: &VerifyingKey) -> anyhow::Result<PathBuf> {
         let signature = base64::engine::general_purpose::STANDARD
             .decode(item.signature.trim())
             .ok()
@@ -1281,11 +1527,8 @@ mod windows {
         Ok(installer)
     }
 
-    fn verifying_key() -> Option<VerifyingKey> {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(PUBLIC_ED_KEY.trim())
-            .ok()?;
-        VerifyingKey::from_bytes(&<[u8; 32]>::try_from(bytes).ok()?).ok()
+    fn verifying_key(release: &ReleaseConfig) -> Option<VerifyingKey> {
+        VerifyingKey::from_bytes(release.public_key()).ok()
     }
 
     fn http_get(url: &str) -> anyhow::Result<String> {
@@ -1384,8 +1627,13 @@ mod windows {
         use super::*;
 
         #[test]
-        fn the_embedded_public_key_is_a_usable_ed25519_key() {
-            assert!(verifying_key().is_some());
+        fn a_configured_public_key_becomes_a_usable_ed25519_key() {
+            let release = ReleaseConfig::parse(
+                "https://releases.example.test",
+                "7gZ3dbx+MPQD4vc2dk7olL9QU66JIjpJ1iqNNafU2lQ=",
+            )
+            .expect("valid release configuration");
+            assert!(verifying_key(&release).is_some());
         }
 
         /// The interop the whole update path rests on: macOS signs with

@@ -12,64 +12,39 @@
 //
 // macOS signs through Sparkle's `sign_update`; there is no such tool here, so
 // the same EdDSA key is used through Node's Ed25519 primitives. The derived
-// public key is checked against the app's SUPublicEDKey first — an unsigned
-// or wrongly-signed feed is a dead update path, and it must fail loudly.
+// public key is checked against WAKU_SPARKLE_PUBLIC_ED_KEY (the key compiled
+// into the app) first — an unsigned or wrongly-signed feed is a dead update
+// path, and it must fail loudly.
 //
 // Env:
 //   SPARKLE_PRIVATE_KEY        EdDSA private key, base64 (required)
+//   WAKU_SPARKLE_PUBLIC_ED_KEY public key the app trusts (required)
+//   WAKU_RELEASES_URL          release host base URL (required unless
+//                              WAKU_DOWNLOAD_URL_PREFIX is set)
 //   WAKU_DOWNLOAD_URL_PREFIX   base URL for enclosure links
-import { createPrivateKey, sign } from "node:crypto";
+//                              (default: $WAKU_RELEASES_URL/)
+import { sign } from "node:crypto";
 import { readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
-import { defaultDownloadUrlPrefix } from "./appcast.ts";
+import {
+  assertSigningKeyMatches,
+  defaultDownloadUrlPrefix,
+  privateKeyFromSparkleSecret,
+} from "./appcast.ts";
 
-const projectRoot = resolve(import.meta.dir, "..");
+export {
+  appPublicKey,
+  assertSigningKeyMatches,
+  privateKeyFromSparkleSecret,
+  publicKeyBase64,
+} from "./appcast.ts";
 
 /** Rust target arch, as it appears in the installer name and the feed name. */
 export const architectures = ["x86_64", "aarch64"] as const;
 export type Architecture = (typeof architectures)[number];
 
 export const appcastName = (arch: Architecture) => `appcast-windows-${arch}.xml`;
-
-/** `generate_keys` emits libsodium's 64-byte secret key: seed then public. */
-const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
-
-export function privateKeyFromSparkleSecret(secret: string) {
-  const bytes = Buffer.from(secret.trim(), "base64");
-  if (bytes.length !== 64 && bytes.length !== 32) {
-    throw new Error(
-      `SPARKLE_PRIVATE_KEY decodes to ${bytes.length} bytes; expected 32 or 64.`,
-    );
-  }
-  return createPrivateKey({
-    key: Buffer.concat([PKCS8_ED25519_PREFIX, bytes.subarray(0, 32)]),
-    format: "der",
-    type: "pkcs8",
-  });
-}
-
-/** Derive the public half from the key material itself, rather than trusting
- *  the tail of the stored blob — a mismatched pair has to fail the check
- *  below, not sail through it and sign a feed nothing can verify. The JWK
- *  export carries the raw public key in `x`, base64url-encoded. */
-export function publicKeyBase64(privateKey: ReturnType<typeof createPrivateKey>): string {
-  const jwk = privateKey.export({ format: "jwk" });
-  if (!jwk.x) throw new Error("SPARKLE_PRIVATE_KEY has no public half");
-  return Buffer.from(jwk.x, "base64url").toString("base64");
-}
-
-/** SUPublicEDKey, the one value both platforms have to agree on. */
-export async function appPublicKey(): Promise<string> {
-  const plist = await Bun.file(join(projectRoot, "resources/Info.plist")).text();
-  const key = plist
-    .split("<key>SUPublicEDKey</key>")[1]
-    ?.split("<string>")[1]
-    ?.split("</string>")[0]
-    ?.trim();
-  if (!key) throw new Error("resources/Info.plist has no SUPublicEDKey");
-  return key;
-}
 
 export function escapeXml(value: string): string {
   return value.replace(
@@ -175,15 +150,8 @@ export async function generateWindowsAppcasts(
   if (!secret) {
     throw new Error("SPARKLE_PRIVATE_KEY is required to sign the Windows feed.");
   }
+  assertSigningKeyMatches(secret);
   const privateKey = privateKeyFromSparkleSecret(secret);
-  const derived = publicKeyBase64(privateKey);
-  const expected = await appPublicKey();
-  if (derived !== expected) {
-    throw new Error(
-      `SPARKLE_PRIVATE_KEY does not match SUPublicEDKey (${expected}); ` +
-        `it derives ${derived}. Signing with it would ship a feed the app rejects.`,
-    );
-  }
 
   const present = new Set(readdirSync(assetsDir));
   const written: string[] = [];
@@ -226,7 +194,7 @@ if (import.meta.main) {
   await generateWindowsAppcasts(
     assetsDir,
     version,
-    process.env.WAKU_DOWNLOAD_URL_PREFIX ?? defaultDownloadUrlPrefix,
+    defaultDownloadUrlPrefix(),
     new Date().toUTCString(),
   );
 }
