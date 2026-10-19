@@ -1,5 +1,41 @@
 # Waku development guidance
 
+## Fork workflow
+
+This repository is a fork of `egoist/waku`. Its goal is full feature parity with T3 Code, while beating it on CPU, memory and frame pacing. The plan is [docs/fork/PLAN.md](docs/fork/PLAN.md), and every unit of work is a GitHub issue.
+
+### Branches and pull requests: one PR per phase
+- Each phase (and the fluidity track) has one long-lived branch and **one pull request** into `main`. Branch names:
+  - `phase/0-baseline`, `phase/1-perf`, `phase/2-orchestrator`, `phase/3-session-model`, `phase/4-mcp`, `phase/5-ui`, `phase/6-source-control`, `phase/7-remote`, `phase/8-web-mobile`, `phase/9-long-tail`;
+  - `track/fluidity` for the fluidity track.
+- Open the phase PR as a draft as soon as the branch has its first commit. Its body lists `Closes #N` for every issue in the phase; keep that list in sync with the phase epic.
+- Do the work issue by issue on the phase branch.
+  - Commit messages reference the issue (`feat(daemon): … (#39)`).
+  - Tick an issue's acceptance criteria only when they are met on the branch.
+- Agents running in parallel inside one phase each use their own worktree on a short-lived local branch (`phase/2-orchestrator--39`). They merge back into the phase branch when the issue is done. These sub-branches never get their own PR.
+- To start an issue, pick an open one whose "Depends on" issues are done (closed, or met on a phase branch you can merge in). If it depends on another phase that is not merged yet, merge that phase branch into yours first.
+- Mark the phase PR ready for review when the phase epic's exit criteria hold. CI must be green and perf numbers recorded in the PR.
+- Read the issue's references before writing code: the audit sections in `docs/fork/audit/` and the RFCs in `docs/fork/rfcs/`.
+
+### Contracts and references
+- RFCs are the contract. If the code needs to diverge from an RFC, update the RFC in the same PR and say why.
+- For parity issues, T3 Code at the commit in `docs/fork/T3_PIN` is the behavioural reference. Port its semantics, not its code; this repository is GPL-3.0.
+  - Code copied from T3 (MIT) must keep its MIT notice.
+- The daemon speaks our own protocol (`waku-protocol`, RFC 0003). Do not add T3 wire-compatibility code.
+
+### Performance rules
+- Performance acceptance criteria must be shown with numbers. For `perf` issues, include before/after `perf-counters` or bench-harness output in the PR.
+- These are hard rules:
+  - nothing heavy on the UI thread;
+  - no continuously repainting animation;
+  - redraw only the entity that changed, never `window.refresh()` for local changes;
+  - large payloads stay off event streams;
+  - every cache has a bound.
+
+### Before opening a PR
+- Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and the tests for the crates you touched.
+- Run `bun run protocol:check` when wire types change.
+
 ## Development runtime
 
 - Assume `bun ./scripts/dev.ts` is already running and owns the current

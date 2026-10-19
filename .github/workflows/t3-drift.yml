@@ -1,0 +1,70 @@
+name: T3 Code drift
+
+# Opens an issue when T3 Code's user docs, orchestration docs or wire contracts
+# change after the commit pinned in docs/fork/T3_PIN, so parity work does not
+# silently fall behind. Triage the issue into parity issues, then bump the pin.
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Diff T3 Code against the pin
+        id: diff
+        run: |
+          set -euo pipefail
+          pin="$(tr -d '[:space:]' < docs/fork/T3_PIN)"
+          git clone --quiet --filter=blob:none https://github.com/pingdotgg/t3code.git "$RUNNER_TEMP/t3code"
+          cd "$RUNNER_TEMP/t3code"
+          head="$(git rev-parse --short=10 HEAD)"
+          paths="docs/user docs/orchestration-v2 docs/internals packages/contracts/src"
+          stat="$(git diff --stat "$pin" HEAD -- $paths | tail -n 60)"
+          log="$(git log --oneline "$pin..HEAD" -- $paths | head -n 100)"
+          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          if [ -z "$stat" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "T3 Code changed parity-relevant paths between \`$pin\` and \`$head\`."
+            echo
+            echo "Triage: file new parity issues (or update existing ones), then set \`docs/fork/T3_PIN\` to \`$head\`."
+            echo
+            echo "<details><summary>Changed files</summary>"
+            echo
+            echo '```'
+            echo "$stat"
+            echo '```'
+            echo "</details>"
+            echo
+            echo "<details><summary>Commits</summary>"
+            echo
+            echo '```'
+            echo "$log"
+            echo '```'
+            echo "</details>"
+            echo
+            echo "Compare: https://github.com/pingdotgg/t3code/compare/$pin...$head"
+          } > "$RUNNER_TEMP/body.md"
+
+      - name: Open drift issue
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.diff.outputs.head }}
+        run: |
+          set -euo pipefail
+          title="T3 drift: changes up to $HEAD_SHA"
+          if gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"T3 drift\" in:title" --json title --jq '.[].title' | grep -qx "$title"; then
+            echo "Issue already open"; exit 0
+          fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label parity --body-file "$RUNNER_TEMP/body.md"
