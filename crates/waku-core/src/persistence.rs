@@ -1295,6 +1295,7 @@ impl StateStore {
     /// Persists whatever the app marked as changed, so a streaming turn writes
     /// one session row and a selection change writes no rows at all.
     pub fn save(&self, state: &mut PersistedState) -> io::Result<()> {
+        profile_span!(DEBUG, "StateStore::save");
         // Only changed sessions can hold a new inline payload, so the blob walk
         // follows the same set rather than every transcript on every save.
         let dirty = state.dirty_sessions.clone();

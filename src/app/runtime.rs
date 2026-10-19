@@ -1601,6 +1601,7 @@ impl Waku {
     }
 
     pub(super) fn save(&mut self) {
+        profile_span!(DEBUG, "Waku::save");
         self.last_stream_save = Instant::now();
         let daemon_error = self
             .daemon
@@ -3524,6 +3525,7 @@ impl Waku {
     }
 
     pub(super) fn drain_event_pump(&mut self, cx: &mut Context<Self>) -> EventPumpSchedule {
+        profile_span!(DEBUG, "drain_event_pump");
         // `|` on purpose: a busy provider must not starve the other result
         // queues just because its own drain reported a change first.
         if self.drain_driver_events(cx)

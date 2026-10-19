@@ -3066,6 +3066,7 @@ impl ComposerInput {
 
 impl Render for ComposerInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        profile_span!(TRACE, "ComposerInput::render");
         div()
             .w_full()
             // The embedded field propagates SubmitSteer; this ancestor

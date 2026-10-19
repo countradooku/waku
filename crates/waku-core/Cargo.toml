@@ -6,6 +6,11 @@ description = "Headless provider, persistence, and workspace runtime for Waku"
 license = "GPL-3.0-only"
 readme = "README.md"
 
+[features]
+# `tracing` spans around event fan-out, request dispatch and task-state saves.
+# Off by default, and without it every span compiles to nothing.
+profiling = ["dep:tracing"]
+
 [dependencies]
 agent-client-protocol = "2.0.0"
 alacritty_terminal = { version = "0.26", default-features = false }
@@ -24,6 +29,7 @@ serde_json = "1.0"
 smol = "2"
 subtle = "2"
 toml = "0.8"
+tracing = { version = "0.1", optional = true }
 trash = "5.2.6"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 url = "2"

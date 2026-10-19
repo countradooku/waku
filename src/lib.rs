@@ -28,6 +28,16 @@ macro_rules! tr_cow {
     };
 }
 
+/// Enter a `tracing` span at `$level` (`TRACE`, `DEBUG`, ...) for the rest of
+/// the enclosing block. With the `profiling` feature off this expands to
+/// nothing, so spans on per-frame paths cost nothing in shipping builds.
+macro_rules! profile_span {
+    ($level:ident, $name:literal) => {
+        #[cfg(feature = "profiling")]
+        let _profile_span = tracing::span!(tracing::Level::$level, $name).entered();
+    };
+}
+
 mod analytics;
 mod app;
 mod assets;
@@ -38,6 +48,8 @@ mod driver;
 mod input;
 mod md;
 mod platform;
+#[cfg(feature = "profiling")]
+mod profiling;
 mod query;
 mod review_diff;
 mod terminal;
@@ -192,6 +204,8 @@ impl WakuApplicationExt for Application {
 }
 
 pub fn run() {
+    #[cfg(feature = "profiling")]
+    crate::profiling::init();
     let daemon = crate::daemon::start_process()
         .unwrap_or_else(|error| panic!("failed to start Waku daemon: {error:#}"));
     gpui_platform::application()

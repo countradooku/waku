@@ -173,6 +173,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        profile_span!(DEBUG, "sidebar_pane");
         let (sidebar_width, _) = self.effective_panel_widths(window);
         self.render_sidebar(sidebar_width, window, cx)
             .into_any_element()
@@ -184,6 +185,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        profile_span!(DEBUG, "transcript_pane");
         let chat_viewport_width = self.chat_viewport_width(window);
         // The transcript's own element sizes itself with `flex_1`, which only
         // stretches inside a flex parent. A cached pane lays its content out
@@ -204,6 +206,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        profile_span!(DEBUG, "right_panel_pane");
         let (_, right_panel_width) = self.effective_panel_widths(window);
         self.render_right_panel(right_panel_width, window, cx)
             .into_any_element()
@@ -225,6 +228,7 @@ impl Waku {
 
 impl Render for Waku {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        profile_span!(DEBUG, "Waku::render");
         // Panel geometry first: the browser sync right below reads whether a
         // panel is mid-slide, and settling here rather than at the point of
         // use keeps the pane islands and the transcript on one set of widths.

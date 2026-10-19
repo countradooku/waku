@@ -163,7 +163,8 @@ run. In order of usefulness:
 2. **`sample <pid> 5` during a captured stream**, `awk '/Sort by top of
    stack/,0'` for leaves, ancestor-walk for the hot chain. Good for *what*
    is expensive (taffy vs shaping vs app code), useless for *how often*.
-   The production binary is stripped — profile the debug build.
+   The production binary is stripped — profile the debug build, or a
+   `--profile profiling` build (below) for release code with symbols.
 3. **CPU traces across a whole turn**: poll `ps -o %cpu= -p <pid>` every
    500 ms from trigger until settle. Averages over a turn hide phase
    plateaus; report both.
@@ -173,6 +174,43 @@ run. In order of usefulness:
 Debug-build numbers overweight taffy/style/scene generics by several fold;
 treat them as structure, not as what users feel, and confirm user-facing
 claims on a release build.
+
+### Tracing spans and Tracy (`profiling` feature)
+
+The app, `waku-core` and `waku-daemon` carry `tracing` spans on the paths a
+streaming frame or a save reaches:
+
+| Process | Spans |
+| --- | --- |
+| App | `drain_event_pump`, `Waku::render`, `sidebar_pane`, `transcript_pane`, `right_panel_pane`, `ComposerInput::render`, `transcript_row`, `MarkdownView::set_text`, `IncrementalParser::set_text`, `md::flatten`, `Waku::save` |
+| Daemon (`waku-core`) | `Hub::emit`, `dispatch`, `handle_request`, `save_task_state`, `StateStore::save` |
+
+Spans are written with the crate-local `profile_span!` macro. Without the
+`profiling` feature it expands to nothing, so default and release builds carry
+neither the spans nor `tracing` itself, and no subscriber is installed. With
+the feature, a `tracing-tracy` layer records every span (all levels):
+
+```sh
+# Daemon: the app spawns the `waku-daemon` binary next to its own executable
+# (target/profiling/) unless WAKU_DAEMON_PATH says otherwise, so build that
+# one with the feature first to see its spans.
+cargo build --profile profiling -p waku-daemon --features profiling
+# App (the GUI process)
+cargo run --profile profiling --features profiling
+```
+
+- The client is `tracy-client` 0.19, so connect with the **Tracy 0.14.1**
+  profiler. It runs `ondemand` (nothing is buffered until a profiler
+  attaches) and `only-localhost`. The daemon is a second Tracy client and
+  appears separately in the profiler's discovery list.
+- `WAKU_TRACE` (profiling builds only) adds a stderr layer that prints each
+  matching span's busy and idle time when it closes. The value is a target
+  filter such as `waku::app=debug,waku::md=trace` or
+  `waku_core::server=trace`; `1`, `true` or `all` select everything. The
+  daemon inherits the variable, and its stderr reaches the app's.
+- `[profile.profiling]` inherits `release` and keeps line tables and symbols
+  (`debug = "line-tables-only"`, `strip = false`), so `sample` output is
+  symbolized too.
 
 ## Known floor and next levers
 

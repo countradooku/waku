@@ -321,6 +321,7 @@ pub fn flatten(
     base_weight: FontWeight,
     base_color: Hsla,
 ) -> FlatText {
+    profile_span!(TRACE, "md::flatten");
     let mut text = String::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
@@ -512,6 +513,7 @@ impl MarkdownView {
     }
 
     pub fn set_text(&mut self, text: &str, mend: bool) {
+        profile_span!(TRACE, "MarkdownView::set_text");
         let was_streaming = self.streaming.replace(mend);
         if !mend && was_streaming {
             *self.veil.borrow_mut() = RowVeil::default();
