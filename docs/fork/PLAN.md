@@ -29,7 +29,7 @@ The full audit reports are in [`audit/`](audit/):
    - **Plan:** rebuild `waku-daemon` as a Rust event-sourced orchestrator. Everything else in the parity work depends on this.
 2. **The parity surface is large.** T3 is about 210k lines of server TypeScript (83k of it orchestration v2) plus about 57k lines of shared client runtime and a near-complete second client on mobile.
    - Port the semantics and contracts, not the code.
-   - The work is executed by AI agents, one issue per session; the plan orders work by dependency, not by calendar.
+   - The work is executed by AI agents, issue by issue, with **one pull request per phase**. The plan orders work by dependency, not by calendar.
 3. **Speed comes from structure, not micro-optimisation.** Waku's remaining perf ceilings are:
    - saves run on the UI thread;
    - sockets poll every 25 ms;
@@ -393,7 +393,13 @@ This is the main reason the fork can stay **flat** where Electron grows.
 
 ## 6. Roadmap
 
-Work is executed by AI agents, one issue per session in its own git worktree. Phases are ordered by dependency; independent issues inside and across phases run in parallel. Each phase has an epic issue on GitHub listing its issues.
+Work is executed by AI agents.
+
+- Each phase has an epic issue on GitHub listing its issues, one long-lived branch (`phase/<n>-<name>`), and **one pull request** into `main` that closes all of the phase's issues.
+- Agents work issue by issue on the phase branch. Parallel agents use local sub-branches that merge into the phase branch and never get their own PR.
+- Phases are ordered by dependency. A phase that needs unmerged work from an earlier phase merges that phase branch in.
+
+The details are in `AGENTS.md` under "Fork workflow".
 
 | Phase | Epic | Content | Exit criteria |
 |---|---|---|---|
@@ -435,4 +441,4 @@ These Phase 0 issues have no dependencies and can run in parallel, one agent ses
 
 Then, as their dependencies close: [#7](https://github.com/countradooku/waku/issues/7) bench daemon → [#8](https://github.com/countradooku/waku/issues/8) fake CLIs → [#9](https://github.com/countradooku/waku/issues/9) baseline, and the Phase 1 quick wins starting with [#17](https://github.com/countradooku/waku/issues/17) scroll redraws and [#16](https://github.com/countradooku/waku/issues/16) saves off the UI thread.
 
-Each issue lists its dependencies, acceptance criteria and references, so an agent can pick up any open issue whose dependencies are closed.
+Each issue lists its dependencies, acceptance criteria and references, so an agent can pick up any open issue whose dependencies are done. All Phase 0 work goes on the `phase/0-baseline` branch and lands in one PR.
