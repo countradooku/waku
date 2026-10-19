@@ -17,6 +17,20 @@ default-members = [
 ]
 resolver = "2"
 
+# CI runs `cargo clippy --all-targets -- -D warnings`. These lints are allowed
+# workspace-wide on purpose: the large protocol enums and error types are
+# reshaped by protocol v8 (issue #53), and splitting long argument lists or
+# complex types is churn without a measurable benefit. Everything else is an
+# error in CI.
+[workspace.lints.clippy]
+large_enum_variant = "allow"
+result_large_err = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+
+[lints]
+workspace = true
+
 [dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1.0"

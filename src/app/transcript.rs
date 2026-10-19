@@ -479,8 +479,8 @@ pub(super) fn transcript_navigation_turns(
                 .iter()
                 .any(|turn| turn.id == turn_id && turn.status == TurnStatus::Running)
         });
-        let response = (!turn_running)
-            .then(|| {
+        let response = if !turn_running {
+            {
                 session.messages[message_index + 1..next_user_index]
                     .iter()
                     .rev()
@@ -490,8 +490,10 @@ pub(super) fn transcript_navigation_turns(
                     })
                     .map(|candidate| navigation_preview_snippet(&candidate.content, 240))
                     .unwrap_or_default()
-            })
-            .unwrap_or_default();
+            }
+        } else {
+            Default::default()
+        };
         turns.push(TranscriptNavigationTurn {
             message_id: message.id,
             message_index,

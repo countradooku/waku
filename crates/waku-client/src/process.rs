@@ -467,18 +467,15 @@ impl DaemonSupervisor {
                 queue_settings_refresh(&self.inner);
                 Ok(())
             }
-            Err(error) => {
-                let restore = replace_local_daemon(&self.inner, &executable, &previous);
-                if restore.is_ok() {
+            Err(error) => match replace_local_daemon(&self.inner, &executable, &previous) {
+                Ok(()) => {
                     queue_settings_refresh(&self.inner);
                     Err(error)
-                } else {
-                    Err(error.context(format!(
-                        "the previous daemon configuration also failed to restart: {:#}",
-                        restore.unwrap_err()
-                    )))
                 }
-            }
+                Err(restore_error) => Err(error.context(format!(
+                    "the previous daemon configuration also failed to restart: {restore_error:#}"
+                ))),
+            },
         }
     }
 

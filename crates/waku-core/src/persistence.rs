@@ -62,8 +62,9 @@ fn default_computer_use_enabled() -> bool {
     false
 }
 
+/// The fork ships no analytics endpoint, so sharing is opt-in.
 fn default_analytics_enabled() -> bool {
-    true
+    false
 }
 
 fn default_provider() -> ProviderKind {
@@ -369,7 +370,7 @@ impl PersistedState {
         Self {
             version: STATE_VERSION,
             analytics_id: Uuid::new_v4(),
-            analytics_enabled: true,
+            analytics_enabled: default_analytics_enabled(),
             projects: Vec::new(),
             sessions: Vec::new(),
             selected_project: None,
@@ -928,9 +929,7 @@ impl StateStore {
 
     pub fn new(path: PathBuf) -> Self {
         let directory = path.parent().unwrap_or_else(|| Path::new(".")).to_owned();
-        let configuration_directory = dirs::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".waku");
+        let configuration_directory = crate::identity::home_directory();
         let (app_settings_path, legacy_settings_paths) = if cfg!(debug_assertions) {
             (
                 directory.join("app.json"),
@@ -1719,14 +1718,11 @@ fn message_fingerprint(message: &Message, position: usize) -> u64 {
     }
 
     let bytes = message.content.as_bytes();
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        fold(u64::from_le_bytes(
-            chunk.try_into().expect("chunks_exact yields 8 bytes"),
-        ));
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        fold(u64::from_le_bytes(*chunk));
     }
     let mut tail = [0u8; 8];
-    let remainder = chunks.remainder();
     tail[..remainder.len()].copy_from_slice(remainder);
     fold(u64::from_le_bytes(tail));
     fold(bytes.len() as u64);
@@ -1890,7 +1886,7 @@ mod tests {
             .unwrap()
             .remove("analytics_enabled");
         let backfilled: AppSettings = serde_json::from_value(settings).unwrap();
-        assert!(backfilled.analytics_enabled);
+        assert!(!backfilled.analytics_enabled);
     }
 
     #[test]
@@ -1904,7 +1900,7 @@ mod tests {
         let app_state: serde_json::Value =
             serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
 
-        assert_eq!(settings["analytics_enabled"], true);
+        assert_eq!(settings["analytics_enabled"], false);
         assert!(settings.get("analytics_id").is_none());
         assert_eq!(app_state["analytics_id"], restored.analytics_id.to_string());
         assert!(app_state.get("analytics_enabled").is_none());
@@ -1960,7 +1956,7 @@ mod tests {
 
         assert_eq!(settings.theme, ThemePreference::Dark);
         assert_eq!(settings.language, AppLanguage::System);
-        assert!(settings.analytics_enabled);
+        assert!(!settings.analytics_enabled);
     }
 
     #[test]
@@ -2556,10 +2552,11 @@ mod tests {
         }
         #[cfg(not(debug_assertions))]
         {
-            assert_eq!(directory, Some(std::ffi::OsStr::new("Waku")));
-            let configuration_directory = dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".waku");
+            assert_eq!(
+                directory,
+                Some(std::ffi::OsStr::new(crate::identity::DATA_DIRECTORY_NAME))
+            );
+            let configuration_directory = crate::identity::home_directory();
             assert_eq!(
                 store.app_settings_path,
                 configuration_directory.join("app.json")

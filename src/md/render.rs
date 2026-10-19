@@ -2191,7 +2191,7 @@ mod tests {
             highlighted.iter().map(|run| run.len).sum::<usize>(),
             plain.iter().map(|run| run.len).sum::<usize>()
         );
-        assert!(highlighted.iter().all(|run| &run.font == &code_font));
+        assert!(highlighted.iter().all(|run| run.font == code_font));
     }
 
     #[test]

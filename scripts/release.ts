@@ -179,9 +179,11 @@ if (explicitBuildNumber && !/^\d+(?:\.\d+){0,2}$/.test(explicitBuildNumber)) {
 if (!Number.isSafeInteger(historyCount) || historyCount < 0) {
   throw new Error("WAKU_HISTORY_COUNT must be a non-negative integer.");
 }
+// Analytics is optional in the fork: without both values the build embeds no
+// endpoint and the app never sends usage events.
 if (!values["skip-build"] && (!analyticsEndpoint || !analyticsWebsiteId)) {
-  throw new Error(
-    "Set WAKU_ANALYTICS_ENDPOINT and WAKU_ANALYTICS_WEBSITE_ID before building a release.",
+  console.warn(
+    "WAKU_ANALYTICS_ENDPOINT/WAKU_ANALYTICS_WEBSITE_ID not set; building without analytics.",
   );
 }
 

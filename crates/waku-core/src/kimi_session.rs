@@ -133,7 +133,7 @@ fn list_provider_sessions_in(home: &Path, limit: usize) -> Vec<ProviderSessionSu
             }
         }
     }
-    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
     sessions.truncate(limit);
     sessions
 }

@@ -64,35 +64,6 @@ pub(super) fn input_title(value: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn title_supports_direct_and_provider_wrapped_arguments() {
-        assert_eq!(
-            input_title(Some(&serde_json::json!({"title": "Inspect app"}))).as_deref(),
-            Some("Inspect app")
-        );
-        assert_eq!(
-            input_title(Some(&serde_json::json!({
-                "tool_name": "waku_js_repl__js",
-                "arguments": {"code": "1", "title": "Inspect wrapped app"}
-            })))
-            .as_deref(),
-            Some("Inspect wrapped app")
-        );
-        assert_eq!(
-            input_title(Some(&serde_json::json!({
-                "tool_name": "waku_js_repl__js",
-                "tool_input": {"code": "1", "title": "Verify Grok bridge"}
-            })))
-            .as_deref(),
-            Some("Verify Grok bridge")
-        );
-    }
-}
-
 pub(super) fn format_json(value: &Value) -> Option<String> {
     serde_json::to_string_pretty(value)
         .ok()
@@ -207,4 +178,33 @@ fn non_empty_text(value: String) -> Option<String> {
     let mut truncated = value.chars().take(MAX_ACTIVITY_CHARS).collect::<String>();
     truncated.push_str(&tr!("activity.output_truncated"));
     Some(truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_supports_direct_and_provider_wrapped_arguments() {
+        assert_eq!(
+            input_title(Some(&serde_json::json!({"title": "Inspect app"}))).as_deref(),
+            Some("Inspect app")
+        );
+        assert_eq!(
+            input_title(Some(&serde_json::json!({
+                "tool_name": "waku_js_repl__js",
+                "arguments": {"code": "1", "title": "Inspect wrapped app"}
+            })))
+            .as_deref(),
+            Some("Inspect wrapped app")
+        );
+        assert_eq!(
+            input_title(Some(&serde_json::json!({
+                "tool_name": "waku_js_repl__js",
+                "tool_input": {"code": "1", "title": "Verify Grok bridge"}
+            })))
+            .as_deref(),
+            Some("Verify Grok bridge")
+        );
+    }
 }

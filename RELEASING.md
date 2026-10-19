@@ -228,8 +228,8 @@ secrets first:
 
 | Secret | Purpose |
 | --- | --- |
-| `WAKU_ANALYTICS_ENDPOINT` | embedded in every desktop CI build |
-| `WAKU_ANALYTICS_WEBSITE_ID` | embedded in every desktop CI build |
+| `WAKU_ANALYTICS_ENDPOINT` | optional; embedded in desktop CI builds when set (analytics stays off otherwise) |
+| `WAKU_ANALYTICS_WEBSITE_ID` | optional; set together with the endpoint |
 | `WAKU_SIGNING_IDENTITY` | Developer ID identity selector |
 | `APPLE_CERTIFICATE` | base64-encoded Developer ID Application `.p12` |
 | `APPLE_CERTIFICATE_PASSWORD` | password for that `.p12` |

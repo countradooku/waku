@@ -471,7 +471,7 @@ impl Waku {
         // descend.
         let mut providers = history.providers.clone();
         if metric == UsageMetric::Tokens {
-            providers.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+            providers.sort_by_key(|provider| std::cmp::Reverse(provider.total_tokens));
         }
         for provider in &providers {
             let kind = provider_kind(provider.provider);
@@ -2354,7 +2354,7 @@ fn usage_month_strip(
                         continue;
                     }
                     let band_height = ((*band / peak) as f32 * height).max(1.5);
-                    top = top - px(band_height);
+                    top -= px(band_height);
                     if top < bounds.origin.y {
                         top = bounds.origin.y;
                     }

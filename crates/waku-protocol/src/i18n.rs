@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 /// locales Waku deliberately ships today.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum AppLanguage {
+    #[default]
     System,
     English,
     SimplifiedChinese,
@@ -61,12 +63,6 @@ impl AppLanguage {
         } else {
             Self::English
         }
-    }
-}
-
-impl Default for AppLanguage {
-    fn default() -> Self {
-        Self::System
     }
 }
 

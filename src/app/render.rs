@@ -421,23 +421,6 @@ impl Render for Waku {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unloaded_history_never_renders_the_new_task_prompt() {
-        let mut stored = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        stored.detail_loaded = false;
-
-        assert!(!should_render_empty_state(Some(&stored)));
-
-        let draft = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        assert!(should_render_empty_state(Some(&draft)));
-        assert!(should_render_empty_state(None));
-    }
-}
-
 impl Waku {
     /// Arm the dismiss timer and build the floating toast layer, if a toast
     /// is active. Every full-window surface (workspace and settings alike)
@@ -559,5 +542,22 @@ impl Waku {
                         .opacity(0.4 + 0.6 * delta)
                 },
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unloaded_history_never_renders_the_new_task_prompt() {
+        let mut stored = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        stored.detail_loaded = false;
+
+        assert!(!should_render_empty_state(Some(&stored)));
+
+        let draft = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        assert!(should_render_empty_state(Some(&draft)));
+        assert!(should_render_empty_state(None));
     }
 }

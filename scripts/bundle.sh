@@ -40,13 +40,13 @@ case "$profile" in
   debug)
     app_name="Waku Debug"
     helper_name="Waku Debug Computer Use"
-    bundle_identifier="sh.waku.dev"
+    bundle_identifier="io.github.countradooku.waku.dev"
     icon_file="AppIconDev.icns"
     ;;
   release)
     app_name="Waku"
     helper_name="Waku Computer Use"
-    bundle_identifier="sh.waku"
+    bundle_identifier="io.github.countradooku.waku"
     icon_file="AppIcon.icns"
     ;;
   *)

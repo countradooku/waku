@@ -855,7 +855,7 @@ impl Waku {
         for id in streaming_messages {
             message_markdown
                 .entry(id)
-                .or_insert_with(MarkdownView::new)
+                .or_default()
                 .seed_streaming_baseline();
         }
         drop(message_markdown);
@@ -1562,19 +1562,18 @@ impl Waku {
             .state
             .selected_session
             .and_then(|session_id| self.runtimes.get_mut(&session_id))
-        {
-            if let Some(preview) = runtime.computer_use_previews.iter_mut().find(|preview| {
+            && let Some(preview) = runtime.computer_use_previews.iter_mut().find(|preview| {
                 preview
                     .target
                     .as_ref()
                     .is_some_and(|target| target.window_id == window_id)
-            }) {
-                // Keep the hidden entry until the turn ends so the next
-                // screenshot cannot reopen a preview the user just closed.
-                preview.visible = false;
-                preview.decode_task = None;
-                preview.frames = Default::default();
-            }
+            })
+        {
+            // Keep the hidden entry until the turn ends so the next
+            // screenshot cannot reopen a preview the user just closed.
+            preview.visible = false;
+            preview.decode_task = None;
+            preview.frames = Default::default();
         }
         cx.notify();
     }

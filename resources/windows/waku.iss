@@ -33,17 +33,17 @@
 [Setup]
 ; Never change AppId: it is how Windows and every later installer recognize
 ; an existing install, and how the updater replaces rather than duplicates it.
-AppId={{8B6C6E4A-3E0F-4F0B-9C5F-2E0E9C4B7A11}
+AppId={{662E9843-D193-4595-9B97-EC1EAEEE387F}
 AppName=Waku
 AppVersion={#AppVersion}
 VersionInfoVersion={#AppVersion}
 AppPublisher=Waku
-AppPublisherURL=https://waku.sh
+AppPublisherURL=https://github.com/countradooku/waku
 AppSupportURL=https://github.com/egoist/waku/issues
 AppUpdatesURL=https://github.com/egoist/waku/releases
-DefaultDirName={autopf}\Waku
+DefaultDirName={autopf}\Waku Fork
 DefaultGroupName=Waku
-UninstallDisplayName=Waku
+UninstallDisplayName=Waku (fork)
 UninstallDisplayIcon={app}\waku.exe
 LicenseFile={#StageDir}\LICENSE
 OutputDir={#OutputDir}
@@ -59,7 +59,7 @@ ArchitecturesInstallIn64BitMode={#Architectures}
 MinVersion=10.0.17763
 ; Two installers must not race — the updater can be triggered again while an
 ; update is already applying.
-SetupMutex=WakuSetup
+SetupMutex=WakuForkSetup
 ; No elevation, so an update never has to ask for it either.
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes

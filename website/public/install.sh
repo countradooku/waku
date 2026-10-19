@@ -22,7 +22,7 @@ Usage:
   curl -fsSL https://waku.sh/install.sh | sh -s -- --uninstall
 
 Options:
-  --uninstall   Remove Waku, leaving ~/.waku (projects and settings) alone
+  --uninstall   Remove Waku, leaving ~/.waku-fork (projects and settings) alone
   --help        Show this help
 USAGE
 }
@@ -30,7 +30,7 @@ USAGE
 main() {
     app_dir="$HOME/.local/waku.app"
     bin_link="$HOME/.local/bin/waku"
-    desktop_file="$HOME/.local/share/applications/sh.waku.desktop"
+    desktop_file="$HOME/.local/share/applications/io.github.countradooku.waku.desktop"
     releases="${WAKU_RELEASES_URL:-https://releases.waku.sh}"
 
     case "${1:-}" in
@@ -137,12 +137,12 @@ main() {
     mv "$staging" "$app_dir"
     ln -sf "$app_dir/bin/waku" "$bin_link"
 
-    entry="$app_dir/share/applications/sh.waku.desktop"
+    entry="$app_dir/share/applications/io.github.countradooku.waku.desktop"
     if [ -f "$entry" ]; then
         # The packaged entry is relocatable (bare Exec/Icon names). Pin both to
         # this install so the launcher works without PATH or icon-theme setup.
         sed -e "s|^Exec=waku$|Exec=$app_dir/bin/waku|" \
-            -e "s|^Icon=sh.waku$|Icon=$app_dir/share/icons/hicolor/256x256/apps/sh.waku.png|" \
+            -e "s|^Icon=io.github.countradooku.waku$|Icon=$app_dir/share/icons/hicolor/256x256/apps/io.github.countradooku.waku.png|" \
             "$entry" >"$desktop_file"
         if command -v update-desktop-database >/dev/null 2>&1; then
             update-desktop-database "$(dirname "$desktop_file")" 2>/dev/null || true
@@ -177,7 +177,7 @@ uninstall() {
         rm -f "$desktop_file"
     fi
     rm -rf "$app_dir"
-    echo "Waku is uninstalled. Projects and settings remain in ~/.waku."
+    echo "Waku is uninstalled. Projects and settings remain in ~/.waku-fork."
 }
 
 main "$@"

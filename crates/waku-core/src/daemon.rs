@@ -290,11 +290,8 @@ impl Backend for WakuBackend {
                     }
                     crate::model::ProviderKind::Grok => {
                         ensure_shell_environment();
-                        let probe = match binary_override.as_deref() {
-                            override_value => {
-                                crate::model::provider_probe(provider, override_value)
-                            }
-                        };
+                        let probe =
+                            crate::model::provider_probe(provider, binary_override.as_deref());
                         let binary = probe.path.ok_or_else(|| anyhow!("grok is not installed"))?;
                         Some(crate::usage::fetch_grok_plan_usage(&binary)?)
                     }
@@ -760,12 +757,12 @@ impl Backend for WakuBackend {
             Command::CloseTerminal => {
                 let removed = {
                     let mut terminals = self.terminals.lock();
-                    if let Some((active_runtime_id, _)) = terminals.get(&session_id) {
-                        if *active_runtime_id != runtime_id {
-                            bail!(
-                                "daemon terminal {session_id} belongs to runtime {active_runtime_id}, not {runtime_id}"
-                            );
-                        }
+                    if let Some((active_runtime_id, _)) = terminals.get(&session_id)
+                        && *active_runtime_id != runtime_id
+                    {
+                        bail!(
+                            "daemon terminal {session_id} belongs to runtime {active_runtime_id}, not {runtime_id}"
+                        );
                     }
                     terminals.remove(&session_id)
                 };

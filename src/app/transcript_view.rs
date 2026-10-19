@@ -1280,9 +1280,7 @@ impl Waku {
                             if !attachment.is_image {
                                 return None;
                             }
-                            let Some(reference) = attachment.blob_reference.as_deref() else {
-                                return None;
-                            };
+                            let reference = attachment.blob_reference.as_deref()?;
                             self.image_for_reference(
                                 reference,
                                 Some(&attachment.path),
@@ -1499,15 +1497,12 @@ impl Waku {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let Some(checkpoint) = self
+        let checkpoint = self
             .selected_session()
             .and_then(|session| session.turns.iter().find(|turn| turn.id == turn_id))
             .and_then(|turn| turn.checkpoint.as_ref())
             .filter(|checkpoint| checkpoint.status == CheckpointStatus::Ready)
-            .filter(|checkpoint| !checkpoint.files.is_empty())
-        else {
-            return None;
-        };
+            .filter(|checkpoint| !checkpoint.files.is_empty())?;
 
         let files = checkpoint.files.as_slice();
         let additions = checkpoint.additions;

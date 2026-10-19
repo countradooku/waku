@@ -66,10 +66,10 @@ pub fn stage_files(cwd: &Path, paths: &[String], stage: bool) -> anyhow::Result<
         // Unstaging an indexed rename must restore both paths. When staging
         // it again, its old name has already left the index and would be an
         // unmatched pathspec. Only a working-tree rename needs that old path.
-        if let Some(previous) = &file.previous_path {
-            if !stage || file.worktree_status == "R" {
-                expanded.push(previous);
-            }
+        if let Some(previous) = &file.previous_path
+            && (!stage || file.worktree_status == "R")
+        {
+            expanded.push(previous);
         }
     }
     if selected.iter().any(|path| !known.contains(path)) {

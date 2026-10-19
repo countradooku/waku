@@ -298,7 +298,7 @@ fn session_roots(provider: ProviderKind) -> anyhow::Result<Vec<PathBuf>> {
     let configured_agent = std::env::var_os("PI_CODING_AGENT_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .map(&expand_home);
+        .map(expand_home);
     match provider {
         ProviderKind::Pi => {
             if let Some(path) =
@@ -313,7 +313,7 @@ fn session_roots(provider: ProviderKind) -> anyhow::Result<Vec<PathBuf>> {
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                 .and_then(|value| value.get("sessionDir")?.as_str().map(PathBuf::from))
-                .map(&expand_home)
+                .map(expand_home)
                 .filter(|path| path.is_absolute());
             Ok(configured.into_iter().chain([default]).collect())
         }
@@ -381,7 +381,7 @@ pub fn list_provider_sessions(
             }
         }
     }
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
     sessions.truncate(limit);
     Ok(sessions)
 }

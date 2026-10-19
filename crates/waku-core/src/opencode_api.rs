@@ -84,6 +84,8 @@ impl ApiError {
         }
     }
 
+    // Only exercised by tests today; kept as part of the error API.
+    #[allow(dead_code)]
     pub(crate) fn tag(&self) -> Option<&str> {
         match self {
             Self::Tagged { tag, .. } => Some(tag),
@@ -104,6 +106,8 @@ impl ApiError {
     /// A location-scoped route handed a directory the service cannot resolve
     /// answers HTTP 500 with an EMPTY body. That is a bad workspace, not a
     /// server fault, and treating it as the latter would retry forever.
+    // Only exercised by tests today; kept as part of the error API.
+    #[allow(dead_code)]
     pub(crate) fn is_unresolvable_location(&self) -> bool {
         matches!(self, Self::Http { status: 500, body } if body.trim().is_empty())
     }
@@ -635,6 +639,8 @@ pub(crate) struct PermissionRequest {
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PermissionReply {
     Once,
+    // Only built by tests: `reply_permission` refuses it, so production never sends it.
+    #[allow(dead_code)]
     Always,
     Reject,
 }
@@ -1541,10 +1547,10 @@ mod tests {
                         if line == "\r\n" {
                             break;
                         }
-                        if let Some((name, value)) = line.split_once(':') {
-                            if name.eq_ignore_ascii_case("content-length") {
-                                content_length = value.trim().parse::<usize>().unwrap();
-                            }
+                        if let Some((name, value)) = line.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            content_length = value.trim().parse::<usize>().unwrap();
                         }
                     }
                     request.read_exact(&mut vec![0; content_length]).unwrap();

@@ -82,6 +82,8 @@ enum InlinePiece {
 
 /// A markdown block. Containers nest.
 #[derive(Clone, Debug, PartialEq)]
+// `CodeBlock` and `BlockQuote` are the CommonMark names for these blocks.
+#[allow(clippy::enum_variant_names)]
 pub enum Block {
     Paragraph {
         runs: Vec<InlineRun>,
@@ -1295,9 +1297,8 @@ mod tests {
         let Block::Paragraph { runs } = &parser.tree().blocks[0].block else {
             panic!("expected a paragraph");
         };
-        assert_eq!(
+        assert!(
             runs.iter().find(|run| run.style.link.is_some()).is_some(),
-            true,
             "the definition should resolve the earlier reference"
         );
     }

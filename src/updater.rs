@@ -67,11 +67,33 @@ mod macos {
 
     extern_protocol!(
         /// Dynamically loaded from the embedded Sparkle framework.
+        ///
+        /// # Safety
+        ///
+        /// Implementors must be Objective-C classes that conform to Sparkle's
+        /// `SPUUserDriver` protocol: every required selector must be implemented
+        /// with exactly the argument and return types Sparkle declares, because
+        /// Sparkle sends those messages to the object passed as `userDriver:`
+        /// without checking them.
+        // The `# Safety` section above is present, but objc2's macro re-emits doc
+        // attributes with its own spans, so clippy cannot see it.
+        #[allow(clippy::missing_safety_doc)]
         unsafe trait SPUUserDriver: NSObjectProtocol {}
     );
 
     extern_protocol!(
         /// Only the update-cycle completion callback is implemented below.
+        ///
+        /// # Safety
+        ///
+        /// Implementors must be Objective-C classes that conform to Sparkle's
+        /// `SPUUpdaterDelegate` protocol: any (optional) delegate method they
+        /// implement must use exactly the selector, argument and return types
+        /// Sparkle declares, because Sparkle calls it on the object passed as
+        /// `delegate:` without checking them.
+        // The `# Safety` section above is present, but objc2's macro re-emits doc
+        // attributes with its own spans, so clippy cannot see it.
+        #[allow(clippy::missing_safety_doc)]
         unsafe trait SPUUpdaterDelegate: NSObjectProtocol {}
     );
 

@@ -166,7 +166,7 @@ pub fn list_provider_sessions(
                     break;
                 }
             }
-            found.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            found.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
             found.truncate(limit);
             Ok(found)
         },

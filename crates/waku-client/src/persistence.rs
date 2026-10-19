@@ -77,8 +77,9 @@ fn default_render_math() -> bool {
     true
 }
 
+/// The fork ships no analytics endpoint, so sharing is opt-in.
 fn default_analytics_enabled() -> bool {
-    true
+    false
 }
 
 fn default_provider() -> ProviderKind {
@@ -435,7 +436,7 @@ impl PersistedState {
         Self {
             version: STATE_VERSION,
             analytics_id: Uuid::new_v4(),
-            analytics_enabled: true,
+            analytics_enabled: default_analytics_enabled(),
             projects: Vec::new(),
             sessions: Vec::new(),
             selected_project: None,
@@ -724,9 +725,7 @@ impl PersistedState {
 }
 
 fn configuration_directory() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".waku")
+    waku_protocol::identity::home_directory()
 }
 
 fn default_app_settings_path() -> PathBuf {
@@ -1132,6 +1131,45 @@ fn restore_task_state_skeletons(sessions: &mut [AgentSession]) {
     }
 }
 
+/// Reads one daemon-owned binary payload. Clients decide how to present the
+/// bytes; this transport layer deliberately creates no client-side files.
+pub fn read_remote_reference(
+    reference: &str,
+    daemon_path: Option<&Path>,
+    daemon: &DaemonSupervisor,
+) -> Option<Vec<u8>> {
+    let command = if waku_protocol::blob::is_reference(reference) {
+        Command::ReadBlob {
+            reference: reference.to_owned(),
+        }
+    } else if reference.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME) {
+        let path = daemon_path?;
+        Command::ReadAttachment {
+            reference: reference.to_owned(),
+            path: path.to_owned(),
+        }
+    } else {
+        return None;
+    };
+    let Ok(ResponsePayload::BlobData { bytes }) =
+        daemon.client().request(Uuid::nil(), Uuid::nil(), command)
+    else {
+        return None;
+    };
+    Some(bytes)
+}
+
+fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {
+    let mut seen_bundle_ids = HashSet::new();
+    grants.retain(|grant| {
+        !grant.bundle_id.trim().is_empty() && seen_bundle_ids.insert(grant.bundle_id.clone())
+    });
+}
+
+fn to_io_error(error: impl std::fmt::Display) -> io::Error {
+    io::Error::other(error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1234,43 +1272,4 @@ mod tests {
         assert!(!sessions[0].detail_loaded);
         assert!(sessions[0].has_started());
     }
-}
-
-/// Reads one daemon-owned binary payload. Clients decide how to present the
-/// bytes; this transport layer deliberately creates no client-side files.
-pub fn read_remote_reference(
-    reference: &str,
-    daemon_path: Option<&Path>,
-    daemon: &DaemonSupervisor,
-) -> Option<Vec<u8>> {
-    let command = if waku_protocol::blob::is_reference(reference) {
-        Command::ReadBlob {
-            reference: reference.to_owned(),
-        }
-    } else if reference.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME) {
-        let path = daemon_path?;
-        Command::ReadAttachment {
-            reference: reference.to_owned(),
-            path: path.to_owned(),
-        }
-    } else {
-        return None;
-    };
-    let Ok(ResponsePayload::BlobData { bytes }) =
-        daemon.client().request(Uuid::nil(), Uuid::nil(), command)
-    else {
-        return None;
-    };
-    Some(bytes)
-}
-
-fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {
-    let mut seen_bundle_ids = HashSet::new();
-    grants.retain(|grant| {
-        !grant.bundle_id.trim().is_empty() && seen_bundle_ids.insert(grant.bundle_id.clone())
-    });
-}
-
-fn to_io_error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
 }
