@@ -3,10 +3,11 @@
 ## Install
 
 ```sh
-curl -fsSL https://waku.sh/install.sh | sh
+curl -fsSL "$WAKU_RELEASES_URL/install.sh" | sh
 ```
 
-The script needs no root. It unpacks the release tarball into
+`WAKU_RELEASES_URL` is the fork's release host, configured per
+[docs/fork/RELEASING.md](fork/RELEASING.md). The script needs no root. It unpacks the release tarball into
 `~/.local/waku.app` and installs the desktop entry into
 `~/.local/share/applications`, so **Waku appears in your applications menu** —
 you can also launch it from a terminal via `waku` command. Run the script again to
@@ -29,9 +30,8 @@ Set `WAKU_VERSION` to install a specific version rather than the latest.
 ## Installing manually
 
 The script is a convenience, not a requirement. Download
-`waku-<version>-<target>.tar.gz` from
-[releases.waku.sh](https://releases.waku.sh) or the
-[GitHub release](https://github.com/egoist/waku/releases), then unpack it
+`waku-<version>-<target>.tar.gz` from the release host or the
+[GitHub release](https://github.com/countradooku/waku/releases), then unpack it
 wherever you like:
 
 ```sh
@@ -77,8 +77,11 @@ previous version.
 Every archive is verified with the same Ed25519 release key used by the macOS
 and Windows updaters. The architecture-specific feeds are:
 
-- `https://releases.waku.sh/appcast-linux-x86_64.xml`
-- `https://releases.waku.sh/appcast-linux-aarch64.xml`
+- `$WAKU_RELEASES_URL/appcast-linux-x86_64.xml`
+- `$WAKU_RELEASES_URL/appcast-linux-aarch64.xml`
+
+Both the host and the key are fixed at build time; a build without them has
+updates disabled (see [docs/fork/RELEASING.md](fork/RELEASING.md)).
 
 Use **Check for Updates** for an explicit check, or disable launch checks in
 **Settings → General → Automatic updates**. System-wide installs such as
@@ -90,7 +93,7 @@ manual fallback for the default `~/.local/waku.app` install.
 ## Uninstalling
 
 ```sh
-curl -fsSL https://waku.sh/install.sh | sh -s -- --uninstall
+curl -fsSL "$WAKU_RELEASES_URL/install.sh" | sh -s -- --uninstall
 ```
 
 This removes `~/.local/waku.app`, the symlink, and the desktop entry. Projects

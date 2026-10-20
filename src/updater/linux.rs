@@ -21,9 +21,9 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use flate2::read::GzDecoder;
 
 use super::feed::{self, AppcastItem};
+use super::release::ReleaseConfig;
 use super::{UpdateStatus, UpdaterEvent};
 
-const PUBLIC_ED_KEY: &str = env!("WAKU_SPARKLE_PUBLIC_ED_KEY");
 const MANAGED_MARKER: &str = "share/waku/self-update-v1";
 const MANAGED_MARKER_CONTENTS: &str = "waku-self-update-v1\n";
 const HELPER_EXECUTABLE: &str = "waku-updater";
@@ -36,12 +36,13 @@ const MAX_ERROR_BYTES: u64 = 16 * 1024;
 
 static TEMPORARY_NONCE: AtomicU64 = AtomicU64::new(0);
 
+/// Published directly under the build's `WAKU_RELEASES_URL`.
 #[cfg(target_arch = "aarch64")]
-const FEED_URL: Option<&str> = Some("https://releases.waku.sh/appcast-linux-aarch64.xml");
+const FEED_NAME: Option<&str> = Some("appcast-linux-aarch64.xml");
 #[cfg(target_arch = "x86_64")]
-const FEED_URL: Option<&str> = Some("https://releases.waku.sh/appcast-linux-x86_64.xml");
+const FEED_NAME: Option<&str> = Some("appcast-linux-x86_64.xml");
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-const FEED_URL: Option<&str> = None;
+const FEED_NAME: Option<&str> = None;
 
 #[derive(Clone, Debug)]
 struct InstallLayout {
@@ -138,6 +139,9 @@ impl Drop for StagedUpdate {
 
 pub struct Updater {
     layout: InstallLayout,
+    feed_url: String,
+    release: ReleaseConfig,
+    key: VerifyingKey,
     status: Arc<Mutex<UpdateStatus>>,
     staged: Arc<Mutex<Option<StagedUpdate>>>,
     checking: Arc<AtomicBool>,
@@ -154,11 +158,14 @@ impl Updater {
         if cfg!(debug_assertions) && !forced {
             return None;
         }
-        FEED_URL?;
-        if verifying_key().is_none() {
-            eprintln!("Waku updater: SUPublicEDKey is not a valid ed25519 key");
+        let feed_name = FEED_NAME?;
+        // No configured release host or key means no updater, never a
+        // fallback feed.
+        let release = ReleaseConfig::embedded()?;
+        let Some(key) = verifying_key(&release) else {
+            eprintln!("Waku updater: WAKU_SPARKLE_PUBLIC_ED_KEY is not a valid ed25519 key");
             return None;
-        }
+        };
 
         let layout = InstallLayout::discover()?;
         let preference_path = preference_path()?;
@@ -166,6 +173,9 @@ impl Updater {
         let (events, receiver) = smol::channel::unbounded();
         let updater = Self {
             layout,
+            feed_url: release.feed_url(feed_name),
+            release,
+            key,
             status: Arc::new(Mutex::new(UpdateStatus::Idle)),
             staged: Arc::new(Mutex::new(None)),
             checking: Arc::new(AtomicBool::new(false)),
@@ -206,6 +216,9 @@ impl Updater {
         self.explicit_check.store(user_initiated, Ordering::Relaxed);
 
         let layout = self.layout.clone();
+        let feed_url = self.feed_url.clone();
+        let release = self.release.clone();
+        let key = self.key;
         let status = self.status.clone();
         let staged = self.staged.clone();
         let checking = self.checking.clone();
@@ -225,7 +238,7 @@ impl Updater {
         let spawned = std::thread::Builder::new()
             .name("waku-updater-check".into())
             .spawn(move || {
-                let outcome = fetch_and_stage(&layout);
+                let outcome = fetch_and_stage(&layout, &feed_url, &release, &key);
                 let report = explicit_check.load(Ordering::Relaxed);
                 match outcome {
                     Ok(Some(update)) => {
@@ -386,8 +399,13 @@ impl Updater {
     }
 }
 
-fn fetch_and_stage(layout: &InstallLayout) -> anyhow::Result<Option<StagedUpdate>> {
-    let document = http_get(FEED_URL.expect("supported Linux architecture has a feed"))?;
+fn fetch_and_stage(
+    layout: &InstallLayout,
+    feed_url: &str,
+    release: &ReleaseConfig,
+    key: &VerifyingKey,
+) -> anyhow::Result<Option<StagedUpdate>> {
+    let document = http_get(feed_url)?;
     let Some(item) = feed::newest_item(&document) else {
         anyhow::bail!("the update feed has no signed release");
     };
@@ -395,7 +413,7 @@ fn fetch_and_stage(layout: &InstallLayout) -> anyhow::Result<Option<StagedUpdate
         return Ok(None);
     }
     validate_release_version(&item.version)?;
-    validate_download_url(&item.url)?;
+    release.validate_download_url(&item.url)?;
     let declared_length = item
         .length
         .filter(|length| *length > 0 && *length <= MAX_ARCHIVE_BYTES)
@@ -410,15 +428,14 @@ fn fetch_and_stage(layout: &InstallLayout) -> anyhow::Result<Option<StagedUpdate
         actual_length == declared_length,
         "the update archive does not match the length the feed declared"
     );
-    verify_archive(&archive_path, &item)?;
+    verify_archive(&archive_path, &item, key)?;
     extract_release_archive(&archive_path, staged.path(), &item.version)?;
     fs::remove_file(&archive_path)?;
     validate_packaged_layout(staged.path())?;
     Ok(Some(staged))
 }
 
-fn verify_archive(path: &Path, item: &AppcastItem) -> anyhow::Result<()> {
-    let key = verifying_key().ok_or_else(|| anyhow::anyhow!("SUPublicEDKey is unusable"))?;
+fn verify_archive(path: &Path, item: &AppcastItem, key: &VerifyingKey) -> anyhow::Result<()> {
     let signature = base64::engine::general_purpose::STANDARD
         .decode(item.signature.trim())
         .ok()
@@ -430,11 +447,8 @@ fn verify_archive(path: &Path, item: &AppcastItem) -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("update archive failed signature verification"))
 }
 
-fn verifying_key() -> Option<VerifyingKey> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(PUBLIC_ED_KEY.trim())
-        .ok()?;
-    VerifyingKey::from_bytes(&<[u8; 32]>::try_from(bytes).ok()?).ok()
+fn verifying_key(release: &ReleaseConfig) -> Option<VerifyingKey> {
+    VerifyingKey::from_bytes(release.public_key()).ok()
 }
 
 fn extract_release_archive(path: &Path, destination: &Path, version: &str) -> anyhow::Result<()> {
@@ -531,18 +545,6 @@ fn validate_release_version(version: &str) -> anyhow::Result<()> {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_')
             }),
         "the update feed contains an invalid version"
-    );
-    Ok(())
-}
-
-fn validate_download_url(value: &str) -> anyhow::Result<()> {
-    let url = url::Url::parse(value)?;
-    anyhow::ensure!(
-        url.scheme() == "https"
-            && url.host_str() == Some("releases.waku.sh")
-            && url.username().is_empty()
-            && url.password().is_none(),
-        "the update feed points outside releases.waku.sh"
     );
     Ok(())
 }
@@ -787,9 +789,46 @@ mod tests {
         path
     }
 
+    fn signing_key(seed: u8) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn release_trusting(key: &ed25519_dalek::SigningKey) -> ReleaseConfig {
+        let public =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes());
+        ReleaseConfig::parse("https://releases.example.test", &public).unwrap()
+    }
+
     #[test]
-    fn the_embedded_public_key_is_usable() {
-        assert!(verifying_key().is_some());
+    fn a_configured_public_key_is_usable() {
+        assert!(verifying_key(&release_trusting(&signing_key(7))).is_some());
+    }
+
+    /// Only the configured key verifies an archive; one signed by any other
+    /// key (upstream's included) is rejected.
+    #[test]
+    fn archives_verify_only_against_the_configured_key() {
+        use ed25519_dalek::Signer as _;
+
+        let directory = temporary_directory("signature");
+        let archive_path = directory.join("release.tar.gz");
+        let payload = b"waku-9.8.7 archive bytes";
+        fs::write(&archive_path, payload).unwrap();
+
+        let configured = signing_key(7);
+        let key = verifying_key(&release_trusting(&configured)).unwrap();
+        let item = |signer: &ed25519_dalek::SigningKey| AppcastItem {
+            version: "9.8.7".to_owned(),
+            url: "https://releases.example.test/waku-9.8.7.tar.gz".to_owned(),
+            signature: base64::engine::general_purpose::STANDARD
+                .encode(signer.sign(payload).to_bytes()),
+            length: Some(payload.len() as u64),
+        };
+
+        assert!(verify_archive(&archive_path, &item(&configured), &key).is_ok());
+        assert!(verify_archive(&archive_path, &item(&signing_key(9)), &key).is_err());
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

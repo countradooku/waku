@@ -20,6 +20,9 @@ concurrency:
 jobs:
   sync:
     name: Sync assets to R2
+    # With GitHub Releases hosting the published release already is the
+    # release host, so there is nothing to mirror. See docs/fork/RELEASING.md.
+    if: vars.WAKU_RELEASE_HOSTING != 'github'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -58,11 +61,20 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          WAKU_RELEASES_URL: ${{ vars.WAKU_RELEASES_URL }}
           RCLONE_CONFIG_R2_TYPE: s3
           RCLONE_CONFIG_R2_PROVIDER: Cloudflare
           RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
         run: |
-          bucket="${R2_BUCKET:-waku-releases}"
+          missing=""
+          for name in R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET WAKU_RELEASES_URL; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::R2 sync is not configured; set$missing (see docs/fork/RELEASING.md)"
+            exit 1
+          fi
+          bucket="$R2_BUCKET"
           export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
           export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
           export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
@@ -75,6 +87,7 @@ jobs:
             --exclude appcast.xml \
             --exclude latest-linux.txt \
             --exclude latest-windows.txt \
+            --exclude install.sh \
             --exclude 'appcast-linux-*.xml' \
             --exclude 'appcast-windows-*.xml' \
             --header-upload "$immutable" \
@@ -82,7 +95,8 @@ jobs:
 
           for pointer in appcast.xml appcast-linux-x86_64.xml \
             appcast-linux-aarch64.xml appcast-windows-x86_64.xml \
-            appcast-windows-aarch64.xml latest-linux.txt latest-windows.txt; do
+            appcast-windows-aarch64.xml latest-linux.txt latest-windows.txt \
+            install.sh; do
             if [ -f "assets/$pointer" ]; then
               rclone copyto "assets/$pointer" "${destination}/${pointer}" \
                 --s3-no-check-bucket \
@@ -90,3 +104,4 @@ jobs:
                 --progress
             fi
           done
+          echo "Feeds are live under ${WAKU_RELEASES_URL%/}/"
