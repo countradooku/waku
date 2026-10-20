@@ -6,6 +6,14 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow, bail};
 use waku_protocol::{DAEMON_TOKEN_ENV, DaemonReady, PROTOCOL_VERSION};
 
+/// mimalloc rather than the system allocator (#30): the daemon allocates and
+/// drops a JSON tree per event and per request. Same-machine A/B against
+/// system malloc: wire encode -21%, decode -15%, the streaming task-state
+/// save -25% (Criterion); 20x replays through `replay-client` -2 to -7% daemon
+/// CPU, RSS -87 MB on tool-storm and +5 to +23 MB on lighter timelines.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> anyhow::Result<()> {
     #[cfg(feature = "profiling")]
     init_profiling();

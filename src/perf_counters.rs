@@ -16,7 +16,7 @@
 //! a field changes meaning. Added fields keep the version: readers must
 //! ignore fields they do not know.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -37,9 +37,14 @@ const BUCKET: Duration = Duration::from_secs(1);
 // ── Allocation counting ──────────────────────────────────────────────────
 
 /// Counts every allocation, process-wide and per thread, before handing it
-/// to the system allocator. `realloc` counts its full new size, as a fresh
-/// allocation would.
+/// to the backing allocator (the system's, or mimalloc with the `mimalloc`
+/// feature). `realloc` counts its full new size, as a fresh allocation would.
 struct CountingAllocator;
+
+#[cfg(feature = "mimalloc")]
+use mimalloc::MiMalloc as Backing;
+#[cfg(not(feature = "mimalloc"))]
+use std::alloc::System as Backing;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -65,11 +70,11 @@ fn thread_alloc_bytes() -> u64 {
     THREAD_ALLOC_BYTES.try_with(Cell::get).unwrap_or(0)
 }
 
-// SAFETY: every method forwards to `System` unchanged; the bookkeeping
+// SAFETY: every method forwards to `Backing` unchanged; the bookkeeping
 // touches only atomics and a const thread-local, never the heap.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
+        let pointer = unsafe { Backing.alloc(layout) };
         if !pointer.is_null() {
             record_allocation(layout.size());
         }
@@ -77,7 +82,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc_zeroed(layout) };
+        let pointer = unsafe { Backing.alloc_zeroed(layout) };
         if !pointer.is_null() {
             record_allocation(layout.size());
         }
@@ -85,11 +90,11 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) }
+        unsafe { Backing.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
+        let pointer = unsafe { Backing.realloc(pointer, layout, new_size) };
         if !pointer.is_null() {
             record_allocation(new_size);
         }
@@ -120,6 +125,9 @@ static SESSION_VISITS: AtomicU64 = AtomicU64::new(0);
 /// row, plus one so zero can mean "not yet".
 static FIRST_FRAME_NS: AtomicU64 = AtomicU64::new(0);
 static FIRST_CONTENT_NS: AtomicU64 = AtomicU64::new(0);
+/// Same encoding: to the startup thread having the daemon connected and the
+/// task state, drafts and selected session loaded (#29).
+static DAEMON_READY_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Record "now" in `cell` the first time only. One relaxed load per call
 /// once set.
@@ -183,6 +191,12 @@ pub fn transcript_row() {
     if COMMIT_FRAME.load(Relaxed) == COMMIT_FRAME_IN_FRAME {
         TRANSCRIPT_ROWS_BUILT_IN_COMMIT_FRAMES.fetch_add(1, Relaxed);
     }
+}
+
+/// The startup thread finished: daemon connected, initial state loaded (or
+/// the attempt failed). Runs off the UI thread.
+pub fn daemon_ready() {
+    mark_first(&DAEMON_READY_NS);
 }
 
 /// The bench harness's session visitor selected a session.
@@ -424,11 +438,15 @@ pub struct Startup {
     /// Process start to [`init`] (early in `waku::run`): dyld, static
     /// initializers and `main`. `null` with `origin: "init"`.
     pub init_ms: Option<f64>,
-    /// To the first root render: the first window frame being drawn.
+    /// To the first root render: the first window frame being drawn, which
+    /// is the launch shell when the daemon is not ready yet.
     pub first_frame_ms: Option<f64>,
     /// To the first transcript row built: the first frame with transcript
     /// content. `null` until a session with messages is on screen.
     pub first_content_ms: Option<f64>,
+    /// To the startup thread delivering the daemon and the loaded state.
+    /// Runs in parallel with GPUI start-up and the window opening.
+    pub daemon_ready_ms: Option<f64>,
 }
 
 impl Startup {
@@ -447,6 +465,7 @@ impl Startup {
             init_ms: init_offset_ns.map(|nanos| nanos as f64 / 1e6),
             first_frame_ms: since_origin(&FIRST_FRAME_NS),
             first_content_ms: since_origin(&FIRST_CONTENT_NS),
+            daemon_ready_ms: since_origin(&DAEMON_READY_NS),
         }
     }
 }
@@ -767,6 +786,7 @@ mod tests {
         assert!(json["per_commit"]["alloc_bytes"].is_null());
         assert_eq!(json["startup"]["origin"], "process");
         assert_eq!(json["startup"]["init_ms"], 5.0);
+        assert!(json["startup"]["daemon_ready_ms"].is_null());
         assert_eq!(json["totals"]["session_visits"], 0);
         assert_eq!(json["totals"]["renders"]["right_panel"], 0);
     }

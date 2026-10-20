@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use crate::ts::TS;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use ts_rs::TS;
 
 use crate::computer_use::ComputerAppGrant;
 use crate::model::ProviderKind;

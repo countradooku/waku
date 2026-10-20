@@ -11,9 +11,9 @@
 //! `terminalExited`) carry no `payload`; an explicit `"payload": null` from
 //! an older daemon or a recorded timeline is accepted.
 
+use crate::ts::TS;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::computer_use::ComputerUseState;

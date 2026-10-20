@@ -23,8 +23,14 @@ path = "src/bin/fake-claude.rs"
 name = "rpc-latency"
 path = "src/bin/rpc-latency.rs"
 
+[[bin]]
+name = "replay-client"
+path = "src/bin/replay-client.rs"
+
 [dependencies]
 anyhow = "1.0"
+# Same global allocator as waku-daemon, so measurements match it.
+mimalloc = "0.1.52"
 base64 = "0.22"
 crossbeam-channel = "0.5"
 # Timelines are committed gzip-compressed; see README.md for the size budget.

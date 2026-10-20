@@ -3,6 +3,11 @@ _version: 2
 diff.ignore_whitespace:
   en: Ignore whitespace
 
+startup.daemon_failed:
+  en: Waku could not start its daemon
+startup.daemon_failed_hint:
+  en: Quit and reopen Waku to try again.
+
 menu.about:
   en: About %{app}
 menu.check_for_updates:

@@ -2,6 +2,9 @@ _version: 1
 
 diff.ignore_whitespace: 空白の変更を無視
 
+startup.daemon_failed: Waku のデーモンを起動できませんでした
+startup.daemon_failed_hint: Waku を終了して開き直すと再試行します。
+
 commit.pull: プル（早送りのみ）
 commit.pulling: プル中…
 commit.pulled: プルしました

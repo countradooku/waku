@@ -1974,17 +1974,19 @@ impl Waku {
         }
     }
 
-    pub fn new(
-        window: &mut Window,
-        cx: &mut App,
-        daemon: waku_client::DaemonSupervisor,
-    ) -> Entity<Self> {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let store = StateStore::remote(daemon.clone());
+    /// Build the app view from what the startup thread loaded
+    /// (`crate::startup`): the daemon, task state, drafts and the hydrated
+    /// selected session all arrive ready, so nothing here waits on the
+    /// daemon except a legacy projectless migration.
+    pub fn new(window: &mut Window, cx: &mut App, loaded: crate::startup::Loaded) -> Entity<Self> {
+        let crate::startup::Loaded {
+            daemon,
+            store,
+            mut state,
+            composer_draft_store,
+            composer_drafts,
+        } = loaded;
         let daemon_hostname = crate::daemon::local_hostname().unwrap_or_else(|| "this-mac".into());
-        let composer_draft_store = ComposerDraftStore::remote(daemon.clone());
-        let composer_drafts = composer_draft_store.load().unwrap_or_default();
-        let mut state = store.load_or_fresh(cwd);
         let home_directory = crate::projectless::home_directory();
         state.apply_daemon_settings(daemon.settings());
         if let Err(error) = daemon.update_settings(state.daemon_settings()) {
@@ -2335,11 +2337,6 @@ impl Waku {
         // surface falls back to freezing the page to a bitmap while an
         // overlay is open.
         let scene_overlay_enabled = window.enable_scene_overlay().is_ok();
-        let (updater_status, updater_events) = cx
-            .try_global::<crate::updater::UpdaterState>()
-            .and_then(|state| state.0.as_ref())
-            .map(|updater| (updater.status(), Some(updater.events())))
-            .unwrap_or_default();
         let entity = cx.new(|cx| {
             let settings_focus = cx.focus_handle();
             let onboarding_add_project_focus = cx.focus_handle();
@@ -2368,22 +2365,6 @@ impl Waku {
                 this.set_updater_button_focused(false, cx);
             })
             .detach();
-
-            if let Some(updater_events) = updater_events {
-                cx.spawn(async move |this: WeakEntity<Self>, cx| {
-                    while let Ok(event) = updater_events.recv().await {
-                        if this
-                            .update(cx, |this: &mut Self, cx| {
-                                this.handle_updater_event(event, cx)
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                })
-                .detach();
-            }
 
             cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
                 if this.state.theme == ThemePreference::System {
@@ -2818,11 +2799,10 @@ impl Waku {
                 settings_focus,
                 onboarding_add_project_focus,
                 onboarding_projectless_focus,
-                automatic_updates_enabled: cx
-                    .try_global::<crate::updater::UpdaterState>()
-                    .and_then(|updater| updater.0.as_ref())
-                    .is_some_and(|updater| updater.automatically_checks_for_updates()),
-                updater_status,
+                // Filled in by `attach_updater` once the updater starts,
+                // after the first frame.
+                automatic_updates_enabled: false,
+                updater_status: Default::default(),
                 updater_button_focus,
                 updater_button_hovered: false,
                 updater_button_focused: false,
@@ -3129,25 +3109,66 @@ impl Waku {
             for session_id in startup_live_session_ids {
                 this.start_runtime_attachment(session_id, cx);
             }
-            this.start_pending_checkpoint_captures(cx);
-            // The autocomplete indexes prefetch alongside, so typing `/` or
-            // `@` into the very first prompt already has data to draw.
-            this.refresh_composer_sources(cx);
-            // Re-detect providers after resolving the user's login-shell
-            // environment off-thread. Detection then starts model and version
-            // discovery for every CLI it finds, including nvm/fnm-managed
-            // installs.
-            this.refresh_provider_detection(None);
-            // The skill library too: the Skills settings page must open onto
-            // data, not a scan.
-            this.ensure_skills_catalog(false, cx);
-            // And the header's "open project in app" targets, so its menu
-            // lists installed apps and icons without ever probing on a frame.
-            this.detect_open_in_apps(cx);
             #[cfg(feature = "perf-counters")]
             this.start_perf_session_visits(cx);
         });
+        // The rest only prefetches: none of it is on the first frame, and
+        // provider detection spawns a login shell and every provider CLI.
+        // Let the first frame go out before it competes for CPU and the
+        // daemon (#29).
+        let prefetch = entity.downgrade();
+        crate::startup::after_first_frame(window, cx, move |_, cx| {
+            prefetch
+                .update(cx, |this, cx| {
+                    this.start_pending_checkpoint_captures(cx);
+                    // The autocomplete indexes prefetch alongside, so typing
+                    // `/` or `@` into the very first prompt already has data
+                    // to draw.
+                    this.refresh_composer_sources(cx);
+                    // Re-detect providers after resolving the user's
+                    // login-shell environment off-thread. Detection then
+                    // starts model and version discovery for every CLI it
+                    // finds, including nvm/fnm-managed installs.
+                    this.refresh_provider_detection(None);
+                    // The skill library too: the Skills settings page must
+                    // open onto data, not a scan.
+                    this.ensure_skills_catalog(false, cx);
+                    // And the header's "open project in app" targets, so its
+                    // menu lists installed apps and icons without ever
+                    // probing on a frame.
+                    this.detect_open_in_apps(cx);
+                })
+                .ok();
+        });
         entity
+    }
+
+    /// Subscribe to the updater, once `crate::startup` has started it. A
+    /// no-op while there is none (development builds, unconfigured releases).
+    pub(crate) fn attach_updater(&mut self, cx: &mut Context<Self>) {
+        let Some(updater) = cx
+            .try_global::<crate::updater::UpdaterState>()
+            .and_then(|state| state.0.as_ref())
+        else {
+            return;
+        };
+        self.updater_status = updater.status();
+        self.automatic_updates_enabled = updater.automatically_checks_for_updates();
+        let updater_events = updater.events();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            while let Ok(event) = updater_events.recv().await {
+                if this
+                    .update(cx, |this: &mut Self, cx| {
+                        this.handle_updater_event(event, cx)
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 }
 

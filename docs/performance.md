@@ -246,7 +246,7 @@ Definitions:
 
 | Counter | Counted where |
 | --- | --- |
-| frame | Each `Waku::render`. The root re-renders on every window draw, so this is the frame count, and `renders.root` equals it. |
+| frame | Each `Waku::render`, plus each render of the launch shell that stands in for it while the daemon starts (`src/startup.rs`). The root re-renders on every window draw, so this is the frame count, and `renders.root` equals it. |
 | `renders.sidebar` / `transcript` / `right_panel` | The `WakuPane` delegates. A cached pane replaying its subtree is not a render. |
 | `renders.composer` | `ComposerInput::render`. |
 | stream commit | A pump drain (`drain_event_pump`) that applied at least one text or reasoning delta, however many sessions streamed in it. |
@@ -260,7 +260,7 @@ Report schema (`"schema": "waku.perf-counters/1"`). Counts are integers;
 `null` when their denominator is zero. Fields are only ever added within a
 schema version (readers ignore what they do not know); a field that changes
 meaning bumps it. `startup` and `totals.session_visits` were added for the
-baseline harness (#9).
+baseline harness (#9), `startup.daemon_ready_ms` for the parallel launch (#29).
 
 | Field | Meaning |
 | --- | --- |
@@ -268,8 +268,9 @@ baseline harness (#9).
 | `elapsed_ms` | Time since the counters started (early in `waku::run`). |
 | `startup.origin` | `"process"` when the times below run from the moment the OS created the process (macOS, from `proc_pidinfo`); `"init"` when the process start is unknown and they run from counter start. |
 | `startup.init_ms` | Process start to counter start: exec, dyld, static initializers and `main` up to `waku::run`. `null` with `origin: "init"`. |
-| `startup.first_frame_ms` | To the first root render, the first window frame being drawn (not yet presented). |
+| `startup.first_frame_ms` | To the first root render, the first window frame being drawn (not yet presented). This is the launch shell's frame when the daemon was not ready yet as the window opened. |
 | `startup.first_content_ms` | To the first transcript row built, i.e. the first frame drawing transcript content. `null` until a session with messages is on screen. |
+| `startup.daemon_ready_ms` | To the `waku-startup` thread delivering the connected daemon with task state, drafts and the selected session loaded (or failing to). It runs in parallel with GPUI start-up and the window opening, so `first_frame_ms` < `daemon_ready_ms` means the launch shell was on screen. |
 | `totals.frames` | Frames since start. |
 | `totals.renders.{root,sidebar,transcript,right_panel,composer}` | Renders since start. |
 | `totals.stream_commits` | Stream commits since start. |
@@ -377,6 +378,28 @@ per-round Criterion medians. A benchmark fails the job only when both hold:
 - the slowdown is larger than the spread between that runner's own rounds.
 
 The report is written to the job summary.
+
+### Release build settings (#30)
+
+Measured on the M5 Pro with `scripts/bench/compare.py` over alternating
+rounds of release-profile Criterion benches, plus daemon replays through
+`replay-client` (numbers in the #30 commit):
+
+- **LTO stays thin.** Fat LTO made the app 6% and the daemon 8% smaller, but
+  no benchmark got faster (5 rounds: -2% to +5%, all within noise), and it
+  costs +33% on a full release build and +82% on a relink.
+- **The daemon uses mimalloc** (`crates/waku-daemon/src/main.rs`, and the
+  bench daemon so measurements match). The app has it behind the `mimalloc`
+  feature, off by default until its RSS has been measured in the GUI
+  harness's memory scenarios; with `perf-counters` the counting allocator
+  forwards to it.
+- **ts-rs is behind `waku-protocol`'s `ts` feature**, which only
+  `export_types` needs (`bun run protocol:generate` / `protocol:check` pass
+  it). Without it `#[derive(TS)]` is a no-op stub (`crates/waku-ts-stub`).
+- **PGO** is a script, not the default build: `scripts/bench/pgo.sh` builds
+  instrumented binaries, trains them on the benches, headless timeline
+  replays and `rpc-latency` (and on the GUI harness with `PGO_GUI=1`),
+  merges the profiles and writes PGO binaries to `$PGO_DIR/release`.
 
 ## Known floor and next levers
 

@@ -264,6 +264,9 @@ fn run(
     let (Some(endpoint), Some(website_id)) = (ENDPOINT, WEBSITE_ID) else {
         return;
     };
+    // The runtime, TLS stack and HTTP client are the expensive part; build
+    // them after the window's first frame (#29). Events queue meanwhile.
+    crate::startup::wait_until_launch_settled();
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

@@ -76,10 +76,17 @@ mod platform;
 mod profiling;
 mod query;
 mod review_diff;
+mod startup;
 mod terminal;
 mod theme;
 mod ui;
 mod updater;
+
+/// See the `mimalloc` feature in Cargo.toml. With `perf-counters` the
+/// counting allocator is the global one and forwards to mimalloc instead.
+#[cfg(all(feature = "mimalloc", not(feature = "perf-counters")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub use waku_client::{
     checkpoint, command_env, composer_complete, git_branch, git_commit, i18n, identity, model,
@@ -87,11 +94,10 @@ pub use waku_client::{
 };
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
+    App, AppContext as _, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, point, px, size,
 };
 
-use crate::app::Waku;
 use crate::identity::{APP_ID, APP_NAME};
 actions!(
     waku,
@@ -232,8 +238,9 @@ pub fn run() {
     crate::profiling::init();
     #[cfg(feature = "perf-counters")]
     crate::perf_counters::init();
-    let daemon = crate::daemon::start_process()
-        .unwrap_or_else(|error| panic!("failed to start Waku daemon: {error:#}"));
+    // The daemon starts, handshakes and loads the task state on its own
+    // thread while GPUI initializes and the window opens (#29).
+    let bootstrap = crate::startup::Bootstrap::spawn();
     gpui_platform::application()
         .with_assets(crate::assets::Assets)
         .with_main_window_reopen()
@@ -258,10 +265,10 @@ pub fn run() {
 
             // Platform updaters only run from a supported release layout (or
             // when explicitly forced for development); everywhere else the
-            // menu item is omitted along with the updater itself.
-            let updater = crate::updater::Updater::init();
-            let updater_available = updater.is_some();
-            cx.set_global(crate::updater::UpdaterState(updater));
+            // menu item is omitted along with the updater itself. It starts
+            // after the first frame (`startup::schedule_launch_work`), which
+            // adds the menu item when there is one.
+            cx.set_global(crate::updater::UpdaterState(None));
             cx.on_action(|_: &CheckForUpdates, cx| {
                 if let Some(updater) = &cx.global::<crate::updater::UpdaterState>().0 {
                     updater.check_for_updates();
@@ -404,10 +411,7 @@ pub fn run() {
                     },
                     move |window, cx| {
                         crate::platform::configure_main_window_close_behavior(window, cx);
-                        let waku = Waku::new(window, cx, daemon);
-                        let composer_focus = waku.read(cx).composer_focus(cx);
-                        window.focus(&composer_focus, cx);
-                        waku
+                        cx.new(|cx| crate::startup::AppRoot::new(bootstrap, window, cx))
                     },
                 )
                 .expect("failed to open Waku window");
@@ -418,8 +422,13 @@ pub fn run() {
                     return;
                 };
                 window
-                    .update(cx, |waku, window, cx| {
-                        waku.open_task_from_notification(session_id, cx);
+                    .update(cx, |root, window, cx| {
+                        let Some(waku) = root.waku().cloned() else {
+                            return;
+                        };
+                        waku.update(cx, |waku, cx| {
+                            waku.open_task_from_notification(session_id, cx);
+                        });
                         window.activate_window();
                         cx.activate(true);
                     })
@@ -437,10 +446,7 @@ pub fn run() {
                 })
                 .ok();
 
-            set_app_menus(cx, updater_available);
-            // A Linux handoff retains the previous prefix until this freshly
-            // relaunched build has successfully opened its main window.
-            crate::updater::signal_relaunch_ready();
+            set_app_menus(cx, false);
         });
 }
 

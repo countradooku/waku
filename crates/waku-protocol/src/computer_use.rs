@@ -1,6 +1,6 @@
+use crate::ts::TS;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use ts_rs::TS;
 
 /// Whether this build may run Computer Use.
 ///
