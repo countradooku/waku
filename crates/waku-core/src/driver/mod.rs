@@ -13,6 +13,9 @@ mod pi;
 mod support;
 mod title_refresh;
 
+/// One-shot title generation for the orchestrator's `TitlePort` (RFC 0001).
+pub(crate) use codex::generate_codex_title;
+
 pub(crate) use acp::catalog_agent;
 
 use std::path::PathBuf;

@@ -31,7 +31,8 @@ pub use decide::{
     OrchestratorSettings, decide,
 };
 pub use effects::executor::{
-    CancelToken, ClaimedEffect, DefaultExecutor, EffectContext, EffectError, EffectExecutor, Ports,
+    CancelToken, CheckpointPort, ClaimedEffect, CleanupPort, DefaultExecutor, EffectContext,
+    EffectError, EffectExecutor, PortError, Ports, PrepareRequest, TitlePort, WorkspacePort,
 };
 pub use effects::worker::{EffectWorkerPool, WorkerConfig};
 pub use effects::{Effect, EffectType, Lane};

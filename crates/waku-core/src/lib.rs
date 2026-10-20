@@ -57,6 +57,7 @@ pub mod model_catalog;
 pub mod opencode_api;
 pub mod opencode_service;
 pub mod opencode_session;
+pub mod orchestrator_ports;
 pub mod persistence;
 pub mod pi_session;
 pub mod projectless;
