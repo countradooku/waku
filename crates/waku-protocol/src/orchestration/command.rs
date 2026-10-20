@@ -18,6 +18,8 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CommandEnvelope {
     pub command_id: CommandId,
@@ -28,6 +30,10 @@ pub struct CommandEnvelope {
 
 /// How `message.dispatch` delivers a message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+// A client → daemon union: an unknown tag fails to decode and the daemon
+// answers `badRequest`, so the schema marks it closed instead of open.
+#[cfg_attr(feature = "schema", schemars(extend("x-waku-closed" = true)))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -51,6 +57,11 @@ pub enum DispatchMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+// A client → daemon union: an unknown tag fails to decode and the daemon
+// answers `badRequest`, so the schema marks it closed instead of open.
+#[cfg_attr(feature = "schema", schemars(extend("x-waku-closed" = true)))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -63,6 +74,11 @@ pub enum ForkSourcePoint {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+// A client → daemon union: an unknown tag fails to decode and the daemon
+// answers `badRequest`, so the schema marks it closed instead of open.
+#[cfg_attr(feature = "schema", schemars(extend("x-waku-closed" = true)))]
 #[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum Command {
     // Projects (R8)

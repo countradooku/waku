@@ -50,6 +50,7 @@ open_enum! {
 
 /// The payload of `thread.updated`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadUpdate {
     pub change: ThreadChange,
@@ -59,6 +60,7 @@ pub struct ThreadUpdate {
 /// A committed domain fact. Internally tagged by `type` (RFC 0003 §1.1) so an
 /// unknown event type skips its payload and decodes to `Unknown`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type")]
 pub enum DomainEvent {
     #[serde(rename = "project.updated")]
@@ -302,6 +304,7 @@ impl DomainEvent {
 
 /// An event as committed: what streams send as `event{sequence, …}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct StoredEvent {
     pub sequence: Sequence,

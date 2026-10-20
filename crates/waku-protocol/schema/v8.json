@@ -1,5 +1,14 @@
 {
   "$defs": {
+    "Actor": {
+      "enum": [
+        "user",
+        "agent",
+        "system"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
     "AppGrant": {
       "properties": {
         "appName": {
@@ -12,6 +21,395 @@
         }
       },
       "type": "object"
+    },
+    "AppThread": {
+      "description": "A user-visible conversation. It survives provider exits.",
+      "properties": {
+        "activeOrderKey": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrderKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "activeProviderThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archivedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "autoSettleDisabledAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "createdBy": {
+          "$ref": "#/$defs/Actor"
+        },
+        "creationSource": {
+          "$ref": "#/$defs/CreationSource"
+        },
+        "deletedAt": {
+          "description": "Soft delete; cleanup runs as effects.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "forkedFrom": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ForkOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "historyOrigin": {
+          "$ref": "#/$defs/HistoryOrigin"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "interactionMode": {
+          "$ref": "#/$defs/InteractionMode"
+        },
+        "lastReplyAt": {
+          "description": "Sidebar recency.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lastSnoozeWakeAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lastVisitedAt": {
+          "description": "Monotonic; a visit never bumps `updated_at`.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limitRecovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LimitRecovery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lineage": {
+          "$ref": "#/$defs/ThreadLineage"
+        },
+        "modelSelection": {
+          "$ref": "#/$defs/ModelSelection",
+          "description": "The default for the next run."
+        },
+        "pinOrderKey": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrderKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pinnedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "projectId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "rollback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RollbackState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtimeMode": {
+          "$ref": "#/$defs/RuntimeMode"
+        },
+        "settledAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "settledOverride": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SettledOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snoozedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "snoozedUntil": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "Always displayable.",
+          "type": "string"
+        },
+        "titleRegeneration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TitleRegeneration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "titleSource": {
+          "$ref": "#/$defs/TitleSource"
+        },
+        "unsettledAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "worktreeOwned": {
+          "description": "Created by Waku, so deleting the thread removes it.",
+          "type": "boolean"
+        },
+        "worktreePath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "createdBy",
+        "creationSource",
+        "title",
+        "titleSource",
+        "modelSelection",
+        "runtimeMode",
+        "interactionMode",
+        "historyOrigin",
+        "lineage",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ApprovalCaps": {
+      "properties": {
+        "apply_patch": {
+          "default": false,
+          "type": "boolean"
+        },
+        "callbacks_are_live_only": {
+          "default": false,
+          "description": "The reply must reach the same live process. A restart loses the request.",
+          "type": "boolean"
+        },
+        "command": {
+          "default": false,
+          "type": "boolean"
+        },
+        "file_change": {
+          "default": false,
+          "type": "boolean"
+        },
+        "file_read": {
+          "default": false,
+          "type": "boolean"
+        },
+        "from_subagents": {
+          "default": false,
+          "type": "boolean"
+        },
+        "native_request_ids": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ArchivedPage": {
+      "description": "Archived threads, most recently archived first.",
+      "properties": {
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/ThreadRow"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "type": "object"
+    },
+    "ArchivedParams": {
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "At most [`MAX_ARCHIVED_PAGE`]; that is also the default.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "projectId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Attachment": {
+      "description": "A file attached to a message. Mirrors `model::MessageAttachment` with\ncamelCase field names.",
+      "properties": {
+        "blobReference": {
+          "description": "Durable `waku-blob:` or `waku-attachment:` reference.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isDir": {
+          "type": "boolean"
+        },
+        "isImage": {
+          "type": "boolean"
+        },
+        "mention": {
+          "description": "Provider-facing path text, relative to the workspace when possible.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute path on the daemon host, handed to the provider.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "mention",
+        "name"
+      ],
+      "type": "object"
+    },
+    "AttemptReason": {
+      "enum": [
+        "initial",
+        "steering_restart",
+        "retry",
+        "provider_recovery"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "AttemptStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "interrupted",
+        "failed",
+        "cancelled",
+        "superseded"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "BackgroundWorkKind": {
+      "enum": [
+        "subagent",
+        "shell",
+        "monitor",
+        "task"
+      ],
+      "type": "string",
+      "x-waku-open": true
     },
     "BlobDownloadItem": {
       "oneOf": [
@@ -76,6 +474,377 @@
         "reference"
       ],
       "type": "object"
+    },
+    "CancelledBackgroundWork": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/BackgroundWorkKind"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "label",
+        "id"
+      ],
+      "type": "object"
+    },
+    "Capabilities": {
+      "properties": {
+        "approvals": {
+          "$ref": "#/$defs/ApprovalCaps",
+          "default": {
+            "apply_patch": false,
+            "callbacks_are_live_only": false,
+            "command": false,
+            "file_change": false,
+            "file_read": false,
+            "from_subagents": false,
+            "native_request_ids": false
+          }
+        },
+        "checkpointing": {
+          "$ref": "#/$defs/CheckpointCaps",
+          "default": {
+            "app_can_checkpoint_filesystem": false,
+            "nested_scopes": false,
+            "provider_can_read_conversation_snapshot": false,
+            "provider_can_rollback_conversation": false,
+            "provider_rollback_returns_snapshot": false
+          }
+        },
+        "context": {
+          "$ref": "#/$defs/ContextCaps",
+          "default": {
+            "accepts_developer_context": false,
+            "accepts_synthetic_user_context": false,
+            "accepts_system_context": false,
+            "can_consume_handoff_summaries": false,
+            "can_generate_summaries": false,
+            "delta_handoff": false,
+            "full_thread_handoff": false,
+            "native_history_injection": false
+          }
+        },
+        "extras": {
+          "$ref": "#/$defs/ExtraCaps",
+          "default": {
+            "account_usage_stream": false,
+            "agent_presets": false,
+            "background_work": false,
+            "compaction": false,
+            "computer_use": false,
+            "goals": false,
+            "image_mime_types": [],
+            "model_discovery": false,
+            "native_image_input": false
+          }
+        },
+        "identity": {
+          "$ref": "#/$defs/IdentityCaps",
+          "default": {
+            "item_ids": "none",
+            "request_ids": "none",
+            "thread_ids": "none",
+            "turn_ids": "none"
+          }
+        },
+        "planning": {
+          "$ref": "#/$defs/PlanningCaps",
+          "default": {
+            "emits_plan_updated": false,
+            "emits_proposed_plan": false,
+            "emits_todo_list": false,
+            "plan_deltas_have_item_ids": false,
+            "structured_questions": false
+          }
+        },
+        "runtime_policy": {
+          "$ref": "#/$defs/RuntimePolicyCaps",
+          "default": {
+            "enforcement": "client_boundary",
+            "plan_mode_toggle": false,
+            "supported_modes": []
+          }
+        },
+        "sessions": {
+          "$ref": "#/$defs/SessionCaps",
+          "default": {
+            "model_switch_in_session": false,
+            "multiple_threads_per_session": false,
+            "pending_requests_survive_restart": false,
+            "provider_switching_via_handoff": false,
+            "runtime_mode_switch_in_session": false
+          }
+        },
+        "streaming": {
+          "$ref": "#/$defs/StreamingCaps",
+          "default": {
+            "assistant_text": false,
+            "emits_message_completed": false,
+            "plan_text": false,
+            "reasoning": false,
+            "tool_output": false
+          }
+        },
+        "subagents": {
+          "$ref": "#/$defs/SubagentCaps",
+          "default": {
+            "can_close": false,
+            "can_fork_thread": false,
+            "can_wait": false,
+            "emits_lifecycle": false,
+            "exposes_thread_ids": false,
+            "supported": false
+          }
+        },
+        "threads": {
+          "$ref": "#/$defs/ThreadCaps",
+          "default": {
+            "create_empty_thread": false,
+            "fork": false,
+            "fork_from_subagent_thread": false,
+            "fork_from_turn": false,
+            "native_thread_id": false,
+            "read_snapshot": false,
+            "rollback": false
+          }
+        },
+        "tools": {
+          "$ref": "#/$defs/ToolCaps",
+          "default": {
+            "dynamic_tool_callbacks": false,
+            "emits_tool_completed": false,
+            "emits_tool_output": false,
+            "emits_tool_started": false,
+            "mcp_tools": false,
+            "tool_item_ids": false
+          }
+        },
+        "turns": {
+          "$ref": "#/$defs/TurnCaps",
+          "default": {
+            "active_steering": false,
+            "active_steering_interrupts_tools": false,
+            "emits_turn_completed": false,
+            "emits_turn_started": false,
+            "interrupt": false,
+            "native_turn_id": false,
+            "queued_messages": false,
+            "steering_by_interrupt_restart": false,
+            "terminal_status_quality": "none"
+          }
+        }
+      },
+      "type": "object"
+    },
+    "Checkpoint": {
+      "properties": {
+        "appRunOrdinal": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "capturedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/CheckpointFile"
+          },
+          "type": "array"
+        },
+        "gitRef": {
+          "description": "New refs: `refs/waku/t/<thread>/<scope>/<ordinal>`; imported refs keep\ntheir names.",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "ordinalWithinScope": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parentCheckpointId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/CheckpointStatus"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "scopeId",
+        "nodeId",
+        "ordinalWithinScope",
+        "gitRef",
+        "status",
+        "capturedAt"
+      ],
+      "type": "object"
+    },
+    "CheckpointCaps": {
+      "properties": {
+        "app_can_checkpoint_filesystem": {
+          "default": false,
+          "type": "boolean"
+        },
+        "nested_scopes": {
+          "default": false,
+          "type": "boolean"
+        },
+        "provider_can_read_conversation_snapshot": {
+          "default": false,
+          "type": "boolean"
+        },
+        "provider_can_rollback_conversation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "provider_rollback_returns_snapshot": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "CheckpointFile": {
+      "description": "One file of a checkpoint diff summary.",
+      "properties": {
+        "additions": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deletions": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "description": "Open string: `added`, `modified`, `deleted`, `renamed`, …",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "additions",
+        "deletions"
+      ],
+      "type": "object"
+    },
+    "CheckpointScope": {
+      "properties": {
+        "advancesAppRunCount": {
+          "description": "True only for `RootRun`.",
+          "type": "boolean"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ScopeKind"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "ordinalWithinParent": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parentScopeId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "nodeId",
+        "kind",
+        "ordinalWithinParent",
+        "cwd",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "CheckpointStatus": {
+      "enum": [
+        "ready",
+        "missing",
+        "error",
+        "stale"
+      ],
+      "type": "string",
+      "x-waku-open": true
     },
     "ClientInfo": {
       "properties": {
@@ -305,9 +1074,1618 @@
         }
       ]
     },
+    "CohortDisposition": {
+      "enum": [
+        "open",
+        "stopped",
+        "disposed"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "Command": {
+      "oneOf": [
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "orderKey": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OrderKey"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "project.create",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "projectId",
+            "name",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "project.rename",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "projectId",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "orderKey": {
+              "$ref": "#/$defs/OrderKey"
+            },
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "project.reorder",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "projectId",
+            "orderKey"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "project.remove",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "projectId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "importedNativeThread": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProviderRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "interactionMode": {
+              "$ref": "#/$defs/InteractionMode",
+              "default": "default"
+            },
+            "modelSelection": {
+              "$ref": "#/$defs/ModelSelection"
+            },
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "runtimeMode": {
+              "$ref": "#/$defs/RuntimeMode",
+              "default": "full_access"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "thread.create",
+              "type": "string"
+            },
+            "workspace": {
+              "$ref": "#/$defs/WorkspaceStrategy"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "projectId",
+            "modelSelection",
+            "workspace"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.archive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.unarchive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.delete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.settle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.unsettle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.auto_settle.set",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "enabled"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.snooze",
+              "type": "string"
+            },
+            "until": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "until"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.unsnooze",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "orderKey": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OrderKey"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.pin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.unpin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "orderKey": {
+              "$ref": "#/$defs/OrderKey"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.pin.reorder",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "orderKey"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "orderKey": {
+              "$ref": "#/$defs/OrderKey"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.active.reorder",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "orderKey"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.visit",
+              "type": "string"
+            },
+            "visitedAt": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "visitedAt"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.mark_unread",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.rename",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "title"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.title.regenerate",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expectedBranch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expectedEmpty": {
+              "type": "boolean"
+            },
+            "expectedWorktreePath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.workspace.set",
+              "type": "string"
+            },
+            "worktreePath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "runtimeMode": {
+              "$ref": "#/$defs/RuntimeMode"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.runtime_mode.set",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "runtimeMode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "interactionMode": {
+              "$ref": "#/$defs/InteractionMode"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.interaction_mode.set",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "interactionMode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "modelSelection": {
+              "$ref": "#/$defs/ModelSelection"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.model_selection.set",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "modelSelection"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "autoResume": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "runId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "snooze": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.limit_recovery.set",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "attachments": {
+              "items": {
+                "$ref": "#/$defs/Attachment"
+              },
+              "type": "array"
+            },
+            "context": {
+              "items": {
+                "$ref": "#/$defs/ContextRecord"
+              },
+              "type": "array"
+            },
+            "displayText": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "messageId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "mode": {
+              "$ref": "#/$defs/DispatchMode"
+            },
+            "modelSelection": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelSelection"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sourcePlan": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "titleSeed": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "message.dispatch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "messageId",
+            "text",
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "holdQueue": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "runId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "run.interrupt",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "runId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "prepared_run.retry",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "queue.resume",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "runId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "queued_run.cancel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "(P3)",
+          "properties": {
+            "beforeRunId": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "runId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "queued_run.reorder",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "(P3)",
+          "properties": {
+            "attachments": {
+              "items": {
+                "$ref": "#/$defs/Attachment"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "runId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "queued_run.edit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "runId",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "(P3)",
+          "properties": {
+            "queuedRunId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "targetRunId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "queued_run.promote_to_steer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "queuedRunId",
+            "targetRunId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "requestId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "response": {
+              "$ref": "#/$defs/RuntimeResponse"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "runtime_request.respond",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "requestId",
+            "response"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "requestId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "user_input.dismiss",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "requestId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "runId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "subagentId": {
+              "$ref": "#/$defs/NodeId"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "subagent.stop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "runId",
+            "subagentId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpointId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "restoreFiles": {
+              "default": false,
+              "type": "boolean"
+            },
+            "scopeId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "checkpoint.rollback",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "scopeId",
+            "checkpointId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "providerSessionId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "provider_session.detach",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "providerSessionId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "(P3)",
+          "properties": {
+            "sourcePoint": {
+              "$ref": "#/$defs/ForkSourcePoint"
+            },
+            "sourceThreadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "targetThreadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "thread.fork",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "sourceThreadId",
+            "targetThreadId",
+            "sourcePoint"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "(P3)",
+          "properties": {
+            "sourcePoint": {
+              "$ref": "#/$defs/ForkSourcePoint"
+            },
+            "sourceThreadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "targetThreadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread.merge_back",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "sourceThreadId",
+            "targetThreadId",
+            "sourcePoint"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "(P3)",
+          "properties": {
+            "modelSelection": {
+              "$ref": "#/$defs/ModelSelection"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "provider.switch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "modelSelection"
+          ],
+          "type": "object"
+        }
+      ],
+      "x-waku-closed": true
+    },
+    "CommandId": {
+      "description": "1–256 bytes of `[A-Za-z0-9:._-]`; retries reuse it.",
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9:._-]+$",
+      "type": "string"
+    },
+    "CommandOutputItem": {
+      "oneOf": [
+        {
+          "description": "The whole retained output; `truncated` when some of it was dropped.",
+          "properties": {
+            "running": {
+              "type": "boolean"
+            },
+            "text": {
+              "type": "string"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "replace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text",
+            "truncated",
+            "running"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "New output after the previous frame.",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "append",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The command finished; the stream ends after this.",
+          "properties": {
+            "exitCode": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "truncated"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CommandOutputSpec": {
+      "properties": {
+        "itemId": {
+          "description": "A command execution turn item (or a background node's item).",
+          "format": "uuid",
+          "type": "string"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "itemId"
+      ],
+      "type": "object"
+    },
+    "CompletionDelivery": {
+      "properties": {
+        "observedByRunId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/DeliveryState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "CompletionWake": {
+      "enum": [
+        "always",
+        "settled_only"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
     "Compression": {
       "enum": [
         "zstd"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ContextCaps": {
+      "properties": {
+        "accepts_developer_context": {
+          "default": false,
+          "type": "boolean"
+        },
+        "accepts_synthetic_user_context": {
+          "default": false,
+          "type": "boolean"
+        },
+        "accepts_system_context": {
+          "default": false,
+          "type": "boolean"
+        },
+        "can_consume_handoff_summaries": {
+          "default": false,
+          "type": "boolean"
+        },
+        "can_generate_summaries": {
+          "default": false,
+          "type": "boolean"
+        },
+        "delta_handoff": {
+          "default": false,
+          "type": "boolean"
+        },
+        "full_thread_handoff": {
+          "default": false,
+          "type": "boolean"
+        },
+        "max_recommended_handoff_chars": {
+          "description": "`None` = the orchestrator default (`DEFAULT_HANDOFF_CHARS = 100_000`).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "native_history_injection": {
+          "default": false,
+          "description": "Waku name for T3's optional `injectHistory`.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ContextHandoff": {
+      "properties": {
+        "coveredRunOrdinals": {
+          "$ref": "#/$defs/RunOrdinalRange",
+          "description": "Inclusive."
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "createdByProviderInstanceId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderInstanceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HandoffDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fromProviderThreadIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "history": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HandoffHistory"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/HandoffStatus"
+        },
+        "strategy": {
+          "$ref": "#/$defs/HandoffStrategy"
+        },
+        "summaryMessageId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summaryText": {
+          "type": "string"
+        },
+        "targetRunId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "toProviderThreadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "transferId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "targetRunId",
+        "toProviderThreadId",
+        "coveredRunOrdinals",
+        "strategy",
+        "status",
+        "summaryText",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ContextPoint": {
+      "properties": {
+        "checkpointId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerThreadRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "providerTurnRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "turnItemId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ContextRecord": {
+      "description": "A composer context record (a file, a selection, a terminal excerpt…).\nThe record body is opaque to the orchestrator.",
+      "properties": {
+        "contextId": {
+          "type": "string"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "description": "Open string: `file`, `selection`, `image`, `terminal`, `mention`, …",
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "contextId",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ContextTransfer": {
+      "properties": {
+        "basePoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "consumedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "createdBy": {
+          "$ref": "#/$defs/Actor"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TransferKind"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TransferResolution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourcePoint": {
+          "$ref": "#/$defs/ContextPoint"
+        },
+        "sourceProviderInstanceId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderInstanceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceThreadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TransferStatus"
+        },
+        "targetProviderInstanceId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderInstanceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetRunId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "targetThreadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "sourceThreadId",
+        "targetThreadId",
+        "sourcePoint",
+        "status",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ContextUsage": {
+      "description": "How full the provider's context window is.",
+      "properties": {
+        "tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "window": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "tokens"
+      ],
+      "type": "object"
+    },
+    "ContinuationKind": {
+      "enum": [
+        "restart",
+        "usage_limit",
+        "manual"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "CreationSource": {
+      "enum": [
+        "desktop",
+        "web",
+        "mobile",
+        "mcp",
+        "provider",
+        "server",
+        "import"
       ],
       "type": "string",
       "x-waku-open": true
@@ -382,6 +2760,442 @@
           "type": "object"
         }
       ]
+    },
+    "DelegatedCompletionCohort": {
+      "description": "(P3) The delegated-task completion cohort of a parent run.",
+      "properties": {
+        "delivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disposition": {
+          "$ref": "#/$defs/CohortDisposition"
+        },
+        "nextGeneration": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "disposition",
+        "nextGeneration"
+      ],
+      "type": "object"
+    },
+    "DeliveryState": {
+      "enum": [
+        "pending",
+        "claimed",
+        "acknowledged",
+        "delivered",
+        "disposed"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "DeltaChannel": {
+      "enum": [
+        "text",
+        "reasoning"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "DispatchCommand": {
+      "$ref": "#/$defs/Command",
+      "description": "A client command (RFC 0001 \"Commands\", dotted tags). A command this\ndaemon does not know — or a daemon-internal one — does not decode, and\nthe call is answered `badRequest`.\n\nThe union is closed (`x-waku-closed` in the schema) because only clients\nsend it: the daemon is the side that must refuse what it does not know."
+    },
+    "DispatchMode": {
+      "description": "How `message.dispatch` delivers a message.",
+      "oneOf": [
+        {
+          "description": "Policy picks inside the thread lock: start, steer or queue.",
+          "properties": {
+            "type": {
+              "const": "auto",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "start_immediately",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "queue_after_active",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "targetRunId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "steer_active",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "targetRunId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "targetRunId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "restart_active",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "targetRunId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Prepare a worktree first, then start.",
+          "properties": {
+            "type": {
+              "const": "defer_start",
+              "type": "string"
+            },
+            "workspace": {
+              "$ref": "#/$defs/WorkspaceStrategy"
+            }
+          },
+          "required": [
+            "type",
+            "workspace"
+          ],
+          "type": "object"
+        }
+      ],
+      "x-waku-closed": true
+    },
+    "DispatchParams": {
+      "description": "`orchestration.dispatch` params. Idempotent by `commandId`: a retry with\nthe same id returns the first outcome.",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/DispatchCommand"
+        },
+        "commandId": {
+          "$ref": "#/$defs/CommandId"
+        }
+      },
+      "required": [
+        "commandId",
+        "command"
+      ],
+      "type": "object"
+    },
+    "DispatchResult": {
+      "description": "`orchestration.dispatch` result.",
+      "properties": {
+        "duplicate": {
+          "description": "The command id was already dispatched; nothing new happened.",
+          "type": "boolean"
+        },
+        "sequence": {
+          "description": "The command's last committed sequence. On the dispatching connection,\nevery event up to it is queued on subscribed streams before this\nreply.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "DomainEvent": {
+      "description": "A committed domain fact. Internally tagged by `type` (RFC 0003 §1.1) so an\nunknown event type skips its payload and decodes to `Unknown`.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Project",
+          "properties": {
+            "type": {
+              "const": "project.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ThreadUpdate",
+          "properties": {
+            "type": {
+              "const": "thread.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Run",
+          "properties": {
+            "type": {
+              "const": "run.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RunAttempt",
+          "properties": {
+            "type": {
+              "const": "run_attempt.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ExecutionNode",
+          "properties": {
+            "type": {
+              "const": "node.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Subagent",
+          "properties": {
+            "type": {
+              "const": "subagent.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ProviderSession",
+          "properties": {
+            "type": {
+              "const": "provider_session.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ProviderThread",
+          "properties": {
+            "type": {
+              "const": "provider_thread.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ProviderTurn",
+          "properties": {
+            "type": {
+              "const": "provider_turn.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RuntimeRequest",
+          "properties": {
+            "type": {
+              "const": "runtime_request.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Message",
+          "properties": {
+            "type": {
+              "const": "message.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Plan",
+          "properties": {
+            "type": {
+              "const": "plan.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/TurnItem",
+          "properties": {
+            "type": {
+              "const": "turn_item.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/CheckpointScope",
+          "properties": {
+            "type": {
+              "const": "checkpoint_scope.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Checkpoint",
+          "properties": {
+            "type": {
+              "const": "checkpoint.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ContextTransfer",
+          "properties": {
+            "type": {
+              "const": "context_transfer.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ContextHandoff",
+          "properties": {
+            "type": {
+              "const": "context_handoff.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An event type written by a newer version.",
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DriverKind": {
+      "enum": [
+        "amp",
+        "claude",
+        "codex",
+        "cursor",
+        "deep_seek",
+        "fx",
+        "open_code",
+        "grok",
+        "kimi",
+        "oh_my_pi",
+        "pi"
+      ],
+      "type": "string",
+      "x-waku-open": true
     },
     "End": {
       "description": "The last message of a subscription. Its channel may be reused afterwards.",
@@ -529,6 +3343,14 @@
           "type": "object"
         }
       ]
+    },
+    "Enforcement": {
+      "enum": [
+        "native",
+        "client_boundary"
+      ],
+      "type": "string",
+      "x-waku-open": true
     },
     "EnvironmentInfo": {
       "properties": {
@@ -803,6 +3625,196 @@
         }
       ]
     },
+    "ExecutionNode": {
+      "properties": {
+        "checkpointScopeId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "countsForRun": {
+          "description": "True only for the root.",
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "kind": {
+          "$ref": "#/$defs/NodeKind"
+        },
+        "nativeItemRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentNodeId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "providerThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerTurnId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rootNodeId": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "runId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeRequestId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/NodeStatus"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "rootNodeId",
+        "kind",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ExtraCaps": {
+      "properties": {
+        "account_usage_stream": {
+          "default": false,
+          "type": "boolean"
+        },
+        "agent_presets": {
+          "default": false,
+          "type": "boolean"
+        },
+        "background_work": {
+          "default": false,
+          "type": "boolean"
+        },
+        "compaction": {
+          "default": false,
+          "type": "boolean"
+        },
+        "computer_use": {
+          "default": false,
+          "type": "boolean"
+        },
+        "goals": {
+          "default": false,
+          "type": "boolean"
+        },
+        "image_mime_types": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "model_discovery": {
+          "default": false,
+          "type": "boolean"
+        },
+        "native_image_input": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "FailureClass": {
+      "enum": [
+        "usage_limit",
+        "provider_error",
+        "transport_error",
+        "permission_error",
+        "validation_error"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "FileChangeDetail": {
+      "properties": {
+        "fileType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mimeType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "oldPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "description": "Open string: `add`, `update`, `delete`, `move`, …",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "path"
+      ],
+      "type": "object"
+    },
     "FileContent": {
       "properties": {
         "binary": {
@@ -839,6 +3851,39 @@
       ],
       "type": "object"
     },
+    "FileSearchResult": {
+      "properties": {
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "fileName"
+      ],
+      "type": "object"
+    },
     "FilesReadParams": {
       "properties": {
         "maxBytes": {
@@ -864,6 +3909,135 @@
       ],
       "type": "object"
     },
+    "ForkOrigin": {
+      "oneOf": [
+        {
+          "properties": {
+            "runId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "run",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "nodeId": {
+              "$ref": "#/$defs/NodeId"
+            },
+            "type": {
+              "const": "node",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "nodeId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "providerThreadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "providerTurnId": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "provider_thread",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "providerThreadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ForkSourcePoint": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "latest_stable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "runId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "run",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpointId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "checkpoint",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "checkpointId"
+          ],
+          "type": "object"
+        }
+      ],
+      "x-waku-closed": true
+    },
     "GoodbyeCode": {
       "enum": [
         "shuttingDown",
@@ -874,6 +4048,96 @@
         "idleTimeout",
         "writeStalled",
         "overloaded"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "HandoffDelivery": {
+      "properties": {
+        "itemIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/HandoffDeliveryStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "HandoffDeliveryStatus": {
+      "enum": [
+        "pending",
+        "injected",
+        "inline"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "HandoffHistory": {
+      "properties": {
+        "coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunOrdinalRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "messages": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "omittedItemIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "omittedItems": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "messages"
+      ],
+      "type": "object"
+    },
+    "HandoffStatus": {
+      "enum": [
+        "pending",
+        "ready",
+        "failed",
+        "superseded"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "HandoffStrategy": {
+      "enum": [
+        "delta_since_target_last_seen",
+        "fork_delta_summary",
+        "full_thread_summary",
+        "checkpoint_summary",
+        "manual_context"
       ],
       "type": "string",
       "x-waku-open": true
@@ -923,6 +4187,97 @@
       ],
       "type": "object"
     },
+    "HistoryOrigin": {
+      "enum": [
+        "native",
+        "waku_import"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "HistoryPage": {
+      "description": "Older turn items, bounded like the snapshot window, with the runs they\nbelong to. `next` continues further back.",
+      "properties": {
+        "items": {
+          "description": "Wire-projected, ascending by `position`.",
+          "items": {
+            "$ref": "#/$defs/TurnItem"
+          },
+          "type": "array"
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/Run"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "HistoryPageParams": {
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "cursor"
+      ],
+      "type": "object"
+    },
+    "IdentityCaps": {
+      "properties": {
+        "item_ids": {
+          "$ref": "#/$defs/RefStrength",
+          "default": "none"
+        },
+        "request_ids": {
+          "$ref": "#/$defs/RefStrength",
+          "default": "none"
+        },
+        "thread_ids": {
+          "$ref": "#/$defs/RefStrength",
+          "default": "none"
+        },
+        "turn_ids": {
+          "$ref": "#/$defs/RefStrength",
+          "default": "none"
+        }
+      },
+      "type": "object"
+    },
+    "InputIntent": {
+      "enum": [
+        "turn_start",
+        "queued_turn",
+        "steer",
+        "promoted_queued_to_steer"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "InteractionMode": {
+      "enum": [
+        "default",
+        "plan"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
     "IssuedCredential": {
       "properties": {
         "expiresAt": {
@@ -936,6 +4291,51 @@
       "required": [
         "token",
         "expiresAt"
+      ],
+      "type": "object"
+    },
+    "ItemStatus": {
+      "enum": [
+        "idle",
+        "pending",
+        "running",
+        "waiting",
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "JsonText": {
+      "description": "Opaque JSON text, never parsed by the protocol layer (RFC 0003 §5.1).\nReplaces `serde_json::Value` wherever provider-native JSON is carried.",
+      "type": "string"
+    },
+    "LimitRecovery": {
+      "properties": {
+        "autoResume": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resetAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "snooze": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "runId"
       ],
       "type": "object"
     },
@@ -989,9 +4389,234 @@
       ],
       "type": "object"
     },
+    "LineageRelationship": {
+      "enum": [
+        "fork",
+        "subagent"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "Message": {
+      "properties": {
+        "attachments": {
+          "items": {
+            "$ref": "#/$defs/Attachment"
+          },
+          "type": "array"
+        },
+        "context": {
+          "items": {
+            "$ref": "#/$defs/ContextRecord"
+          },
+          "type": "array"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "createdBy": {
+          "$ref": "#/$defs/Actor"
+        },
+        "creationSource": {
+          "$ref": "#/$defs/CreationSource"
+        },
+        "displayText": {
+          "description": "What the user typed, before attachment mentions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "nodeId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "notification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Notification"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/MessageRole"
+        },
+        "runId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "senderThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "streaming": {
+          "type": "boolean"
+        },
+        "text": {
+          "description": "Provider-facing text.",
+          "type": "string"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "role",
+        "createdBy",
+        "creationSource",
+        "text",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "MessageRole": {
+      "enum": [
+        "user",
+        "assistant",
+        "system"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ModelSelection": {
+      "description": "The provider, model and per-model options of a thread or run.",
+      "properties": {
+        "agentPreset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contextWindow": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instance": {
+          "$ref": "#/$defs/ProviderInstanceId"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serviceTier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "instance"
+      ],
+      "type": "object"
+    },
+    "NativeMetadata": {
+      "properties": {
+        "resumeCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The driver's opaque resume cursor (today's `ProviderResumeCursor`,\nserialized), kept for native resume (R23)."
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "NoParams": {
       "description": "The params of a method that takes none: an empty map.",
       "type": "object"
+    },
+    "NodeId": {
+      "description": "Also a `Subagent`'s id, as in T3.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "NodeKind": {
+      "enum": [
+        "root_turn",
+        "assistant_message",
+        "reasoning",
+        "plan",
+        "todo_list",
+        "tool_call",
+        "approval_request",
+        "user_input_request",
+        "subagent",
+        "hook",
+        "system"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "NodeStatus": {
+      "enum": [
+        "idle",
+        "pending",
+        "running",
+        "waiting",
+        "completed",
+        "interrupted",
+        "failed",
+        "cancelled",
+        "rolled_back"
+      ],
+      "type": "string",
+      "x-waku-open": true
     },
     "Notice": {
       "oneOf": [
@@ -1042,6 +4667,424 @@
         }
       ]
     },
+    "Notification": {
+      "description": "A background-work notification carried by a message or a turn item.",
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/NotificationOutcome"
+        },
+        "source": {
+          "$ref": "#/$defs/NotificationSource"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "outcome",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "NotificationOutcome": {
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled",
+        "updated"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "NotificationSource": {
+      "description": "Where a background-work notification came from. As in T3, an unknown\nsource decodes as `BackgroundTask` (RFC 0001 \"Turn items\").",
+      "oneOf": [
+        {
+          "properties": {
+            "childThreadId": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "taskIds": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/NodeId"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "delegated_task",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "childThreadId": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "subagent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "command",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "monitor",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "system",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "background_task",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ],
+      "x-waku-fallback": "background_task"
+    },
+    "OrderKey": {
+      "description": "A fractional index (base-62), compared bytewise.",
+      "type": "string"
+    },
+    "PendingBackgroundTask": {
+      "properties": {
+        "childThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/PendingTaskKind"
+        },
+        "parentTaskId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "taskId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "taskId"
+      ],
+      "type": "object"
+    },
+    "PendingTaskKind": {
+      "enum": [
+        "subagent",
+        "command",
+        "monitor",
+        "background_task"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "PermissionOption": {
+      "description": "One option of an approval request. `id` is the provider's own option id,\nkept through normalization (RFC 0002).",
+      "properties": {
+        "allow": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "Plan": {
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PlanKind"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "runId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/PlanStatus"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "nodeId",
+        "status",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "PlanKind": {
+      "description": "The variant part of a [`Plan`], nested under `kind` (R22).",
+      "oneOf": [
+        {
+          "properties": {
+            "markdown": {
+              "type": "string"
+            },
+            "type": {
+              "const": "proposed_plan",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "markdown"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "explanation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "steps": {
+              "items": {
+                "$ref": "#/$defs/PlanStep"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "todo_list",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "steps"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PlanRef": {
+      "properties": {
+        "planId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "planId"
+      ],
+      "type": "object"
+    },
+    "PlanStatus": {
+      "enum": [
+        "draft",
+        "active",
+        "completed",
+        "superseded"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "PlanStep": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/PlanStepStatus"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "status"
+      ],
+      "type": "object"
+    },
+    "PlanStepStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "PlanningCaps": {
+      "properties": {
+        "emits_plan_updated": {
+          "default": false,
+          "type": "boolean"
+        },
+        "emits_proposed_plan": {
+          "default": false,
+          "type": "boolean"
+        },
+        "emits_todo_list": {
+          "default": false,
+          "type": "boolean"
+        },
+        "plan_deltas_have_item_ids": {
+          "default": false,
+          "type": "boolean"
+        },
+        "structured_questions": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "Project": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "orderKey": {
+          "$ref": "#/$defs/OrderKey"
+        },
+        "path": {
+          "type": "string"
+        },
+        "removedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "orderKey",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
     "ProjectInfo": {
       "description": "A project of the catalog.\n\nTODO(#54): replaced by the orchestration `Project` entity.",
       "properties": {
@@ -1090,6 +5133,43 @@
       ],
       "type": "object"
     },
+    "ProviderFailure": {
+      "description": "A normalized provider or preparation failure.",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/FailureClass"
+        },
+        "code": {
+          "description": "At most 128 bytes; `\"process_loss\"` after a daemon crash.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "At most 4096 bytes, redacted by the producer.",
+          "type": "string"
+        },
+        "resetAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retryable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "class",
+        "message"
+      ],
+      "type": "object"
+    },
     "ProviderFailureClass": {
       "enum": [
         "usageLimit",
@@ -1098,6 +5178,553 @@
         "permissionError",
         "validationError",
         "unknown"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ProviderInstanceId": {
+      "description": "A configured provider instance. Phase 2: the driver tag (`\"codex\"`);\nPhase 3: `\"codex:<name>\"`.",
+      "type": "string"
+    },
+    "ProviderRef": {
+      "description": "A provider-native id with its strength. App ids are primary; this is a\nreference only.",
+      "properties": {
+        "driver": {
+          "$ref": "#/$defs/DriverKind"
+        },
+        "fingerprint": {
+          "description": "Fallback correlation only; never full assistant text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ordinal": {
+          "description": "Scoped ordinal for weak providers.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "strength": {
+          "$ref": "#/$defs/RefStrength",
+          "default": "none"
+        }
+      },
+      "required": [
+        "driver"
+      ],
+      "type": "object"
+    },
+    "ProviderRetry": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxAttempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retryDelayMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt"
+      ],
+      "type": "object"
+    },
+    "ProviderSession": {
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/Capabilities",
+          "default": {
+            "approvals": {
+              "apply_patch": false,
+              "callbacks_are_live_only": false,
+              "command": false,
+              "file_change": false,
+              "file_read": false,
+              "from_subagents": false,
+              "native_request_ids": false
+            },
+            "checkpointing": {
+              "app_can_checkpoint_filesystem": false,
+              "nested_scopes": false,
+              "provider_can_read_conversation_snapshot": false,
+              "provider_can_rollback_conversation": false,
+              "provider_rollback_returns_snapshot": false
+            },
+            "context": {
+              "accepts_developer_context": false,
+              "accepts_synthetic_user_context": false,
+              "accepts_system_context": false,
+              "can_consume_handoff_summaries": false,
+              "can_generate_summaries": false,
+              "delta_handoff": false,
+              "full_thread_handoff": false,
+              "native_history_injection": false
+            },
+            "extras": {
+              "account_usage_stream": false,
+              "agent_presets": false,
+              "background_work": false,
+              "compaction": false,
+              "computer_use": false,
+              "goals": false,
+              "image_mime_types": [],
+              "model_discovery": false,
+              "native_image_input": false
+            },
+            "identity": {
+              "item_ids": "none",
+              "request_ids": "none",
+              "thread_ids": "none",
+              "turn_ids": "none"
+            },
+            "planning": {
+              "emits_plan_updated": false,
+              "emits_proposed_plan": false,
+              "emits_todo_list": false,
+              "plan_deltas_have_item_ids": false,
+              "structured_questions": false
+            },
+            "runtime_policy": {
+              "enforcement": "client_boundary",
+              "plan_mode_toggle": false,
+              "supported_modes": []
+            },
+            "sessions": {
+              "model_switch_in_session": false,
+              "multiple_threads_per_session": false,
+              "pending_requests_survive_restart": false,
+              "provider_switching_via_handoff": false,
+              "runtime_mode_switch_in_session": false
+            },
+            "streaming": {
+              "assistant_text": false,
+              "emits_message_completed": false,
+              "plan_text": false,
+              "reasoning": false,
+              "tool_output": false
+            },
+            "subagents": {
+              "can_close": false,
+              "can_fork_thread": false,
+              "can_wait": false,
+              "emits_lifecycle": false,
+              "exposes_thread_ids": false,
+              "supported": false
+            },
+            "threads": {
+              "create_empty_thread": false,
+              "fork": false,
+              "fork_from_subagent_thread": false,
+              "fork_from_turn": false,
+              "native_thread_id": false,
+              "read_snapshot": false,
+              "rollback": false
+            },
+            "tools": {
+              "dynamic_tool_callbacks": false,
+              "emits_tool_completed": false,
+              "emits_tool_output": false,
+              "emits_tool_started": false,
+              "mcp_tools": false,
+              "tool_item_ids": false
+            },
+            "turns": {
+              "active_steering": false,
+              "active_steering_interrupts_tools": false,
+              "emits_turn_completed": false,
+              "emits_turn_started": false,
+              "interrupt": false,
+              "native_turn_id": false,
+              "queued_messages": false,
+              "steering_by_interrupt_restart": false,
+              "terminal_status_quality": "none"
+            }
+          }
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "detachReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detachedAt": {
+          "description": "Replaces T3's `provider-session.detached` event (R11).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "driver": {
+          "$ref": "#/$defs/DriverKind"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerInstanceId": {
+          "$ref": "#/$defs/ProviderInstanceId"
+        },
+        "status": {
+          "$ref": "#/$defs/SessionStatus"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "driver",
+        "providerInstanceId",
+        "status",
+        "cwd",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ProviderThread": {
+      "description": "A provider-native conversation handle.",
+      "properties": {
+        "appThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contextUsage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "driver": {
+          "$ref": "#/$defs/DriverKind"
+        },
+        "firstRunOrdinal": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "forkedFrom": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderThreadFork"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThreadGoal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "handoffIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "lastRunOrdinal": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nativeConversationHeadRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nativeMetadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativeMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nativeThreadRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ownerNodeId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set for a subagent's provider thread."
+        },
+        "pendingBackgroundTasks": {
+          "items": {
+            "$ref": "#/$defs/PendingBackgroundTask"
+          },
+          "type": "array"
+        },
+        "providerInstanceId": {
+          "$ref": "#/$defs/ProviderInstanceId"
+        },
+        "providerSessionId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ProviderThreadStatus"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "driver",
+        "providerInstanceId",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ProviderThreadFork": {
+      "properties": {
+        "checkpointId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerThreadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "providerTurnId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "providerThreadId"
+      ],
+      "type": "object"
+    },
+    "ProviderThreadStatus": {
+      "enum": [
+        "not_loaded",
+        "idle",
+        "active",
+        "archived",
+        "closed",
+        "error"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ProviderTurn": {
+      "properties": {
+        "completedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "nativeTurnRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nodeId": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "ordinal": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerThreadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "runAttemptId": {
+          "description": "A Codex `/goal` keeps one attempt across several turns.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ProviderTurnStatus"
+        },
+        "tokenUsage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Thread-cumulative, as reported."
+        },
+        "turnTokenUsage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "This turn only."
+        }
+      },
+      "required": [
+        "id",
+        "providerThreadId",
+        "nodeId",
+        "ordinal",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ProviderTurnStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "interrupted",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "Quality": {
+      "enum": [
+        "strong",
+        "weak",
+        "none"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "RefStrength": {
+      "enum": [
+        "strong",
+        "weak",
+        "none"
       ],
       "type": "string",
       "x-waku-open": true
@@ -1136,6 +5763,119 @@
       "required": [
         "code",
         "message"
+      ],
+      "type": "object"
+    },
+    "RequestStatus": {
+      "enum": [
+        "pending",
+        "resolved",
+        "expired",
+        "cancelled"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ResponseCapability": {
+      "description": "How a request can be answered.",
+      "oneOf": [
+        {
+          "description": "The answer goes to a live provider session.",
+          "properties": {
+            "providerSessionId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "live",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "providerSessionId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Answered by a new user message (Codex async questions).",
+          "properties": {
+            "type": {
+              "const": "message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "const": "not_resumable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ResponseMode": {
+      "enum": [
+        "message"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "RollbackState": {
+      "properties": {
+        "checkpointId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "failure": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "$ref": "#/$defs/CommandId"
+        },
+        "requestedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "scopeId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId",
+        "scopeId",
+        "checkpointId",
+        "requestedAt"
       ],
       "type": "object"
     },
@@ -1208,6 +5948,511 @@
         }
       ]
     },
+    "Run": {
+      "description": "A counted, user-visible turn. Only its root node completes it.",
+      "properties": {
+        "activeAttemptId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checkpointId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "contextHandoffId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunContinuation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delegatedCompletion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DelegatedCompletionCohort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "(P3)"
+        },
+        "delegatedTaskId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "(P3)"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "modelSelection": {
+          "$ref": "#/$defs/ModelSelection"
+        },
+        "ordinal": {
+          "description": "`None` while preparing or queued (R14).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "providerCompletedAt": {
+          "description": "Provider terminal; the duration excludes finalization.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "providerThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "queueHeld": {
+          "type": "boolean"
+        },
+        "queuePosition": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requestedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "restartCancelledBackgroundWork": {
+          "items": {
+            "$ref": "#/$defs/CancelledBackgroundWork"
+          },
+          "type": "array"
+        },
+        "rootNodeId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourcePlan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "(P3) Implement a plan."
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/RunStatus"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "userMessageId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "workspacePreparation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "modelSelection",
+        "userMessageId",
+        "status",
+        "requestedAt"
+      ],
+      "type": "object"
+    },
+    "RunAttempt": {
+      "properties": {
+        "attemptOrdinal": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "nativeThreadId": {
+          "description": "The input destination, kept when provider-thread rows are reused.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerInstanceId": {
+          "$ref": "#/$defs/ProviderInstanceId"
+        },
+        "providerThreadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "providerTurnId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/AttemptReason"
+        },
+        "rootNodeId": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "runId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/AttemptStatus"
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "attemptOrdinal",
+        "rootNodeId",
+        "providerInstanceId",
+        "providerThreadId",
+        "reason",
+        "status"
+      ],
+      "type": "object"
+    },
+    "RunContinuation": {
+      "description": "How a run continues an earlier one.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ContinuationKind"
+        },
+        "ofRunId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "ofRunId"
+      ],
+      "type": "object"
+    },
+    "RunOrdinalRange": {
+      "description": "An inclusive range of app run ordinals.",
+      "properties": {
+        "first": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "first",
+        "last"
+      ],
+      "type": "object"
+    },
+    "RunStatus": {
+      "enum": [
+        "preparing",
+        "queued",
+        "starting",
+        "running",
+        "waiting",
+        "finalizing",
+        "completed",
+        "interrupted",
+        "failed",
+        "cancelled",
+        "rolled_back"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "RuntimeMode": {
+      "enum": [
+        "ask",
+        "auto_accept_edits",
+        "auto",
+        "full_access"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "RuntimePolicyCaps": {
+      "properties": {
+        "enforcement": {
+          "$ref": "#/$defs/Enforcement",
+          "default": "client_boundary"
+        },
+        "plan_mode_toggle": {
+          "default": false,
+          "type": "boolean"
+        },
+        "supported_modes": {
+          "default": [],
+          "description": "Modes the provider enforces itself. A stored mode outside this set runs\nas `RuntimeMode::Ask`, as in T3's `RuntimePolicy.ts`.",
+          "items": {
+            "$ref": "#/$defs/RuntimeMode"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "RuntimeRequest": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RuntimeRequestKind"
+        },
+        "nativeRequestRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nodeId": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/PermissionOption"
+          },
+          "type": "array"
+        },
+        "providerTurnId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "questions": {
+          "items": {
+            "$ref": "#/$defs/UserInputQuestion"
+          },
+          "type": "array"
+        },
+        "resolvedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "responseCapability": {
+          "$ref": "#/$defs/ResponseCapability"
+        },
+        "status": {
+          "$ref": "#/$defs/RequestStatus"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "nodeId",
+        "kind",
+        "status",
+        "responseCapability",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "RuntimeRequestKind": {
+      "enum": [
+        "command_approval",
+        "file_read_approval",
+        "file_change_approval",
+        "apply_patch_approval",
+        "permission",
+        "user_input",
+        "dynamic_tool_call",
+        "auth_refresh"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "RuntimeResponse": {
+      "description": "A user's answer to a runtime request.",
+      "oneOf": [
+        {
+          "description": "`option_id` is the provider's own option id, exactly as emitted.",
+          "properties": {
+            "optionId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "approval",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "optionId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "answers": {
+              "items": {
+                "$ref": "#/$defs/UserInputAnswer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "user_input",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "answers"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "dismiss",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Scope": {
       "enum": [
         "read",
@@ -1220,6 +6465,27 @@
         "settings:write",
         "diagnostics:read",
         "admin"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ScopeKind": {
+      "enum": [
+        "root_run",
+        "subagent",
+        "tool",
+        "provider_thread",
+        "manual"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "SecretStatus": {
+      "enum": [
+        "pending",
+        "saved",
+        "declined",
+        "cancelled"
       ],
       "type": "string",
       "x-waku-open": true
@@ -1412,6 +6678,31 @@
         }
       ]
     },
+    "SessionCaps": {
+      "properties": {
+        "model_switch_in_session": {
+          "default": false,
+          "type": "boolean"
+        },
+        "multiple_threads_per_session": {
+          "default": false,
+          "type": "boolean"
+        },
+        "pending_requests_survive_restart": {
+          "default": false,
+          "type": "boolean"
+        },
+        "provider_switching_via_handoff": {
+          "default": false,
+          "type": "boolean"
+        },
+        "runtime_mode_switch_in_session": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "SessionInfo": {
       "properties": {
         "expiresAt": {
@@ -1437,6 +6728,18 @@
         "scopes"
       ],
       "type": "object"
+    },
+    "SessionStatus": {
+      "enum": [
+        "starting",
+        "ready",
+        "running",
+        "waiting",
+        "stopped",
+        "error"
+      ],
+      "type": "string",
+      "x-waku-open": true
     },
     "Settings": {
       "description": "The daemon's settings as clients see them.",
@@ -1570,6 +6873,200 @@
     "SettingsSpec": {
       "type": "object"
     },
+    "SettledOverride": {
+      "enum": [
+        "settled",
+        "active"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ShellItem": {
+      "oneOf": [
+        {
+          "description": "Rows at `cursor`. A snapshot over [`SHELL_SNAPSHOT_BYTES`] is split;\nonly the last part has `complete`.",
+          "properties": {
+            "complete": {
+              "type": "boolean"
+            },
+            "cursor": {
+              "$ref": "#/$defs/StreamCursor"
+            },
+            "projects": {
+              "items": {
+                "$ref": "#/$defs/Project"
+              },
+              "type": "array"
+            },
+            "threads": {
+              "items": {
+                "$ref": "#/$defs/ThreadRow"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "snapshot",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cursor",
+            "complete"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "row": {
+              "$ref": "#/$defs/Project"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "projectUpdated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seq",
+            "row"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "projectRemoved",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seq",
+            "projectId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The row changed; `location` is where it is now, so a client drops a\nrow that left the location it subscribed to.",
+          "properties": {
+            "location": {
+              "$ref": "#/$defs/ShellLocation"
+            },
+            "row": {
+              "$ref": "#/$defs/ThreadRow"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "threadUpdated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seq",
+            "row",
+            "location"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "threadRemoved",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seq",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Everything up to `cursor` has been delivered.",
+          "properties": {
+            "cursor": {
+              "$ref": "#/$defs/StreamCursor"
+            },
+            "type": {
+              "const": "synchronized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cursor"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ShellLocation": {
+      "enum": [
+        "active",
+        "archived"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ShellSpec": {
+      "properties": {
+        "location": {
+          "$ref": "#/$defs/ShellLocation",
+          "default": "active"
+        },
+        "projectId": {
+          "description": "Only this project's threads.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "StreamCursor": {
       "description": "Where a subscriber stands in a stream. A client passes its last *applied*\ncursor as `subscribe.after`; the daemon decides between replay and a\nsnapshot.",
       "oneOf": [
@@ -1686,6 +7183,48 @@
           "type": "object"
         },
         {
+          "$ref": "#/$defs/ShellSpec",
+          "description": "Navigation rows: a snapshot (or the deltas since `after`), then\n`synchronized`, then a delta per changed row.",
+          "properties": {
+            "type": {
+              "const": "shell",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ThreadSpec",
+          "description": "One thread: a bounded snapshot or the replayed gap, `synchronized`,\nthen its events and live `delta`s.",
+          "properties": {
+            "type": {
+              "const": "thread",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/CommandOutputSpec",
+          "description": "The live output of one command, while its row is expanded.",
+          "properties": {
+            "type": {
+              "const": "commandOutput",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
           "description": "A stream this build does not know; answered with\n`end{error: unsupported}`.",
           "properties": {
             "type": {
@@ -1699,6 +7238,222 @@
           "type": "object"
         }
       ]
+    },
+    "StreamingCaps": {
+      "properties": {
+        "assistant_text": {
+          "default": false,
+          "type": "boolean"
+        },
+        "emits_message_completed": {
+          "default": false,
+          "type": "boolean"
+        },
+        "plan_text": {
+          "default": false,
+          "type": "boolean"
+        },
+        "reasoning": {
+          "default": false,
+          "type": "boolean"
+        },
+        "tool_output": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "Subagent": {
+      "properties": {
+        "childThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "completionDelivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompletionDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "(P3)"
+        },
+        "completionWake": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompletionWake"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "(P3)"
+        },
+        "createdBy": {
+          "$ref": "#/$defs/Actor"
+        },
+        "driver": {
+          "$ref": "#/$defs/DriverKind"
+        },
+        "id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeTaskRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/SubagentOrigin"
+        },
+        "parentNodeId": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "progress": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "providerInstanceId": {
+          "$ref": "#/$defs/ProviderInstanceId"
+        },
+        "providerThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/SubagentStatus"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "parentNodeId",
+        "origin",
+        "createdBy",
+        "driver",
+        "providerInstanceId",
+        "prompt",
+        "status",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "SubagentCaps": {
+      "properties": {
+        "can_close": {
+          "default": false,
+          "type": "boolean"
+        },
+        "can_fork_thread": {
+          "default": false,
+          "type": "boolean"
+        },
+        "can_wait": {
+          "default": false,
+          "type": "boolean"
+        },
+        "emits_lifecycle": {
+          "default": false,
+          "type": "boolean"
+        },
+        "exposes_thread_ids": {
+          "default": false,
+          "type": "boolean"
+        },
+        "supported": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "SubagentOrigin": {
+      "enum": [
+        "provider_native",
+        "app_owned"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "SubagentStatus": {
+      "enum": [
+        "idle",
+        "pending",
+        "running",
+        "waiting",
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted"
+      ],
+      "type": "string",
+      "x-waku-open": true
     },
     "Subscribe": {
       "properties": {
@@ -1738,6 +7493,1909 @@
       ],
       "type": "object"
     },
+    "ThreadActivity": {
+      "enum": [
+        "idle",
+        "preparing",
+        "working",
+        "waiting",
+        "finalizing",
+        "failed"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ThreadCaps": {
+      "properties": {
+        "create_empty_thread": {
+          "default": false,
+          "type": "boolean"
+        },
+        "fork": {
+          "default": false,
+          "type": "boolean"
+        },
+        "fork_from_subagent_thread": {
+          "default": false,
+          "type": "boolean"
+        },
+        "fork_from_turn": {
+          "default": false,
+          "type": "boolean"
+        },
+        "native_thread_id": {
+          "default": false,
+          "type": "boolean"
+        },
+        "read_snapshot": {
+          "default": false,
+          "type": "boolean"
+        },
+        "rollback": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ThreadChange": {
+      "enum": [
+        "created",
+        "imported",
+        "archived",
+        "unarchived",
+        "deleted",
+        "settled",
+        "auto_settled",
+        "unsettled",
+        "auto_settle_set",
+        "snoozed",
+        "unsnoozed",
+        "snooze_woke",
+        "pinned",
+        "unpinned",
+        "pin_reordered",
+        "active_reordered",
+        "visited",
+        "marked_unread",
+        "renamed",
+        "title_generated",
+        "title_regeneration_started",
+        "workspace_changed",
+        "runtime_mode_changed",
+        "interaction_mode_changed",
+        "model_selection_changed",
+        "provider_switched",
+        "active_provider_thread_changed",
+        "rollback_requested",
+        "rollback_failed",
+        "rollback_completed",
+        "limit_recovery_changed",
+        "activity"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ThreadGoal": {
+      "description": "A provider-persisted objective (Codex and Claude `/goal`).",
+      "properties": {
+        "objective": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ThreadGoalStatus"
+        },
+        "timeUsedSeconds": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "tokenBudget": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tokensUsed": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objective",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ThreadGoalStatus": {
+      "enum": [
+        "active",
+        "paused",
+        "blocked",
+        "usage_limited",
+        "budget_limited",
+        "complete"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ThreadItem": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ThreadSnapshot",
+          "properties": {
+            "type": {
+              "const": "snapshot",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A committed event of the thread, wire-projected. Apply as an upsert\nby entity id; `seq` is the stream cursor.",
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/DomainEvent"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "event",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seq",
+            "event"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Live text, never sequenced, persisted or replayed. Apply only when\n`rev` is the item's `streamRev + 1`, then increment `streamRev`; on a\ngap ignore deltas until the next snapshot of the item.",
+          "properties": {
+            "channel": {
+              "$ref": "#/$defs/DeltaChannel"
+            },
+            "itemId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "rev": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "delta",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "itemId",
+            "channel",
+            "rev",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The snapshot or replay is complete; data is fresh up to `cursor`.",
+          "properties": {
+            "cursor": {
+              "$ref": "#/$defs/StreamCursor"
+            },
+            "type": {
+              "const": "synchronized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cursor"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ThreadLineage": {
+      "properties": {
+        "parentThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relationship": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LineageRelationship"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rootThreadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rootThreadId"
+      ],
+      "type": "object"
+    },
+    "ThreadProjection": {
+      "description": "The part of a thread a client holds: the thread, the control rows of the\nruns in view and of every non-terminal run, the always-required control\nrecords (pending runtime requests and their rows), and a bounded window of\nwire-projected turn items in position order. Events apply to it as\nupserts by entity id.",
+      "properties": {
+        "checkpointScopes": {
+          "items": {
+            "$ref": "#/$defs/CheckpointScope"
+          },
+          "type": "array"
+        },
+        "checkpoints": {
+          "items": {
+            "$ref": "#/$defs/Checkpoint"
+          },
+          "type": "array"
+        },
+        "contextHandoffs": {
+          "items": {
+            "$ref": "#/$defs/ContextHandoff"
+          },
+          "type": "array"
+        },
+        "contextTransfers": {
+          "items": {
+            "$ref": "#/$defs/ContextTransfer"
+          },
+          "type": "array"
+        },
+        "messages": {
+          "description": "Messages of non-terminal runs (queued ones included); with\n`compactTurnItems`, only those no turn item in the window shows.",
+          "items": {
+            "$ref": "#/$defs/Message"
+          },
+          "type": "array"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/ExecutionNode"
+          },
+          "type": "array"
+        },
+        "plans": {
+          "items": {
+            "$ref": "#/$defs/Plan"
+          },
+          "type": "array"
+        },
+        "providerSessions": {
+          "items": {
+            "$ref": "#/$defs/ProviderSession"
+          },
+          "type": "array"
+        },
+        "providerThreads": {
+          "items": {
+            "$ref": "#/$defs/ProviderThread"
+          },
+          "type": "array"
+        },
+        "providerTurns": {
+          "items": {
+            "$ref": "#/$defs/ProviderTurn"
+          },
+          "type": "array"
+        },
+        "runAttempts": {
+          "items": {
+            "$ref": "#/$defs/RunAttempt"
+          },
+          "type": "array"
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/Run"
+          },
+          "type": "array"
+        },
+        "runtimeRequests": {
+          "items": {
+            "$ref": "#/$defs/RuntimeRequest"
+          },
+          "type": "array"
+        },
+        "subagents": {
+          "items": {
+            "$ref": "#/$defs/Subagent"
+          },
+          "type": "array"
+        },
+        "thread": {
+          "$ref": "#/$defs/AppThread"
+        },
+        "turnItems": {
+          "description": "Wire-projected (#57), ascending by `position`.",
+          "items": {
+            "$ref": "#/$defs/TurnItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "thread"
+      ],
+      "type": "object"
+    },
+    "ThreadRow": {
+      "description": "One navigation row: the thread (never its transcript) and its derived\nsidebar state.",
+      "properties": {
+        "activity": {
+          "$ref": "#/$defs/ThreadActivity"
+        },
+        "pendingRequestCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "queuedRunCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "thread": {
+          "$ref": "#/$defs/AppThread"
+        }
+      },
+      "required": [
+        "thread",
+        "activity",
+        "pendingRequestCount",
+        "queuedRunCount"
+      ],
+      "type": "object"
+    },
+    "ThreadSnapshot": {
+      "description": "A bounded thread snapshot: the `thread` stream's first item and the\n`threads.snapshot` result.",
+      "properties": {
+        "budgetExceeded": {
+          "description": "The window was cut by its byte budget rather than by its turn or item\ncount.",
+          "type": "boolean"
+        },
+        "cursor": {
+          "$ref": "#/$defs/StreamCursor",
+          "description": "The event-store position the snapshot reflects."
+        },
+        "hasMoreHistory": {
+          "type": "boolean"
+        },
+        "history": {
+          "description": "Pass to `threads.historyPage` for older items.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projection": {
+          "$ref": "#/$defs/ThreadProjection"
+        }
+      },
+      "required": [
+        "cursor",
+        "projection",
+        "hasMoreHistory"
+      ],
+      "type": "object"
+    },
+    "ThreadSnapshotParams": {
+      "properties": {
+        "compactTurnItems": {
+          "description": "Leave out messages a turn item in the snapshot already shows.",
+          "type": "boolean"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadSpec": {
+      "properties": {
+        "compactTurnItems": {
+          "description": "As for `threads.snapshot`.",
+          "type": "boolean"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadUpdate": {
+      "description": "The payload of `thread.updated`.",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ThreadChange"
+        },
+        "thread": {
+          "$ref": "#/$defs/AppThread"
+        }
+      },
+      "required": [
+        "change",
+        "thread"
+      ],
+      "type": "object"
+    },
+    "TitleRegeneration": {
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/CommandId"
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "requestId",
+        "startedAt"
+      ],
+      "type": "object"
+    },
+    "TitleSource": {
+      "enum": [
+        "placeholder",
+        "prompt",
+        "generated",
+        "user"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "TokenUsage": {
+      "description": "Token accounting as the provider reports it.",
+      "properties": {
+        "cachedInput": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "input": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "promptCacheTtlMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reasoningOutput": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "used": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "used",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ToolCaps": {
+      "properties": {
+        "dynamic_tool_callbacks": {
+          "default": false,
+          "type": "boolean"
+        },
+        "emits_tool_completed": {
+          "default": false,
+          "type": "boolean"
+        },
+        "emits_tool_output": {
+          "default": false,
+          "type": "boolean"
+        },
+        "emits_tool_started": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mcp_tools": {
+          "default": false,
+          "type": "boolean"
+        },
+        "tool_item_ids": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ToolIcon": {
+      "description": "An icon for a tool's activity row.",
+      "oneOf": [
+        {
+          "properties": {
+            "faviconUrl": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "faviconUrlDark": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pageUrl": {
+              "type": "string"
+            },
+            "type": {
+              "const": "website",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "pageUrl"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "appId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "displayName": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "native_app",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "logoUrl": {
+              "type": "string"
+            },
+            "logoUrlDark": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "themed_logo",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "logoUrl"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ToolPresentation": {
+      "description": "Presentation hints for tool rows.",
+      "properties": {
+        "icon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolIcon"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nonExecutionKind": {
+          "description": "Open string, e.g. `\"read\"` for a tool that only looks.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "surface": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolSurface"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ToolSource": {
+      "description": "The integration a tool belongs to (an MCP server, the browser, …).",
+      "properties": {
+        "icon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolIcon"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ToolSourceKind"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "name",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ToolSourceKind": {
+      "enum": [
+        "browser",
+        "computer",
+        "integration"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ToolSurface": {
+      "enum": [
+        "browser",
+        "computer"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "TransferKind": {
+      "enum": [
+        "fork",
+        "provider_handoff",
+        "merge_back",
+        "subagent_spawn",
+        "subagent_result"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "TransferResolution": {
+      "oneOf": [
+        {
+          "properties": {
+            "providerThreadRef": {
+              "$ref": "#/$defs/ProviderRef"
+            },
+            "type": {
+              "const": "native_fork",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "providerThreadRef"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "handoffId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "portable_context",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "handoffId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "handoffId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "delta_context",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "handoffId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "handoffId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "fork_delta_context",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "handoffId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "handoffId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "checkpoint_context",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "handoffId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TransferStatus": {
+      "enum": [
+        "pending",
+        "resolved_native",
+        "resolved_portable",
+        "failed",
+        "consumed",
+        "superseded"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "TurnCaps": {
+      "properties": {
+        "active_steering": {
+          "default": false,
+          "type": "boolean"
+        },
+        "active_steering_interrupts_tools": {
+          "default": false,
+          "description": "Native steering cancels pending tools before consuming the message.",
+          "type": "boolean"
+        },
+        "emits_turn_completed": {
+          "default": false,
+          "type": "boolean"
+        },
+        "emits_turn_started": {
+          "default": false,
+          "type": "boolean"
+        },
+        "interrupt": {
+          "default": false,
+          "type": "boolean"
+        },
+        "native_turn_id": {
+          "default": false,
+          "type": "boolean"
+        },
+        "queued_messages": {
+          "default": false,
+          "type": "boolean"
+        },
+        "steering_by_interrupt_restart": {
+          "default": false,
+          "type": "boolean"
+        },
+        "terminal_status_quality": {
+          "$ref": "#/$defs/Quality",
+          "default": "none"
+        }
+      },
+      "type": "object"
+    },
+    "TurnItem": {
+      "description": "One display row of a thread.",
+      "properties": {
+        "completedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TurnItemKind",
+          "description": "The variant, nested rather than flattened (R22)."
+        },
+        "nativeItemRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nodeId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentItemId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "position": {
+          "description": "`(run_ordinal << 24) | n`, assigned once by `decide` (R15). Doubles as\nthe history-paging cursor.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerThreadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerTurnId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ItemStatus"
+        },
+        "streamRev": {
+          "description": "The number of live `delta`s folded into this snapshot (RFC 0003 §5.4).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolPresentation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "position",
+        "status",
+        "updatedAt",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "TurnItemKind": {
+      "description": "The 24 display kinds plus `Unknown`.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Notification",
+          "properties": {
+            "type": {
+              "const": "notification",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "attachments": {
+              "items": {
+                "$ref": "#/$defs/Attachment"
+              },
+              "type": "array"
+            },
+            "createdBy": {
+              "$ref": "#/$defs/Actor"
+            },
+            "displayText": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inputIntent": {
+              "$ref": "#/$defs/InputIntent"
+            },
+            "messageId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "senderThreadId": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "user_message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "messageId",
+            "inputIntent",
+            "text",
+            "createdBy"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "messageId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "streaming": {
+              "type": "boolean"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "assistant_message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "messageId",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "streaming": {
+              "type": "boolean"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "reasoning",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "markdown": {
+              "type": "string"
+            },
+            "planId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "streaming": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "proposed_plan",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "planId",
+            "markdown"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "explanation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "planId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "steps": {
+              "items": {
+                "$ref": "#/$defs/PlanStep"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "todo_list",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "planId",
+            "steps"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "answers": {
+              "items": {
+                "$ref": "#/$defs/UserInputAnswer"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "questions": {
+              "items": {
+                "$ref": "#/$defs/UserInputQuestion"
+              },
+              "type": "array"
+            },
+            "requestId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "responseMode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResponseMode"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "const": "user_input_request",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "requestId",
+            "questions"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "additions": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "bodyOmitted": {
+              "description": "Wire projection only (#57); never set in storage.",
+              "type": "boolean"
+            },
+            "changes": {
+              "items": {
+                "$ref": "#/$defs/FileChangeDetail"
+              },
+              "type": "array"
+            },
+            "deletions": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "diff": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "fileName": {
+              "type": "string"
+            },
+            "newText": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "oldText": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "file_change",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "fileName"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "exitCode": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "input": {
+              "type": "string"
+            },
+            "output": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "outputIndicatesFailure": {
+              "type": "boolean"
+            },
+            "outputOmitted": {
+              "description": "Wire projection only (#57).",
+              "type": "boolean"
+            },
+            "outputTruncated": {
+              "description": "Set in storage when the 256 KiB cap applied (R12).",
+              "type": "boolean"
+            },
+            "type": {
+              "const": "command_execution",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "input"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "pattern": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "results": {
+              "items": {
+                "$ref": "#/$defs/FileSearchResult"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "file_search",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "patterns": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "results": {
+              "items": {
+                "$ref": "#/$defs/WebSearchResult"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "web_search",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "appName": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "options": {
+              "items": {
+                "$ref": "#/$defs/PermissionOption"
+              },
+              "type": "array"
+            },
+            "prompt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "requestId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "requestKind": {
+              "$ref": "#/$defs/RuntimeRequestKind"
+            },
+            "type": {
+              "const": "approval_request",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "requestId",
+            "requestKind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpointId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "files": {
+              "items": {
+                "$ref": "#/$defs/CheckpointFile"
+              },
+              "type": "array"
+            },
+            "scopeId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "checkpoint",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "checkpointId",
+            "scopeId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run_interrupt_request",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run_interrupt_result",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "const": "system_notice",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "failure": {
+              "$ref": "#/$defs/ProviderFailure"
+            },
+            "retry": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProviderRetry"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "const": "error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "failure"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "afterTokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "beforeTokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "driver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DriverKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "compaction",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "contextHandoffId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "fromProviderInstanceIds": {
+              "items": {
+                "$ref": "#/$defs/ProviderInstanceId"
+              },
+              "type": "array"
+            },
+            "strategy": {
+              "$ref": "#/$defs/HandoffStrategy"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "toProviderInstanceId": {
+              "$ref": "#/$defs/ProviderInstanceId"
+            },
+            "type": {
+              "const": "handoff",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "contextHandoffId",
+            "toProviderInstanceId",
+            "strategy"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/ForkOrigin"
+            },
+            "targetThreadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "fork",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "source",
+            "targetThreadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "targetModel": {
+              "type": "string"
+            },
+            "targetProviderInstanceId": {
+              "$ref": "#/$defs/ProviderInstanceId"
+            },
+            "targetRunId": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "targetThreadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread_created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "targetThreadId",
+            "targetProviderInstanceId",
+            "targetModel"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "placeholder": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "secretStatus": {
+              "$ref": "#/$defs/SecretStatus"
+            },
+            "type": {
+              "const": "secret_request",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "label",
+            "reason",
+            "secretStatus"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "childThreadId": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "driver": {
+              "$ref": "#/$defs/DriverKind"
+            },
+            "origin": {
+              "$ref": "#/$defs/SubagentOrigin"
+            },
+            "progress": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "result": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subagentId": {
+              "$ref": "#/$defs/NodeId"
+            },
+            "type": {
+              "const": "subagent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "subagentId",
+            "origin",
+            "driver",
+            "prompt"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "input": {
+              "$ref": "#/$defs/JsonText",
+              "description": "Opaque tool input (RFC 0003 §1.1: no `serde_json::Value`)."
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JsonText"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outputOmitted": {
+              "description": "Wire projection only (#57).",
+              "type": "boolean"
+            },
+            "toolName": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "dynamic_tool",
+              "type": "string"
+            },
+            "viewedImagePath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "input"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A kind written by a newer version. Clients skip the row and still\nadvance their cursor.",
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TurnItemParams": {
+      "properties": {
+        "itemId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "itemId"
+      ],
+      "type": "object"
+    },
+    "UserInputAnswer": {
+      "properties": {
+        "answers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "questionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "questionId",
+        "answers"
+      ],
+      "type": "object"
+    },
+    "UserInputOption": {
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "type": "object"
+    },
+    "UserInputQuestion": {
+      "properties": {
+        "header": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "multiSelect": {
+          "type": "boolean"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/UserInputOption"
+          },
+          "type": "array"
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "header",
+        "question"
+      ],
+      "type": "object"
+    },
     "VcsFailureKind": {
       "enum": [
         "notARepository",
@@ -1749,6 +9407,29 @@
       ],
       "type": "string",
       "x-waku-open": true
+    },
+    "WebSearchResult": {
+      "properties": {
+        "snippet": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "Welcome": {
       "description": "The daemon's answer to an accepted `hello`.",
@@ -1805,10 +9486,262 @@
         "limits"
       ],
       "type": "object"
+    },
+    "WorkspaceStrategy": {
+      "description": "Where a thread's next run works.",
+      "oneOf": [
+        {
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "root",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "const": "existing_worktree",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "baseRef": {
+              "type": "string"
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "startFromOrigin": {
+              "default": false,
+              "type": "boolean"
+            },
+            "type": {
+              "const": "new_worktree",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "baseRef"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "commands": [],
+  "commands": [
+    {
+      "name": "project.create",
+      "scope": "operate"
+    },
+    {
+      "name": "project.rename",
+      "scope": "operate"
+    },
+    {
+      "name": "project.reorder",
+      "scope": "operate"
+    },
+    {
+      "name": "project.remove",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.create",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.archive",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.unarchive",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.delete",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.settle",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.unsettle",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.auto_settle.set",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.snooze",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.unsnooze",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.pin",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.unpin",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.pin.reorder",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.active.reorder",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.visit",
+      "scope": "read"
+    },
+    {
+      "name": "thread.mark_unread",
+      "scope": "read"
+    },
+    {
+      "name": "thread.rename",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.title.regenerate",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.workspace.set",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.runtime_mode.set",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.interaction_mode.set",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.model_selection.set",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.limit_recovery.set",
+      "scope": "operate"
+    },
+    {
+      "name": "message.dispatch",
+      "scope": "operate"
+    },
+    {
+      "name": "run.interrupt",
+      "scope": "operate"
+    },
+    {
+      "name": "prepared_run.retry",
+      "scope": "operate"
+    },
+    {
+      "name": "queue.resume",
+      "scope": "operate"
+    },
+    {
+      "name": "queued_run.cancel",
+      "scope": "operate"
+    },
+    {
+      "name": "queued_run.reorder",
+      "scope": "operate"
+    },
+    {
+      "name": "queued_run.edit",
+      "scope": "operate"
+    },
+    {
+      "name": "queued_run.promote_to_steer",
+      "scope": "operate"
+    },
+    {
+      "name": "runtime_request.respond",
+      "scope": "operate"
+    },
+    {
+      "name": "user_input.dismiss",
+      "scope": "operate"
+    },
+    {
+      "name": "subagent.stop",
+      "scope": "operate"
+    },
+    {
+      "name": "checkpoint.rollback",
+      "scope": "operate"
+    },
+    {
+      "name": "provider_session.detach",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.fork",
+      "scope": "operate"
+    },
+    {
+      "name": "thread.merge_back",
+      "scope": "operate"
+    },
+    {
+      "name": "provider.switch",
+      "scope": "operate"
+    }
+  ],
   "constants": {
     "CONNECTION_QUEUE_BYTES": 33554432,
     "DEFAULT_DATA_WINDOW": 1048576,
@@ -1821,16 +9754,36 @@
     "HELLO_DEADLINE_MS": 10000,
     "LIVE_BUDGET_BYTES": 8388608,
     "LIVE_BUDGET_ITEMS": 1000,
+    "MAX_ARCHIVED_PAGE": 200,
     "MAX_BLOB_BYTES": 67108864,
     "MAX_DATA_CHUNK_BYTES": 262144,
+    "MAX_HISTORY_CURSOR_BYTES": 4096,
     "MAX_IN_FLIGHT_CALLS": 64,
     "MAX_MESSAGE_BYTES": 4194304,
     "MAX_SAFE_INTEGER": 9007199254740991,
     "MAX_SUBSCRIPTIONS": 256,
+    "OUTPUT_APPEND_BYTES": 16384,
+    "OUTPUT_FINISHED_TAILS": 16,
+    "OUTPUT_FRAME_MS": 100,
+    "OUTPUT_HEAD_BYTES": 65536,
+    "OUTPUT_LIVE_TAILS": 64,
+    "OUTPUT_OVERFLOW_FRAME_MS": 500,
+    "OUTPUT_TAIL_BYTES": 196608,
     "PING_INTERVAL_MS": 5000,
     "PING_TIMEOUT_MS": 15000,
     "PROTOCOL_MAJOR": 8,
     "PROTOCOL_MINOR": 0,
+    "SHELL_REPLAY_EVENTS": 4096,
+    "SHELL_SNAPSHOT_BYTES": 1048576,
+    "SNAPSHOT_BYTES": 1048576,
+    "SNAPSHOT_ITEMS": 75,
+    "SNAPSHOT_USER_TURNS": 10,
+    "THREAD_REPLAY_BYTES": 1048576,
+    "THREAD_REPLAY_EVENTS": 128,
+    "TOOL_COALESCE_MS": 50,
+    "TOOL_COALESCE_PENDING": 512,
+    "WIRE_SUMMARY_CHARS": 160,
+    "WIRE_VALUE_BYTES": 4096,
     "WRITE_STALL_MS": 10000
   },
   "errorCodes": [
@@ -1897,6 +9850,61 @@
         "$ref": "#/$defs/FileContent"
       },
       "scope": "files:read"
+    },
+    {
+      "name": "orchestration.dispatch",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/DispatchParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DispatchResult"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "threads.snapshot",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ThreadSnapshotParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ThreadSnapshot"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "threads.historyPage",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/HistoryPageParams"
+      },
+      "result": {
+        "$ref": "#/$defs/HistoryPage"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "threads.turnItem",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/TurnItemParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TurnItem"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "threads.archived",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ArchivedParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ArchivedPage"
+      },
+      "scope": "read"
     }
   ],
   "protocol": {
@@ -1950,6 +9958,42 @@
       "scope": "read",
       "spec": {
         "$ref": "#/$defs/BlobDownloadSpec"
+      }
+    },
+    {
+      "cursor": "sequence",
+      "data": false,
+      "item": {
+        "$ref": "#/$defs/ShellItem"
+      },
+      "name": "shell",
+      "scope": "read",
+      "spec": {
+        "$ref": "#/$defs/ShellSpec"
+      }
+    },
+    {
+      "cursor": "sequence",
+      "data": false,
+      "item": {
+        "$ref": "#/$defs/ThreadItem"
+      },
+      "name": "thread",
+      "scope": "read",
+      "spec": {
+        "$ref": "#/$defs/ThreadSpec"
+      }
+    },
+    {
+      "cursor": "none",
+      "data": false,
+      "item": {
+        "$ref": "#/$defs/CommandOutputItem"
+      },
+      "name": "commandOutput",
+      "scope": "read",
+      "spec": {
+        "$ref": "#/$defs/CommandOutputSpec"
       }
     }
   ],

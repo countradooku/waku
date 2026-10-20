@@ -161,6 +161,23 @@ pub fn document() -> Value {
         .iter()
         .map(|(name, schema)| (name.clone(), schema.clone()))
         .collect::<std::collections::BTreeMap<_, _>>();
+    // The command manifest: every tag `orchestration.dispatch` accepts, with
+    // its static scope.
+    let commands = definitions
+        .get("Command")
+        .and_then(|schema| schema.get("oneOf"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|variant| variant.pointer("/properties/type/const")?.as_str())
+        .filter(|tag| *tag != "unknown")
+        .map(|tag| {
+            json!({
+                "name": tag,
+                "scope": super::orchestration::command_base_scope(tag).as_str(),
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "waku-protocol v8",
@@ -180,8 +197,7 @@ pub fn document() -> Value {
         },
         "methods": methods,
         "streams": streams,
-        // TODO(#54): the orchestration `Command` manifest (`commands!`).
-        "commands": [],
+        "commands": commands,
         "$defs": definitions,
     })
 }

@@ -8,8 +8,10 @@
 //! - `methods.ts` / `streams.ts`: typed maps from method and stream names to
 //!   their params, results, specs and items, with the scope tables.
 //! - `decode.ts`: normalizers that walk only the parts of a decoded value
-//!   that contain open unions and replace unknown tags with the fallback, so
-//!   an exhaustive `switch` stays sound against a newer daemon.
+//!   that contain open unions and replace unknown tags with the fallback
+//!   (`unknown`, or the union's own `x-waku-fallback` variant), so an
+//!   exhaustive `switch` stays sound against a newer daemon. Unions marked
+//!   `x-waku-closed` are only sent by clients and are left as they are.
 //! - `constants.ts` and `index.ts`.
 //!
 //! Output is a pure function of the schema, so regeneration is byte-stable.
@@ -166,9 +168,10 @@ fn schema_needs(schema: &Value, needs: &BTreeSet<String>) -> bool {
         return true;
     }
     if let Some(variants) = schema.get("oneOf").and_then(Value::as_array) {
-        if variants
-            .iter()
-            .any(|variant| tag_of(variant).is_some_and(is_unknown_tag))
+        if schema.get("x-waku-fallback").is_some()
+            || variants
+                .iter()
+                .any(|variant| tag_of(variant).is_some_and(is_unknown_tag))
         {
             return true;
         }
@@ -542,10 +545,21 @@ impl Generator {
                     }
                     text.push_str("    }\n");
                 }
-                text.push_str(
-                    "    default:\n      return { type: \"unknown\", rawType: String(value?.type) } as T.",
-                );
-                let _ = writeln!(text, "{name};\n  }}\n}}");
+                if schema.get("x-waku-closed") == Some(&Value::Bool(true)) {
+                    // Only clients send it; nothing to fall back to.
+                    text.push_str("    default:\n      return value;\n  }\n}\n");
+                } else if let Some(fallback) = schema.get("x-waku-fallback").and_then(Value::as_str) {
+                    let _ = writeln!(
+                        text,
+                        "    default:\n      return {{ type: {} }} as T.{name};\n  }}\n}}",
+                        serde_json::to_string(fallback).unwrap()
+                    );
+                } else {
+                    text.push_str(
+                        "    default:\n      return { type: \"unknown\", rawType: String(value?.type) } as T.",
+                    );
+                    let _ = writeln!(text, "{name};\n  }}\n}}");
+                }
                 continue;
             }
             if schema.get("properties").is_some() {

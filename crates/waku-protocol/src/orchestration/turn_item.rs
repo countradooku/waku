@@ -54,6 +54,7 @@ open_enum! {
 
 /// An icon for a tool's activity row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -92,6 +93,7 @@ open_enum! {
 
 /// The integration a tool belongs to (an MCP server, the browser, …).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ToolSource {
     pub key: String,
@@ -103,6 +105,7 @@ pub struct ToolSource {
 
 /// Presentation hints for tool rows.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ToolPresentation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,6 +136,8 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FileChangeDetail {
     /// Open string: `add`, `update`, `delete`, `move`, …
@@ -147,6 +152,8 @@ pub struct FileChangeDetail {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FileSearchResult {
     pub file_name: String,
@@ -159,6 +166,8 @@ pub struct FileSearchResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct WebSearchResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,6 +179,8 @@ pub struct WebSearchResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderRetry {
     pub attempt: u32,
@@ -190,6 +201,7 @@ open_enum! {
 
 /// One display row of a thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TurnItem {
     pub id: TurnItemId,
@@ -247,6 +259,7 @@ impl TurnItem {
 
 /// The 24 display kinds plus `Unknown`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
