@@ -53,10 +53,14 @@ struct ClientInner {
     task_state_subscribers: Mutex<Vec<Sender<u64>>>,
     last_sequences: Mutex<HashMap<(Uuid, Uuid), LastSequence>>,
     disconnected: AtomicBool,
+    /// Run once when the connection closes (see [`DaemonClient::on_disconnect`]).
+    disconnect_callbacks: Mutex<Vec<DisconnectCallback>>,
     /// Connected over the local socket or pipe, so the daemon's files are
     /// on this machine.
     local: bool,
 }
+
+type DisconnectCallback = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone, Copy)]
 struct LastSequence {
@@ -101,6 +105,7 @@ impl DaemonClient {
             task_state_subscribers: Mutex::new(Vec::new()),
             last_sequences: Mutex::new(last_sequences),
             disconnected: AtomicBool::new(false),
+            disconnect_callbacks: Mutex::new(Vec::new()),
             local: matches!(endpoint, Endpoint::Unix(_) | Endpoint::Pipe(_)),
         });
         let hello = ClientMessage::Hello {
@@ -170,6 +175,22 @@ impl DaemonClient {
 
     pub fn is_disconnected(&self) -> bool {
         self.inner.disconnected.load(Ordering::Acquire)
+    }
+
+    /// Run `callback` once this connection closes, or right away when it
+    /// already has. This is the event a supervisor waits on instead of
+    /// polling [`Self::is_disconnected`] (#178). The callback runs on the
+    /// connection thread as it exits, so it must not block.
+    pub fn on_disconnect(&self, callback: impl FnOnce() + Send + 'static) {
+        let mut callbacks = self.inner.disconnect_callbacks.lock();
+        // `disconnected` sets the flag before it takes this lock, so either
+        // the flag is visible here or the callback is queued in time.
+        if !self.is_disconnected() {
+            callbacks.push(Box::new(callback));
+            return;
+        }
+        drop(callbacks);
+        callback();
     }
 
     pub fn unsubscribe(&self, session_id: Uuid, runtime_id: Uuid) {
@@ -713,6 +734,10 @@ fn disconnected(inner: &ClientInner) {
     // `processExited` event emitted by the daemon.
     drop(std::mem::take(&mut *inner.sessions.lock()));
     inner.task_state_subscribers.lock().clear();
+    let callbacks = std::mem::take(&mut *inner.disconnect_callbacks.lock());
+    for callback in callbacks {
+        callback();
+    }
 }
 
 /// A request as a WebSocket message: binary with its bulk bytes raw when

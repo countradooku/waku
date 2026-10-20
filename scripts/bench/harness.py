@@ -558,6 +558,11 @@ def counters_window(a: dict, b: dict) -> dict:
         "save_calls": delta("save_calls"),
         "save_ui_ms": round(delta("save_ui_ns") / 1e6, 2),
         "save_max_ms": round(tb["save_max_ns"] / 1e6, 2),
+        # Added in #178; older reports lack them.
+        "terminal_rows_rebuilt": tb.get("terminal_rows_rebuilt", 0)
+        - ta.get("terminal_rows_rebuilt", 0),
+        "terminal_grid_updates": tb.get("terminal_grid_updates", 0)
+        - ta.get("terminal_grid_updates", 0),
     }
 
 

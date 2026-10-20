@@ -44,6 +44,9 @@ waku-protocol = { path = "../waku-protocol" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# The daemon terminal's output thread blocks on PTY readiness instead of
+# sleeping between reads (#178). Already in the tree through alacritty.
+polling = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", default-features = false, features = [

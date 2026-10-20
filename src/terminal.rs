@@ -565,6 +565,7 @@ impl TerminalGrid {
             rebuilt += 1;
         }
         self.rebuilt_rows = rebuilt;
+        perf_count!(terminal_grid_update(rebuilt));
     }
 }
 

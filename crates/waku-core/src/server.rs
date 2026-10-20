@@ -2353,6 +2353,46 @@ mod tests {
         second_server.join().unwrap();
     }
 
+    #[test]
+    fn client_reports_a_closed_connection_through_its_disconnect_callback() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = ShutdownSignal::new();
+        let server = {
+            let shutdown = shutdown.clone();
+            std::thread::spawn(move || {
+                serve(
+                    listener,
+                    "secret".into(),
+                    Arc::new(TestBackend::default()),
+                    shutdown,
+                    ServerOptions::default(),
+                )
+                .unwrap()
+            })
+        };
+        let client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let (closed, on_closed) = bounded(2);
+        let first = closed.clone();
+        client.on_disconnect(move || {
+            let _ = first.send("registered while connected");
+        });
+        assert!(on_closed.recv_timeout(Duration::from_millis(100)).is_err());
+
+        shutdown.trigger();
+        server.join().unwrap();
+        assert_eq!(
+            on_closed.recv_timeout(Duration::from_secs(3)),
+            Ok("registered while connected")
+        );
+        assert!(client.is_disconnected());
+        // A callback registered after the close runs at once.
+        client.on_disconnect(move || {
+            let _ = closed.send("registered after the close");
+        });
+        assert_eq!(on_closed.try_recv(), Ok("registered after the close"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn dropping_an_idle_terminal_does_not_wait_for_output() {
@@ -2390,6 +2430,78 @@ mod tests {
     #[test]
     fn websocket_terminal_close_does_not_wait_for_a_shell_ignoring_hangup() {
         websocket_terminal_round_trip(true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn websocket_terminal_reports_output_then_exit_when_the_shell_exits() {
+        let root = std::env::temp_dir().join(format!("waku-terminal-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = WakuBackend::new(
+            DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
+            StateStore::daemon(root.join("app.db")),
+        )
+        .unwrap()
+        .with_terminal_shell(terminal_test_shell("printf 'goodbye\\n'"));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = ShutdownSignal::new();
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(backend),
+                server_shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
+            )
+            .unwrap()
+        });
+
+        let client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let terminal_id = Uuid::new_v4();
+        let events = client.subscribe(terminal_id, terminal_id);
+        client
+            .request(
+                terminal_id,
+                terminal_id,
+                Command::OpenTerminal {
+                    cwd: root.clone(),
+                    cols: 80,
+                    rows: 24,
+                },
+            )
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut output = Vec::new();
+        let mut exited = false;
+        while !exited {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let Ok(event) = events.recv_timeout(remaining) else {
+                break;
+            };
+            match &event.event {
+                WireDriverEvent::TerminalOutput(chunk) => output.extend(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&chunk.data)
+                        .unwrap(),
+                ),
+                WireDriverEvent::TerminalExited => exited = true,
+                _ => {}
+            }
+        }
+        client.shutdown();
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(exited, "the shell's exit was not reported");
+        assert!(
+            output.windows(7).any(|window| window == b"goodbye"),
+            "output before the exit was lost: {}",
+            String::from_utf8_lossy(&output)
+        );
     }
 
     #[cfg(unix)]
