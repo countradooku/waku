@@ -9,6 +9,7 @@ calls this script; run it directly to repeat one scenario.
 
     harness.py run --out DIR [--rounds N] [--scenarios a,b,...]
     harness.py summarize --out DIR [--raw FILE] [--markdown FILE]
+    harness.py measure --pid PID[,PID] --seconds S [--label L] [--json FILE]
 
 Scenarios: start, idle, prose, burst, reasoning-fast, code-wall, tool-storm,
 memory-1, memory-5, memory-20, rpc.
@@ -125,6 +126,52 @@ def descendants(root: int) -> list[int]:
             found.append(child)
             stack.append(child)
     return found
+
+
+PROVIDER_NAMES = {"codex", "claude", "fake-codex", "fake-claude"}
+
+
+def process_table() -> tuple[dict[int, list[int]], dict[int, str]]:
+    out = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True, check=False
+    ).stdout
+    children: dict[int, list[int]] = {}
+    names: dict[int, str] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3:
+            pid, ppid = int(parts[0]), int(parts[1])
+            children.setdefault(ppid, []).append(pid)
+            names[pid] = Path(parts[2]).name
+    return children, names
+
+
+def split_tree(root: int) -> tuple[list[int], list[int]]:
+    """A process tree split into the shell (root and everything that is not
+    a provider CLI) and provider CLI subtrees (codex/claude, real or fake)."""
+    children, names = process_table()
+    shell, providers = [root], []
+    stack = [(root, False)]
+    while stack:
+        pid, in_provider = stack.pop()
+        for child in children.get(pid, []):
+            provider = in_provider or names.get(child, "") in PROVIDER_NAMES
+            (providers if provider else shell).append(child)
+            stack.append((child, provider))
+    return shell, providers
+
+
+def sum_samples(pids: list[int]) -> dict:
+    total = {"cpu_ns": 0.0, "intr_wakeups": 0, "idle_wakeups": 0, "rss": 0,
+             "footprint": 0, "processes": 0, "t": time.monotonic()}
+    for pid in pids:
+        sample = rusage(pid)
+        if sample is None:
+            continue
+        total["processes"] += 1
+        for key in ("cpu_ns", "intr_wakeups", "idle_wakeups", "rss", "footprint"):
+            total[key] += sample[key]
+    return total
 
 
 def tree_sample(root: int) -> dict | None:
@@ -741,6 +788,8 @@ def command_run(args) -> None:
     results_dir.mkdir(exist_ok=True)
 
     def record(result: dict) -> None:
+        # Other load on the machine skews everything; keep it with the run.
+        result["loadavg_1m_after"] = round(os.getloadavg()[0], 2)
         path = results_dir / f'{result["scenario"]}-r{result["round"]}.json'
         path.write_text(json.dumps(result, indent=2))
         print(f'  {result["scenario"]} r{result["round"]}: {headline(result)}', flush=True)
@@ -826,6 +875,80 @@ def kind_of(scenario: str) -> str:
     return scenario
 
 
+def command_measure(args) -> None:
+    """Sample any process tree from outside: the cross-app (T3 Code) path.
+
+    The shell (the root and its non-provider descendants) and provider CLI
+    subtrees are reported separately. CPU and wakeups of processes that exit
+    inside the window are lost unless their parent reaps them (then they
+    count through the parent's child_* totals); sample long-lived trees.
+    """
+    roots = [int(pid) for pid in args.pid.split(",")]
+    peaks = {"shell": {"rss": 0, "footprint": 0}, "providers": {"rss": 0, "footprint": 0}}
+    cumulative = {"shell": {}, "providers": {}}
+
+    def sample() -> dict:
+        shell, providers = [], []
+        for root in roots:
+            s_pids, p_pids = split_tree(root)
+            shell += s_pids
+            providers += p_pids
+        out = {"shell": sum_samples(shell), "providers": sum_samples(providers)}
+        for role in out:
+            for key in ("rss", "footprint"):
+                peaks[role][key] = max(peaks[role][key], out[role][key])
+        return out
+
+    # A provider CLI that exits takes its counters with it, so CPU and
+    # wakeups add up each pid's last seen value rather than diffing sums.
+    per_pid_last: dict[int, dict] = {}
+
+    def remember() -> None:
+        for root in roots:
+            s_pids, p_pids = split_tree(root)
+            for pid in s_pids + p_pids:
+                value = rusage(pid)
+                if value:
+                    value["role"] = "providers" if pid in p_pids else "shell"
+                    per_pid_last[pid] = value
+
+    first = sample()
+    remember()
+    first_cpu = {pid: dict(v) for pid, v in per_pid_last.items()}
+    deadline = time.monotonic() + args.seconds
+    while time.monotonic() < deadline:
+        time.sleep(min(SAMPLE_INTERVAL, max(deadline - time.monotonic(), 0)))
+        sample()
+        remember()
+    last = sample()
+    seconds = max(last["shell"]["t"] - first["shell"]["t"], 1e-9)
+    for role in ("shell", "providers"):
+        cpu_ns = sum(
+            v["cpu_ns"] - first_cpu.get(pid, {"cpu_ns": 0})["cpu_ns"]
+            for pid, v in per_pid_last.items() if v["role"] == role
+        )
+        wakeups = sum(
+            v["intr_wakeups"] - first_cpu.get(pid, {"intr_wakeups": 0})["intr_wakeups"]
+            for pid, v in per_pid_last.items() if v["role"] == role
+        )
+        cumulative[role] = {
+            "processes_seen": sum(1 for v in per_pid_last.values() if v["role"] == role),
+            "cpu_s": round(cpu_ns / 1e9, 3),
+            "cpu_pct": round(100 * cpu_ns / 1e9 / seconds, 2),
+            "intr_wakeups_per_s": round(wakeups / seconds, 1),
+            "rss_peak_mb": round(peaks[role]["rss"] / MB, 1),
+            "rss_final_mb": round(last[role]["rss"] / MB, 1),
+            "footprint_peak_mb": round(peaks[role]["footprint"] / MB, 1),
+            "footprint_final_mb": round(last[role]["footprint"] / MB, 1),
+        }
+    report = {"schema": "waku.bench-measure/1", "label": args.label, "roots": roots,
+              "window_s": round(seconds, 2), **cumulative}
+    text = json.dumps(report, indent=2)
+    if args.json:
+        Path(args.json).write_text(text + "\n")
+    print(text)
+
+
 def command_summarize(args) -> None:
     out = Path(args.out).resolve()
     results: dict[str, list[dict]] = {}
@@ -881,6 +1004,11 @@ def main() -> None:
     run.add_argument("--bins", default=str(REPO / "target" / "release"))
     run.add_argument("--rounds", type=int, default=3)
     run.add_argument("--scenarios", default="")
+    measure = sub.add_parser("measure", help="sample any process tree (T3 Code)")
+    measure.add_argument("--pid", required=True, help="root pid(s), comma-separated")
+    measure.add_argument("--seconds", type=float, required=True)
+    measure.add_argument("--label", default="")
+    measure.add_argument("--json", default="")
     summarize = sub.add_parser("summarize")
     summarize.add_argument("--out", required=True)
     summarize.add_argument("--raw", default="")
@@ -890,6 +1018,8 @@ def main() -> None:
     try:
         if args.command == "run":
             command_run(args)
+        elif args.command == "measure":
+            command_measure(args)
         else:
             command_summarize(args)
     finally:
