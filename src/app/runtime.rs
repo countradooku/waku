@@ -1601,6 +1601,8 @@ impl Waku {
     }
 
     pub(super) fn save(&mut self) {
+        profile_span!(DEBUG, "Waku::save");
+        perf_scope!(save_scope);
         self.last_stream_save = Instant::now();
         let daemon_error = self
             .daemon
@@ -3524,6 +3526,8 @@ impl Waku {
     }
 
     pub(super) fn drain_event_pump(&mut self, cx: &mut Context<Self>) -> EventPumpSchedule {
+        profile_span!(DEBUG, "drain_event_pump");
+        perf_scope!(pump_scope);
         // `|` on purpose: a busy provider must not starve the other result
         // queues just because its own drain reported a change first.
         if self.drain_driver_events(cx)
@@ -3661,6 +3665,7 @@ impl Waku {
                 }
             }
             runtime.stream_remeasure_pending = markdown_changed;
+            perf_count!(stream_drain(markdown_changed));
             if keep_runtime {
                 self.runtimes.insert(session_id, runtime);
             }

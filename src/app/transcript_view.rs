@@ -1213,6 +1213,8 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        profile_span!(TRACE, "transcript_row");
+        perf_count!(transcript_row);
         let theme = Theme::current(cx);
         let palette = MarkdownPalette::from_theme(&theme);
         let composer = self.composer.clone();

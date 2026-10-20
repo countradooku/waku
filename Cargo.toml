@@ -31,6 +31,18 @@ too_many_arguments = "allow"
 [lints]
 workspace = true
 
+[features]
+# Tracy instrumentation: `tracing` spans on the event pump, the root and pane
+# renders, transcript rows, Markdown and saves, recorded by a `tracing-tracy`
+# subscriber. Off by default, and without it every span compiles to nothing.
+# Pair it with `--profile profiling`. See docs/performance.md.
+profiling = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-tracy"]
+# Frame, per-pane render, stream-commit, save and allocation counters (with a
+# counting global allocator), dumped as JSON to `WAKU_PERF_COUNTERS_OUT` and
+# shown next to the FPS counter. Off by default, and without it every counter
+# compiles to nothing. See docs/performance.md.
+perf-counters = []
+
 [dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1.0"
@@ -73,6 +85,21 @@ futures-lite = "2"
 futures = "0.3"
 nucleo-matcher = "0.3.1"
 tokio = { version = "1", features = ["rt"] }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
+  "std",
+  "fmt",
+  "registry",
+] }
+# tracy-client 0.19 speaks the Tracy 0.14.1 protocol; connect with a matching
+# profiler. `ondemand` keeps the client from buffering until a profiler
+# attaches, and `only-localhost` keeps its listener off the network.
+tracing-tracy = { version = "0.12", optional = true, default-features = false, features = [
+  "enable",
+  "ondemand",
+  "broadcast",
+  "only-localhost",
+] }
 
 # `test-support` has to stay test-only. It compiles a loop into gpui's
 # `flush_effects` that draws every dirty window right there, so with the
@@ -205,6 +232,14 @@ ed25519-dalek = "2"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Release code generation that keeps line tables and symbols, so Tracy and
+# `sample` can attribute time to source lines:
+# `cargo run --profile profiling --features profiling`.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
 
 # Keep debug assertions and incremental builds for app code, but do not run
 # GPUI's text shaping and Taffy layout hot paths completely unoptimized.

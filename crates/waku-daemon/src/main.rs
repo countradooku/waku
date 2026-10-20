@@ -8,6 +8,8 @@ use anyhow::{Context as _, anyhow, bail};
 use waku_protocol::{DAEMON_TOKEN_ENV, DaemonReady, PROTOCOL_VERSION};
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(feature = "profiling")]
+    init_profiling();
     let arguments = Arguments::parse(std::env::args().skip(1))?;
     let token =
         std::env::var(DAEMON_TOKEN_ENV).context("Waku daemon authentication token is missing")?;
@@ -60,6 +62,40 @@ fn main() -> anyhow::Result<()> {
             allow_shutdown: arguments.parent_pid.is_some(),
         },
     )
+}
+
+/// Record waku-core's spans in Tracy, and on stderr when `WAKU_TRACE` names
+/// a filter. The desktop app's `src/profiling.rs` is the same setup; the
+/// daemon shows up as a second client in Tracy's discovery list.
+#[cfg(feature = "profiling")]
+fn init_profiling() {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::filter::Targets;
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let stderr = std::env::var("WAKU_TRACE")
+        .ok()
+        .filter(|filter| !filter.trim().is_empty())
+        .map(|filter| {
+            let everything = Targets::new().with_default(tracing::Level::TRACE);
+            let targets = match filter.trim() {
+                "1" | "true" | "all" => everything,
+                filter => filter.parse().unwrap_or_else(|error| {
+                    eprintln!("ignoring unparsable WAKU_TRACE={filter:?}: {error}");
+                    everything
+                }),
+            };
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_span_events(FmtSpan::CLOSE)
+                .with_filter(targets)
+        });
+    let _ = tracing_subscriber::registry()
+        .with(tracing_tracy::TracyLayer::default())
+        .with(stderr)
+        .try_init();
 }
 
 fn ensure_bind_allowed(address: SocketAddr, allow_non_loopback: bool) -> anyhow::Result<()> {

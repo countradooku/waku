@@ -763,6 +763,7 @@ impl IncrementalParser {
     /// Point the parser at `text`. Appends reparse incrementally; any other
     /// change falls back to a full reparse.
     pub fn set_text(&mut self, text: &str) {
+        profile_span!(TRACE, "IncrementalParser::set_text");
         if text == self.text {
             return;
         }

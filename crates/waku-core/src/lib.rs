@@ -17,6 +17,16 @@ macro_rules! tr {
     };
 }
 
+/// Enter a `tracing` span at `$level` (`TRACE`, `DEBUG`, ...) for the rest of
+/// the enclosing block. With the `profiling` feature off this expands to
+/// nothing, so instrumented hot paths cost nothing in shipping builds.
+macro_rules! profile_span {
+    ($level:ident, $name:literal) => {
+        #[cfg(feature = "profiling")]
+        let _profile_span = tracing::span!(tracing::Level::$level, $name).entered();
+    };
+}
+
 pub mod acp_session;
 pub mod amp_session;
 pub mod attachments;

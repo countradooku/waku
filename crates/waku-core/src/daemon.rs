@@ -352,6 +352,7 @@ impl Backend for WakuBackend {
                 live_session_ids: _,
                 sessions,
             } => {
+                profile_span!(DEBUG, "save_task_state");
                 let active_runtimes = self
                     .sessions
                     .lock()
