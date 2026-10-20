@@ -39,22 +39,26 @@ pub(super) fn decide_client(
             title_seed,
             source_plan,
             ..
-        } => dispatch_message(
-            draft,
-            capabilities,
-            envelope,
-            DispatchInput {
-                message_id: *message_id,
-                text,
-                display_text: display_text.as_deref(),
-                attachments,
-                context,
-                model_selection: model_selection.as_ref(),
-                mode,
-                title_seed: title_seed.as_deref(),
-                source_plan: source_plan.as_ref(),
-            },
-        ),
+        } => {
+            dispatch_message(
+                draft,
+                capabilities,
+                envelope,
+                DispatchInput {
+                    message_id: *message_id,
+                    text,
+                    display_text: display_text.as_deref(),
+                    attachments,
+                    context,
+                    model_selection: model_selection.as_ref(),
+                    mode,
+                    title_seed: title_seed.as_deref(),
+                    source_plan: source_plan.as_ref(),
+                },
+            )?;
+            super::thread::reengage(draft);
+            Ok(())
+        }
         Command::RunInterrupt {
             run_id,
             reason,

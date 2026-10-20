@@ -377,6 +377,22 @@ pub(super) fn decide_lifecycle(
     Ok(())
 }
 
+/// A new message brings a settled thread back to the active list and clears
+/// any manual settle override, so auto-settle applies to it again (#64).
+pub(super) fn reengage(draft: &mut Draft<'_>) {
+    if draft.thread.settled_at.is_none() && draft.thread.settled_override.is_none() {
+        return;
+    }
+    let now = draft.now;
+    let was_settled = draft.thread.settled_at.is_some();
+    let thread = draft.touch_thread(ThreadChange::Unsettled);
+    thread.settled_at = None;
+    thread.settled_override = None;
+    if was_settled {
+        thread.unsettled_at = Some(now);
+    }
+}
+
 /// Soft delete: cancels queued runs and pending provider work, interrupts the
 /// active run, and cleans up terminals and an owned worktree.
 fn delete(draft: &mut Draft<'_>) -> Result<(), CommandError> {

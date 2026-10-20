@@ -383,6 +383,79 @@ pub fn restore_ref(cwd: &Path, git_ref: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether `cwd` is inside a Git work tree.
+pub fn is_repository(cwd: &Path) -> bool {
+    is_git_repository(cwd)
+}
+
+/// One file that differs between two snapshots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefDiffFile {
+    pub path: String,
+    /// `git diff --name-status` letter: `A`, `M`, `D`, `T`, …
+    pub status: char,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+/// The files that differ from `from` to `to`; with no `from`, from `HEAD`
+/// (or the empty tree in a repository without commits). Renames are
+/// reported as a deletion and an addition.
+pub fn diff_refs(cwd: &Path, from: Option<&str>, to: &str) -> anyhow::Result<Vec<RefDiffFile>> {
+    let from = match from {
+        Some(from) => from.to_owned(),
+        None if has_head(cwd) => "HEAD".to_owned(),
+        None => EMPTY_TREE.to_owned(),
+    };
+    let statuses = git_output(
+        cwd,
+        [
+            "diff",
+            "--name-status",
+            "--no-renames",
+            "-z",
+            &from,
+            to,
+            "--",
+            ".",
+        ],
+    )?;
+    let mut status_by_path = HashMap::new();
+    let mut fields = statuses.split('\0').filter(|field| !field.is_empty());
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        status_by_path.insert(path.to_owned(), status.chars().next().unwrap_or('M'));
+    }
+    let numstat = git_output(
+        cwd,
+        [
+            "diff",
+            "--numstat",
+            "--no-renames",
+            "-z",
+            &from,
+            to,
+            "--",
+            ".",
+        ],
+    )?;
+    let mut files = Vec::new();
+    for record in numstat.split('\0').filter(|record| !record.is_empty()) {
+        let mut columns = record.splitn(3, '\t');
+        let additions = columns.next().unwrap_or("0").parse().unwrap_or(0);
+        let deletions = columns.next().unwrap_or("0").parse().unwrap_or(0);
+        let Some(path) = columns.next() else {
+            continue;
+        };
+        files.push(RefDiffFile {
+            status: status_by_path.get(path).copied().unwrap_or('M'),
+            path: path.to_owned(),
+            additions,
+            deletions,
+        });
+    }
+    Ok(files)
+}
+
 pub fn has_ref(cwd: &Path, git_ref: &str) -> bool {
     resolve_ref(cwd, git_ref).is_some()
 }

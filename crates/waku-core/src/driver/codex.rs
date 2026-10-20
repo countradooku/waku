@@ -1160,7 +1160,11 @@ fn codex_title_turn_params(thread_id: &str, user_message: &str) -> Value {
 /// Codex app-server can persist a thread name but does not generate one. Match
 /// Codex Desktop's client-owned behavior with an isolated ephemeral turn, then
 /// hand the result back to the main writer for `thread/name/set`.
-fn generate_codex_title(binary: &Path, cwd: &Path, prompt: &str) -> anyhow::Result<String> {
+pub(crate) fn generate_codex_title(
+    binary: &Path,
+    cwd: &Path,
+    prompt: &str,
+) -> anyhow::Result<String> {
     let mut command = crate::command_env::command(binary);
     let command = command
         .args(["app-server", "--stdio"])

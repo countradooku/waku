@@ -46,6 +46,8 @@ pub const PROJECTION_TABLES: &[(&str, &str)] = &[
     ("p_checkpoints", "checkpoint_id"),
     ("p_context_transfers", "context_transfer_id"),
     ("p_context_handoffs", "context_handoff_id"),
+    // Search documents (#65); `search_fts` is cleared with them.
+    ("search_docs", "entity_id"),
 ];
 
 /// The graph projection's stored version and sequence.
@@ -147,6 +149,7 @@ pub fn rebuild(
     for (table, _) in PROJECTION_TABLES {
         transaction.execute(&format!("DELETE FROM {table}"), [])?;
     }
+    super::search_index::clear(&transaction)?;
     transaction.execute(
         "INSERT INTO projection_metadata (name, schema_version, last_sequence, updated_at)
          VALUES (?1, ?2, 0, 0)

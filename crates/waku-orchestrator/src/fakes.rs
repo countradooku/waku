@@ -14,7 +14,7 @@ use crate::decide::CapabilitySource;
 use crate::effects::EffectType;
 use crate::effects::executor::{
     CheckpointPort, ClaimedEffect, CleanupPort, EffectContext, EffectError, EffectExecutor,
-    PortError, Ports, TitlePort, WorkspacePort,
+    PortError, Ports, PrepareRequest, TitlePort, WorkspacePort,
 };
 
 /// Capabilities per instance, set by the test.
@@ -45,13 +45,14 @@ pub struct FakeWorkspace {
 impl WorkspacePort for FakeWorkspace {
     fn prepare(
         &self,
-        project_root: &Path,
-        strategy: &WorkspaceStrategy,
+        request: &PrepareRequest<'_>,
         progress: &dyn Fn(PreparePhase),
     ) -> Result<PreparedWorkspace, PortError> {
-        self.calls
-            .lock()
-            .push(format!("prepare {} {strategy:?}", project_root.display()));
+        let strategy = request.strategy;
+        self.calls.lock().push(format!(
+            "prepare {} {strategy:?}",
+            request.project_root.display()
+        ));
         progress(PreparePhase::Worktree);
         if let Some(error) = self.fail.lock().clone() {
             return Err(error);

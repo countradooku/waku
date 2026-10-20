@@ -27,5 +27,9 @@ tempfile = "3"
 name = "dispatch"
 harness = false
 
+[[bench]]
+name = "search"
+harness = false
+
 [lints]
 workspace = true

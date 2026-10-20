@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use rusqlite::{Connection, OptionalExtension, params};
 use waku_protocol::orchestration::*;
 
-use super::ThreadProjection;
+use super::{ThreadProjection, search_index};
 use crate::store::{StoreError, StoreResult, decode};
 
 /// Run statuses after which a run's rows leave the hot sets; mirrors
@@ -160,6 +160,7 @@ pub fn apply_sql(
             if !existed {
                 recount_thread_derived(connection, &id)?;
             }
+            search_index::index_title(connection, thread)?;
         }
         DomainEvent::RunUpdated(run) => {
             let old = previous_status(
@@ -534,6 +535,13 @@ pub fn apply_sql(
                     item.updated_at,
                     payload_json,
                 ])?;
+            if search_index::item_document(item).is_some() {
+                let project_id = match event.project_id {
+                    Some(project_id) => project_id.to_string(),
+                    None => thread_project(connection, &item.thread_id.to_string())?,
+                };
+                search_index::index_item(connection, &project_id, item)?;
+            }
         }
         DomainEvent::CheckpointScopeUpdated(scope) => {
             connection
@@ -653,6 +661,15 @@ pub fn apply_sql(
         }
     }
     Ok(())
+}
+
+/// The project of a thread row, for events recorded without one.
+fn thread_project(connection: &Connection, thread_id: &str) -> StoreResult<String> {
+    connection
+        .prepare_cached("SELECT project_id FROM p_threads WHERE thread_id = ?1")?
+        .query_row([thread_id], |row| row.get::<_, String>(0))
+        .optional()?
+        .ok_or_else(|| StoreError::Corrupt(format!("turn item of unknown thread {thread_id}")))
 }
 
 fn previous_status(connection: &Connection, sql: &str, id: &str) -> StoreResult<Option<String>> {

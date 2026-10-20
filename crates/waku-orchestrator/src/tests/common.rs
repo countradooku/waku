@@ -10,6 +10,7 @@ use uuid::Uuid;
 use waku_protocol::orchestration::*;
 
 use crate::clock::ManualClock;
+use crate::command::{CapturedCheckpoint, InternalCommand};
 use crate::decide::Decision;
 use crate::effects::Effect;
 use crate::fakes::StaticCapabilities;
@@ -591,4 +592,103 @@ pub fn provider_done(env: &Env, thread_id: ThreadId, run_id: RunId) -> Option<In
         },
         guard_for(&attempt),
     ))
+}
+
+/// A finished assistant message for the run's current attempt.
+pub fn final_assistant(env: &Env, thread_id: ThreadId, run_id: RunId, text: &str) {
+    let projection = env.projection(thread_id);
+    let run = projection.runs[&run_id].clone();
+    let attempt = projection.attempts[&run.active_attempt_id.unwrap()].clone();
+    let node = run.root_node_id.unwrap();
+    let block = run.ordinal.unwrap();
+    let now = env.clock.advance(1);
+    let message_id = MessageId(derived_id("assistant", &attempt.id.to_string()));
+    let position = TurnItem::position_of(
+        block,
+        projection.next_position.get(&block).copied().unwrap_or(0),
+    );
+    let decision = Decision {
+        events: vec![
+            DomainEvent::MessageUpdated(Message {
+                id: message_id,
+                thread_id,
+                run_id: Some(run_id),
+                node_id: Some(node),
+                role: MessageRole::Assistant,
+                created_by: Actor::Agent,
+                creation_source: CreationSource::Provider,
+                text: text.to_owned(),
+                display_text: None,
+                attachments: Vec::new(),
+                context: Vec::new(),
+                notification: None,
+                sender_thread_id: None,
+                streaming: false,
+                created_at: now,
+                updated_at: now,
+            }),
+            DomainEvent::TurnItemUpdated(TurnItem {
+                id: TurnItemId(derived_id("assistant_item", &attempt.id.to_string())),
+                thread_id,
+                run_id: Some(run_id),
+                node_id: Some(node),
+                provider_thread_id: Some(attempt.provider_thread_id),
+                provider_turn_id: attempt.provider_turn_id,
+                native_item_ref: None,
+                parent_item_id: None,
+                position,
+                status: ItemStatus::Completed,
+                title: None,
+                tool: None,
+                stream_rev: 0,
+                started_at: Some(now),
+                completed_at: Some(now),
+                updated_at: now,
+                kind: TurnItemKind::AssistantMessage {
+                    message_id,
+                    text: text.to_owned(),
+                    streaming: false,
+                },
+            }),
+        ],
+        ..Decision::default()
+    };
+    env.ingest(
+        thread_id,
+        decision,
+        WriteGuard::RunCurrent {
+            run_id,
+            attempt_id: attempt.id,
+        },
+    );
+}
+
+/// A whole turn: the user's message, the reply, the finalization barrier.
+pub fn turn(env: &Env, thread_id: ThreadId, user: &str, reply: &str) -> RunId {
+    let run_id = env.send(thread_id, user, DispatchMode::Auto);
+    go_running(env, thread_id, run_id).unwrap();
+    final_assistant(env, thread_id, run_id, reply);
+    provider_done(env, thread_id, run_id).unwrap();
+    let scope_id = {
+        let projection = env.projection(thread_id);
+        let node = projection.runs[&run_id].root_node_id.unwrap();
+        projection.nodes[&node].checkpoint_scope_id.unwrap()
+    };
+    env.tick();
+    env.orchestrator
+        .dispatch_internal(
+            cid(&format!("capture:{run_id}")),
+            InternalCommand::CheckpointCaptured {
+                thread_id,
+                run_id: Some(run_id),
+                scope_id,
+                result: Ok(CapturedCheckpoint {
+                    git_ref: format!("refs/waku/t/{thread_id}/{scope_id}/0"),
+                    files: Vec::new(),
+                }),
+            },
+        )
+        .unwrap();
+    assert_eq!(env.run(thread_id, run_id).status, RunStatus::Completed);
+    run_id
 }

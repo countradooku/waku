@@ -18,8 +18,11 @@ pub mod effects;
 pub mod fakes;
 pub mod feed;
 pub mod ids;
+pub mod import;
+pub mod lifecycle;
 pub mod orchestrator;
 pub mod projection;
+pub mod search;
 pub mod store;
 
 pub use clock::{Clock, ManualClock, SystemClock};
@@ -29,7 +32,8 @@ pub use decide::{
     OrchestratorSettings, decide,
 };
 pub use effects::executor::{
-    CancelToken, ClaimedEffect, DefaultExecutor, EffectContext, EffectError, EffectExecutor, Ports,
+    CancelToken, CheckpointPort, ClaimedEffect, CleanupPort, DefaultExecutor, EffectContext,
+    EffectError, EffectExecutor, PortError, Ports, PrepareRequest, TitlePort, WorkspacePort,
 };
 pub use effects::worker::{EffectWorkerPool, WorkerConfig};
 pub use effects::{Effect, EffectType, Lane};

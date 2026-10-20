@@ -57,6 +57,7 @@ pub mod model_catalog;
 pub mod opencode_api;
 pub mod opencode_service;
 pub mod opencode_session;
+pub mod orchestrator_ports;
 pub mod persistence;
 pub mod pi_session;
 pub mod projectless;
@@ -76,6 +77,9 @@ mod local_socket;
 mod protocol;
 mod server;
 mod v8;
+
+#[cfg(test)]
+mod legacy_import_tests;
 
 pub use local_socket::LocalListener;
 pub use protocol::{

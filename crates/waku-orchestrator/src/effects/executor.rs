@@ -142,13 +142,24 @@ fn port_error(error: PortError) -> EffectError {
     }
 }
 
+/// What a workspace preparation is for. The thread id makes a new worktree's
+/// name stable, so a retried preparation finds the worktree it created.
+#[derive(Clone, Copy, Debug)]
+pub struct PrepareRequest<'a> {
+    pub project_id: ProjectId,
+    pub thread_id: ThreadId,
+    pub project_root: &'a Path,
+    pub strategy: &'a WorkspaceStrategy,
+    /// Words for a new worktree's name (the thread title).
+    pub name_hint: &'a str,
+}
+
 /// Worktrees. Every method is idempotent: preparing an existing worktree
-/// returns it.
+/// returns it, removing a missing one succeeds.
 pub trait WorkspacePort: Send + Sync {
     fn prepare(
         &self,
-        project_root: &Path,
-        strategy: &WorkspaceStrategy,
+        request: &PrepareRequest<'_>,
         progress: &dyn Fn(PreparePhase),
     ) -> Result<PreparedWorkspace, PortError>;
     fn remove_worktree(&self, path: &Path, branch: Option<&str>) -> Result<(), PortError>;
@@ -248,7 +259,14 @@ impl EffectExecutor for DefaultExecutor {
                         },
                     );
                 };
-                match self.ports.workspace.prepare(&root, strategy, &progress) {
+                let request = PrepareRequest {
+                    project_id: thread.thread.project_id,
+                    thread_id,
+                    project_root: &root,
+                    strategy,
+                    name_hint: &thread.thread.title,
+                };
+                match self.ports.workspace.prepare(&request, &progress) {
                     Ok(workspace) => cx.report(
                         3,
                         InternalCommand::PreparedRunRelease {

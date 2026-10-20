@@ -7,6 +7,7 @@
 //! give equal values; the property test in `tests::rebuild` checks that.
 
 pub mod maintenance;
+pub mod search_index;
 pub mod sql;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
