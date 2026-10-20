@@ -6,7 +6,9 @@
 //! `use` lines of every file here.
 
 mod draft;
+mod ingest;
 mod internal;
+pub mod policy;
 mod project;
 mod request;
 mod run;
@@ -22,6 +24,7 @@ use crate::ids::IdSource;
 use crate::projection::ThreadProjection;
 
 pub(crate) use draft::Draft;
+pub use ingest::{IngestDecision, decide_ingest};
 pub use internal::checkpoint_ref;
 pub use thread::PLACEHOLDER_TITLE;
 

@@ -1,0 +1,1 @@
+{"instance":{"rollback":false},"steps":[{"type":"message","text":"one"},{"type":"message","text":"two"},{"type":"rollback","runs":1},{"type":"message","text":"three"}]}

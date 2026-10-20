@@ -12,6 +12,7 @@ mod opencode_computer_use;
 mod pi;
 mod support;
 mod title_refresh;
+pub mod v2;
 
 pub(crate) use acp::catalog_agent;
 

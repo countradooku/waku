@@ -20,13 +20,18 @@ pub mod feed;
 pub mod ids;
 pub mod orchestrator;
 pub mod projection;
+pub mod provider;
 pub mod store;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use command::{AnyCommand, CommandError, InternalCommand, LockKey};
+pub use decide::policy::{
+    ForkPointKind, ForkStrategy, RollbackStrategy, RuntimeModeDecision, SessionTransitionAction,
+    SteeringPolicy, TransitionPlan,
+};
 pub use decide::{
-    CancelUnsettled, CapabilitySource, DecideContext, Decision, NoCapabilities,
-    OrchestratorSettings, decide,
+    CancelUnsettled, CapabilitySource, DecideContext, Decision, IngestDecision, NoCapabilities,
+    OrchestratorSettings, decide, decide_ingest,
 };
 pub use effects::executor::{
     CancelToken, ClaimedEffect, DefaultExecutor, EffectContext, EffectError, EffectExecutor, Ports,
@@ -39,6 +44,10 @@ pub use orchestrator::{
     Dependencies, DispatchError, DispatchReceipt, IngestOutcome, Orchestrator, OrchestratorConfig,
 };
 pub use projection::{ApplyOutcome, ThreadProjection};
+pub use provider::{
+    ADAPTER_EVENT_CAPACITY, AdapterEvent, BackgroundWorkItem, IngestEnvelope, NativeRef,
+    ProviderTurnRef, RunRef, ThreadDisposition, TurnOutcome, TurnTerminal,
+};
 pub use store::outbox::ReconcileReport;
 pub use store::sink::{CommitContext, CommitResult, EventSink, WriteGuard};
 pub use store::{SinkError, StoreError};

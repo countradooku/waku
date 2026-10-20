@@ -9,6 +9,7 @@ mod effects;
 mod feed;
 mod forward_compat;
 mod idempotency;
+mod ingest;
 mod migrations;
 mod rebuild;
 mod serialization;

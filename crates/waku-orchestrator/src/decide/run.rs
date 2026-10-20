@@ -15,6 +15,7 @@
 
 use waku_protocol::orchestration::*;
 
+use super::policy::{SteeringPolicy, steering_policy};
 use super::{CapabilitySource, Draft, truncate_chars};
 use crate::command::CommandError;
 use crate::effects::{Effect, EffectType, TitleKind};
@@ -173,12 +174,10 @@ fn dispatch_message(
             &run.model_selection.instance,
             Some(live.session),
         );
-        if caps.turns.active_steering {
-            Some(Delivery::Steer(run.id))
-        } else if caps.turns.steering_by_interrupt_restart || caps.turns.interrupt {
-            Some(Delivery::Restart(run.id))
-        } else {
-            None
+        match steering_policy(&caps) {
+            SteeringPolicy::Native => Some(Delivery::Steer(run.id)),
+            SteeringPolicy::InterruptRestart => Some(Delivery::Restart(run.id)),
+            SteeringPolicy::Queue => None,
         }
     };
     let target_active = |target: RunId| -> Result<Run, CommandError> {
@@ -766,7 +765,7 @@ pub(super) fn interrupt_run(
     }
 }
 
-fn interrupted_row(draft: &mut Draft<'_>, run: &Run, message: String) {
+pub(super) fn interrupted_row(draft: &mut Draft<'_>, run: &Run, message: String) {
     // A fresh id: a retried preparation can be interrupted again, and an
     // item's position is assigned once (R15).
     let id = TurnItemId(draft.new_id());
