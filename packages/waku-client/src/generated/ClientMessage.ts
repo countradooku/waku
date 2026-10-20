@@ -2,4 +2,10 @@
 import type { ReplayCursor } from "./ReplayCursor";
 import type { Request } from "./Request";
 
-export type ClientMessage = { "type": "hello", protocolVersion: number, token: string, clientId: string, resumeFrom: Array<ReplayCursor>, } | { "type": "request" } & Request | { "type": "shutdown" };
+export type ClientMessage = { "type": "hello", protocolVersion: number, token: string, clientId: string, resumeFrom: Array<ReplayCursor>,
+/**
+ * The client accepts and sends bulk bytes (blob data, uploads) as
+ * binary WebSocket messages; see [`crate::binary_frame`]. Clients
+ * that omit it get base64 inside JSON.
+ */
+binaryFrames?: boolean, } | { "type": "request" } & Request | { "type": "shutdown" };

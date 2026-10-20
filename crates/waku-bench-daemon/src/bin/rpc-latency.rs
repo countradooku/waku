@@ -14,7 +14,12 @@
 //! ```text
 //! rpc-latency [--address ADDR] [--token TOKEN] [--count N] [--warmup N]
 //!             [--files N] [--project DIR] [--label TEXT] [--out FILE]
+//!             [--hold SECONDS]
 //! ```
+//!
+//! `--hold` keeps the connection open and idle after the timed requests, so
+//! an outside sampler (`scripts/bench/harness.py measure --pid`) can count
+//! the idle wakeups of a connected daemon and client pair without a GUI.
 //!
 //! The address and token default to `$WAKU_DAEMON_ADDRESS` and
 //! `$WAKU_DAEMON_TOKEN`. Point it only at a disposable daemon: it adds a
@@ -34,6 +39,7 @@ use waku_protocol::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV};
 const USAGE: &str = "\
 usage: rpc-latency [--address ADDR] [--token TOKEN] [--count N] [--warmup N]
                    [--files N] [--project DIR] [--label TEXT] [--out FILE]
+                   [--hold SECONDS]
 
   --address ADDR   daemon address (default: $WAKU_DAEMON_ADDRESS)
   --token TOKEN    daemon token (default: $WAKU_DAEMON_TOKEN)
@@ -43,6 +49,7 @@ usage: rpc-latency [--address ADDR] [--token TOKEN] [--count N] [--warmup N]
   --project DIR    project directory to create and seed (default: a temp dir)
   --label TEXT     recorded in the JSON (e.g. waku-daemon)
   --out FILE       also write the JSON report here
+  --hold SECONDS   stay connected and idle this long before disconnecting
 
 Seeds a project and a session through saveTaskState: use a disposable daemon.";
 
@@ -58,6 +65,7 @@ struct Options {
     project: Option<PathBuf>,
     label: Option<String>,
     out: Option<PathBuf>,
+    hold: Option<Duration>,
 }
 
 fn parse() -> anyhow::Result<Options> {
@@ -70,6 +78,7 @@ fn parse() -> anyhow::Result<Options> {
         project: None,
         label: None,
         out: None,
+        hold: None,
     };
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -87,6 +96,9 @@ fn parse() -> anyhow::Result<Options> {
             "--project" => options.project = Some(PathBuf::from(value()?)),
             "--label" => options.label = Some(value()?),
             "--out" => options.out = Some(PathBuf::from(value()?)),
+            "--hold" => {
+                options.hold = Some(Duration::from_secs_f64(value()?.parse().context("--hold")?));
+            }
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -282,6 +294,14 @@ fn main() -> anyhow::Result<()> {
             |response| matches!(response, ResponsePayload::SessionMessageMatches { .. }),
         ),
     )?;
+    if let Some(hold) = options.hold {
+        eprintln!(
+            "rpc-latency: holding the idle connection for {:.0}s (pid {})",
+            hold.as_secs_f64(),
+            std::process::id()
+        );
+        std::thread::sleep(hold);
+    }
     client.disconnect();
 
     let report = json!({

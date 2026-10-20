@@ -1,38 +1,69 @@
+//! The daemon's WebSocket server.
+//!
+//! The transport is evented (#18). One small multi-thread tokio runtime owns
+//! the accept loop, a reader and a writer task per connection, and the
+//! keepalive timers; nothing polls. Backend requests are synchronous (git,
+//! filesystem, SQLite, provider probes) and run on that runtime's blocking
+//! pool, which reuses a bounded set of threads instead of spawning one per
+//! request. Runtime-targeted commands keep their per-session order through an
+//! async mailbox that holds no thread while it waits.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
-use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-use parking_lot::Mutex;
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt as _, StreamExt as _};
+use parking_lot::{Condvar, Mutex};
 use subtle::ConstantTimeEq as _;
-use tungstenite::handshake::server::{
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::{Notify, mpsc, oneshot};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
 };
-use tungstenite::http::{StatusCode, header::ORIGIN};
-use tungstenite::protocol::WebSocketConfig;
-use tungstenite::{Message, WebSocket, accept_hdr_with_config};
+use tokio_tungstenite::tungstenite::http::{StatusCode, header::ORIGIN};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::{self, Message, Utf8Bytes};
 use uuid::Uuid;
 
+use crate::local_socket::LocalListener;
 use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
-use crate::protocol::MAX_WIRE_MESSAGE_BYTES;
 use crate::protocol::{
-    ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
-    ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireDriverEvent,
+    ClientMessage, Command, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, MAX_WIRE_MESSAGE_BYTES,
+    PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome, ResponsePayload, RpcError,
+    SequencedEvent, ServerMessage, WireDriverEvent,
 };
+use waku_protocol::binary_frame;
 
-const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// A socket write that makes no progress for this long means the client is
 /// not reading. Keeping the connection would let its event queue grow without
 /// bound, so it is dropped; clients reconnect and resume from their cursors.
 const SOCKET_WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// The WebSocket upgrade and the client's hello must both arrive within this.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024;
+/// Bytes a connection may send before it has authenticated: the HTTP upgrade
+/// request plus a hello. Anything beyond that is refused unread, so an
+/// unauthenticated peer cannot make the daemon buffer a large message.
+const MAX_PRE_AUTH_BYTES: usize = MAX_HANDSHAKE_MESSAGE_BYTES + 16 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const MAX_REPLAY_EVENTS_PER_SESSION: usize = 2048;
+/// A runtime's replay journal also stops at this many serialized bytes, so a
+/// burst of large tool outputs cannot pin hundreds of megabytes (#21).
+const MAX_REPLAY_BYTES_PER_RUNTIME: usize = 8 * 1024 * 1024;
+/// Text and reasoning deltas of one runtime that arrive within this window
+/// are sent as one event. Providers emit hundreds of small chunks a second,
+/// and each event pays an envelope of ~150 bytes plus a frame and a wakeup.
+const DELTA_COALESCE_WINDOW: Duration = Duration::from_millis(12);
+/// A pending delta this large is sent at once rather than at its deadline.
+const MAX_COALESCED_DELTA_BYTES: usize = 64 * 1024;
 /// Per-subscriber cap on queued daemon messages. A subscriber that falls this
 /// far behind live events is dropped instead of buffered for, so a stalled
 /// client cannot make the daemon's heap grow at the stream rate forever.
@@ -48,6 +79,20 @@ const MAX_CACHED_RESPONSES: usize = 2048;
 const MAX_CACHED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const NATIVE_CLIENT_HEADER: &str = "x-waku-client";
 const NATIVE_CLIENT_HEADER_VALUE: &str = "native";
+/// Async workers only move frames between sockets and queues; two keep one
+/// connection's burst from delaying another's reply.
+const TRANSPORT_WORKERS: usize = 2;
+/// Cap on threads running blocking backend work at once (git, filesystem,
+/// SQLite, provider probes). Further requests queue for a free thread.
+const MAX_BLOCKING_THREADS: usize = 64;
+/// An idle blocking thread exits after this, so a burst of requests does not
+/// leave a crowd of parked threads behind.
+const BLOCKING_THREAD_KEEP_ALIVE: Duration = Duration::from_secs(30);
+/// How long [`serve`] waits for in-flight work when it stops.
+const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+/// Queued messages written before one flush, so a burst of events costs one
+/// socket write rather than one per event.
+const MAX_MESSAGES_PER_FLUSH: usize = 64;
 
 #[derive(Clone, Debug, Default)]
 pub struct ServerOptions {
@@ -61,7 +106,92 @@ pub struct ServerOptions {
     pub allow_shutdown: bool,
 }
 
+/// Stops [`serve`]. Triggering it wakes the accept loop and every connection
+/// immediately; nothing polls a flag.
+#[derive(Clone, Default)]
+pub struct ShutdownSignal {
+    inner: Arc<ShutdownState>,
+}
+
+#[derive(Default)]
+struct ShutdownState {
+    triggered: AtomicBool,
+    notify: Notify,
+    lock: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl ShutdownSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn trigger(&self) {
+        if self.inner.triggered.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.inner.notify.notify_waiters();
+        // Taking the lock orders this wakeup after a waiter's check of the
+        // flag, so `wait_timeout` cannot miss it.
+        let _guard = self.inner.lock.lock();
+        self.inner.condvar.notify_all();
+    }
+
+    pub fn is_triggered(&self) -> bool {
+        self.inner.triggered.load(Ordering::Acquire)
+    }
+
+    /// Block a plain thread until the signal fires or `timeout` passes.
+    /// Returns whether it fired.
+    pub fn wait_timeout(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.inner.lock.lock();
+        while !self.is_triggered() {
+            if self
+                .inner
+                .condvar
+                .wait_until(&mut guard, deadline)
+                .timed_out()
+            {
+                return self.is_triggered();
+            }
+        }
+        true
+    }
+
+    /// Block a plain thread until the signal fires.
+    pub fn wait(&self) {
+        let mut guard = self.inner.lock.lock();
+        while !self.is_triggered() {
+            self.inner.condvar.wait(&mut guard);
+        }
+    }
+
+    pub async fn triggered(&self) {
+        loop {
+            let notified = self.inner.notify.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_triggered() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 struct ConnectionPermit(Arc<AtomicUsize>);
+
+impl ConnectionPermit {
+    fn acquire(active: &Arc<AtomicUsize>) -> Option<Self> {
+        active
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_CONNECTIONS).then_some(count + 1)
+            })
+            .ok()
+            .map(|_| Self(active.clone()))
+    }
+}
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
@@ -99,19 +229,121 @@ impl EventSink {
     }
 }
 
+/// A daemon message serialized once (#21). Cloning it bumps a reference
+/// count, so the journal and every subscriber queue share one buffer.
+type Frame = Utf8Bytes;
+
+/// One item of a connection's outgoing queue.
+enum Outbound {
+    /// A JSON text message.
+    Text(Frame),
+    /// The connection's last message: written and flushed, then the writer
+    /// stops.
+    Final(Frame),
+    /// A message carrying bulk bytes (blob data). The writer sends it as a
+    /// binary message when the client asked for binary frames, and as JSON
+    /// with base64 otherwise (#22).
+    Bulk(Box<ServerMessage>),
+}
+
+/// A connection's outgoing queue. Hub fan-out and request workers push into
+/// it; the connection's writer task drains it.
+type Outgoing = mpsc::Sender<Outbound>;
+
+/// Serialize a message for the wire, once.
+fn encode<T: serde::Serialize>(message: &T) -> Option<Frame> {
+    match serde_json::to_string(message) {
+        Ok(text) => Some(Frame::from(text)),
+        Err(error) => {
+            eprintln!("waku-daemon could not encode a message: {error}");
+            None
+        }
+    }
+}
+
+/// `ServerMessage::Response` serialized from a borrowed outcome, so a large
+/// outcome (a hydrated session) is not cloned just to be written.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename = "response", rename_all = "camelCase")]
+struct ResponseFrame<'a> {
+    request_id: Uuid,
+    outcome: &'a ResponseOutcome,
+}
+
+/// One retained, already serialized runtime event.
+struct JournalEntry {
+    sequence: u64,
+    frame: Frame,
+}
+
+/// A runtime's replay journal, bounded by count and by bytes.
+#[derive(Default)]
+struct Journal {
+    entries: VecDeque<JournalEntry>,
+    bytes: usize,
+}
+
+impl Journal {
+    fn push(&mut self, sequence: u64, frame: Frame) {
+        self.bytes = self.bytes.saturating_add(frame.len());
+        self.entries.push_back(JournalEntry { sequence, frame });
+        while self.entries.len() > MAX_REPLAY_EVENTS_PER_SESSION
+            || (self.bytes > MAX_REPLAY_BYTES_PER_RUNTIME && self.entries.len() > 1)
+        {
+            if let Some(evicted) = self.entries.pop_front() {
+                self.bytes = self.bytes.saturating_sub(evicted.frame.len());
+            }
+        }
+    }
+}
+
+/// Streamed text held back for up to [`DELTA_COALESCE_WINDOW`] so that a
+/// provider's many small chunks become one event.
+struct PendingDelta {
+    event: WireDriverEvent,
+    deadline: Instant,
+}
+
+impl PendingDelta {
+    /// Append `next` if it is the same kind of delta. Returns it otherwise.
+    fn absorb(&mut self, next: WireDriverEvent) -> Option<WireDriverEvent> {
+        match (&mut self.event, next) {
+            (WireDriverEvent::TextDelta(text), WireDriverEvent::TextDelta(more))
+            | (WireDriverEvent::ReasoningDelta(text), WireDriverEvent::ReasoningDelta(more)) => {
+                text.push_str(&more);
+                None
+            }
+            (_, next) => Some(next),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.event {
+            WireDriverEvent::TextDelta(text) | WireDriverEvent::ReasoningDelta(text) => text.len(),
+            _ => 0,
+        }
+    }
+}
+
 /// One connected client's delivery state.
 struct Subscriber {
-    messages: Sender<ServerMessage>,
-    /// Signalled when the subscriber falls too far behind and is dropped from
-    /// the hub. The connection polls it and closes, letting the client
-    /// reconnect and resume from its last replayed cursor.
-    kicked: Sender<()>,
+    messages: Outgoing,
+    /// Fired when the subscriber falls too far behind and is dropped from the
+    /// hub. The connection closes, letting the client reconnect and resume
+    /// from its last replayed cursor.
+    kicked: Option<oneshot::Sender<()>>,
 }
 
 impl Subscriber {
-    fn new(messages: Sender<ServerMessage>) -> (Self, Receiver<()>) {
-        let (kicked, kicked_rx) = unbounded();
-        (Self { messages, kicked }, kicked_rx)
+    fn new(messages: Outgoing) -> (Self, oneshot::Receiver<()>) {
+        let (kicked, kicked_rx) = oneshot::channel();
+        (
+            Self {
+                messages,
+                kicked: Some(kicked),
+            },
+            kicked_rx,
+        )
     }
 }
 
@@ -122,8 +354,10 @@ struct HubState {
     subscribers: HashMap<u64, Subscriber>,
     active_runtimes: HashMap<Uuid, Uuid>,
     next_sequences: HashMap<(Uuid, Uuid), u64>,
-    journal: HashMap<(Uuid, Uuid), VecDeque<SequencedEvent>>,
-    responses: VecDeque<(Uuid, ResponseOutcome, usize)>,
+    journal: HashMap<(Uuid, Uuid), Journal>,
+    pending_deltas: HashMap<(Uuid, Uuid), PendingDelta>,
+    /// Serialized responses by request id; their length is their cost.
+    responses: VecDeque<(Uuid, Frame)>,
     cached_response_bytes: usize,
     catalog_projects: HashMap<Uuid, ProjectCatalogEntry>,
     catalog_sessions: HashMap<Uuid, SessionCatalogEntry>,
@@ -176,6 +410,8 @@ impl From<&AgentSession> for SessionCatalogEntry {
 struct Hub {
     epoch: Uuid,
     state: Mutex<HubState>,
+    /// Wakes the delta-coalescing thread; started on the first delta.
+    coalescer: Mutex<Option<crossbeam_channel::Sender<Instant>>>,
 }
 
 impl Default for Hub {
@@ -183,24 +419,26 @@ impl Default for Hub {
         Self {
             epoch: Uuid::new_v4(),
             state: Mutex::new(HubState::default()),
+            coalescer: Mutex::new(None),
         }
     }
 }
 
 struct DispatchedRequest {
     request: Request,
-    outgoing: Sender<ServerMessage>,
+    outgoing: Outgoing,
     source_subscriber_id: u64,
 }
 
 struct RuntimeMailbox {
     id: Uuid,
-    sender: Sender<DispatchedRequest>,
+    sender: mpsc::UnboundedSender<DispatchedRequest>,
 }
 
 struct RequestDispatcher {
     backend: Arc<dyn Backend>,
     hub: Arc<Hub>,
+    runtime: tokio::runtime::Handle,
     /// A live provider runtime is an actor owned by the daemon, not by any
     /// particular WebSocket connection. One mailbox per session preserves
     /// lifecycle order across desktop and web clients without serializing
@@ -226,14 +464,23 @@ impl Hub {
         state
             .journal
             .retain(|(candidate, _), _| *candidate != session_id);
+        state
+            .pending_deltas
+            .retain(|(candidate, _), _| *candidate != session_id);
     }
 
     fn end_runtime(&self, session_id: Uuid, runtime_id: Option<Uuid>) {
         let mut state = self.state.lock();
-        let matches_active = runtime_id
-            .is_none_or(|runtime_id| state.active_runtimes.get(&session_id) == Some(&runtime_id));
-        if !matches_active {
+        let Some(&active) = state.active_runtimes.get(&session_id) else {
             return;
+        };
+        if runtime_id.is_some_and(|runtime_id| runtime_id != active) {
+            return;
+        }
+        // Text the provider streamed just before closing still goes out.
+        let key = (session_id, active);
+        if let Some(pending) = state.pending_deltas.remove(&key) {
+            self.publish(&mut state, key, pending.event, true);
         }
         state.active_runtimes.remove(&session_id);
         state
@@ -242,34 +489,141 @@ impl Hub {
         state
             .journal
             .retain(|(candidate, _), _| *candidate != session_id);
+        state
+            .pending_deltas
+            .retain(|(candidate, _), _| *candidate != session_id);
     }
 
-    fn emit(&self, session_id: Uuid, runtime_id: Uuid, event: WireDriverEvent, replayable: bool) {
+    /// Accept one runtime event. Text and reasoning deltas are merged with
+    /// the runtime's next deltas of the same kind for up to
+    /// [`DELTA_COALESCE_WINDOW`]; any other event first flushes the pending
+    /// delta, so order is preserved exactly.
+    fn emit(
+        self: &Arc<Self>,
+        session_id: Uuid,
+        runtime_id: Uuid,
+        event: WireDriverEvent,
+        replayable: bool,
+    ) {
         profile_span!(TRACE, "Hub::emit");
         let mut state = self.state.lock();
         if state.active_runtimes.get(&session_id) != Some(&runtime_id) {
             return;
         }
+        let key = (session_id, runtime_id);
+        if replayable && event.is_delta() {
+            let event = match state.pending_deltas.get_mut(&key) {
+                Some(pending) => match pending.absorb(event) {
+                    None if pending.len() < MAX_COALESCED_DELTA_BYTES => return,
+                    None => {
+                        let full = state
+                            .pending_deltas
+                            .remove(&key)
+                            .expect("the pending delta was just extended");
+                        self.publish(&mut state, key, full.event, true);
+                        return;
+                    }
+                    Some(other_kind) => {
+                        let previous = state
+                            .pending_deltas
+                            .remove(&key)
+                            .expect("the pending delta was just inspected");
+                        self.publish(&mut state, key, previous.event, true);
+                        other_kind
+                    }
+                },
+                None => event,
+            };
+            let deadline = Instant::now() + DELTA_COALESCE_WINDOW;
+            state
+                .pending_deltas
+                .insert(key, PendingDelta { event, deadline });
+            drop(state);
+            self.arm_coalescer(deadline);
+            return;
+        }
+        if let Some(pending) = state.pending_deltas.remove(&key) {
+            self.publish(&mut state, key, pending.event, true);
+        }
+        self.publish(&mut state, key, event, replayable);
+    }
+
+    /// Sequence, serialize once, journal and broadcast one event.
+    fn publish(
+        &self,
+        state: &mut HubState,
+        (session_id, runtime_id): (Uuid, Uuid),
+        event: WireDriverEvent,
+        replayable: bool,
+    ) {
         let sequence = state
             .next_sequences
             .entry((session_id, runtime_id))
             .or_default();
         *sequence = sequence.saturating_add(1);
-        let event = SequencedEvent {
+        let sequence = *sequence;
+        let Some(frame) = encode(&ServerMessage::Event(SequencedEvent {
             session_id,
             runtime_id,
             epoch: self.epoch,
-            sequence: *sequence,
+            sequence,
             event,
+        })) else {
+            return;
         };
         if replayable {
-            let journal = state.journal.entry((session_id, runtime_id)).or_default();
-            journal.push_back(event.clone());
-            while journal.len() > MAX_REPLAY_EVENTS_PER_SESSION {
-                journal.pop_front();
+            state
+                .journal
+                .entry((session_id, runtime_id))
+                .or_default()
+                .push(sequence, frame.clone());
+        }
+        Self::broadcast(state, &frame, None);
+    }
+
+    /// Wake the coalescing thread for `deadline`, starting it on first use.
+    /// The thread sleeps on its channel and wakes only while deltas wait.
+    fn arm_coalescer(self: &Arc<Self>, deadline: Instant) {
+        let mut wake = self.coalescer.lock();
+        if wake.is_none() {
+            let (sender, deadlines) = crossbeam_channel::unbounded();
+            let hub = Arc::downgrade(self);
+            let started = std::thread::Builder::new()
+                .name("waku-daemon-coalesce".into())
+                .spawn(move || run_coalescer(hub, deadlines));
+            if started.is_err() {
+                drop(wake);
+                // Without the thread nothing would flush; send at once.
+                self.flush_due_deltas(Instant::now() + DELTA_COALESCE_WINDOW);
+                return;
+            }
+            *wake = Some(sender);
+        }
+        if let Some(wake) = wake.as_ref() {
+            let _ = wake.send(deadline);
+        }
+    }
+
+    /// Publish every pending delta whose window has closed by `now`, and
+    /// return the earliest deadline still waiting.
+    fn flush_due_deltas(&self, now: Instant) -> Option<Instant> {
+        let mut state = self.state.lock();
+        let due = state
+            .pending_deltas
+            .iter()
+            .filter(|(_, pending)| pending.deadline <= now)
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>();
+        for key in due {
+            if let Some(pending) = state.pending_deltas.remove(&key) {
+                self.publish(&mut state, key, pending.event, true);
             }
         }
-        Self::broadcast(&mut state, &ServerMessage::Event(event), None);
+        state
+            .pending_deltas
+            .values()
+            .map(|pending| pending.deadline)
+            .min()
     }
 
     fn subscribe(&self, resume_from: &[ReplayCursor], subscriber: Subscriber) -> u64 {
@@ -285,7 +639,7 @@ impl Hub {
         // from session state.
         let messages = subscriber.messages.clone();
         state.subscribers.insert(id, subscriber);
-        for (&(session_id, runtime_id), events) in &state.journal {
+        for (&(session_id, runtime_id), journal) in &state.journal {
             let sequence = resume_from
                 .iter()
                 .find(|cursor| {
@@ -295,11 +649,14 @@ impl Hub {
                 })
                 .map(|cursor| cursor.sequence)
                 .unwrap_or_default();
-            for event in events.iter().filter(|event| event.sequence > sequence) {
-                if messages.len() >= MAX_QUEUED_MESSAGES_PER_SUBSCRIBER
-                    || messages
-                        .try_send(ServerMessage::Event(event.clone()))
-                        .is_err()
+            for entry in journal
+                .entries
+                .iter()
+                .filter(|entry| entry.sequence > sequence)
+            {
+                if messages
+                    .try_send(Outbound::Text(entry.frame.clone()))
+                    .is_err()
                 {
                     return id;
                 }
@@ -312,26 +669,33 @@ impl Hub {
         self.state.lock().subscribers.remove(&subscriber_id);
     }
 
-    /// Sends `message` to every subscriber except `skip`, dropping any whose
+    /// Sends `frame` to every subscriber except `skip`, dropping any whose
     /// bounded queue is full. Buffering a stalled client at the daemon's
     /// event rate is how resident memory grew without bound; a dropped
     /// subscriber's connection observes the kick, closes, and reconnects with
     /// replay cursors, so no event stream is lost permanently.
-    fn broadcast(state: &mut HubState, message: &ServerMessage, skip: Option<u64>) {
+    fn broadcast(state: &mut HubState, frame: &Frame, skip: Option<u64>) {
         let mut overwhelmed = Vec::new();
         for (&subscriber_id, subscriber) in &state.subscribers {
             if Some(subscriber_id) == skip {
                 continue;
             }
-            if subscriber.messages.len() >= MAX_QUEUED_MESSAGES_PER_SUBSCRIBER
-                || subscriber.messages.try_send(message.clone()).is_err()
+            if subscriber
+                .messages
+                .try_send(Outbound::Text(frame.clone()))
+                .is_err()
             {
-                overwhelmed.push((subscriber_id, subscriber.kicked.clone()));
+                overwhelmed.push(subscriber_id);
             }
         }
-        for (subscriber_id, kicked) in overwhelmed {
-            state.subscribers.remove(&subscriber_id);
-            let _ = kicked.send(());
+        for subscriber_id in overwhelmed {
+            if let Some(kicked) = state
+                .subscribers
+                .remove(&subscriber_id)
+                .and_then(|subscriber| subscriber.kicked)
+            {
+                let _ = kicked.send(());
+            }
         }
     }
 
@@ -381,67 +745,80 @@ impl Hub {
 
     fn broadcast_task_state_changed(state: &mut HubState, source_subscriber_id: u64) {
         state.task_state_revision = state.task_state_revision.saturating_add(1);
-        let message = ServerMessage::TaskStateChanged {
+        if let Some(frame) = encode(&ServerMessage::TaskStateChanged {
             revision: state.task_state_revision,
-        };
-        Self::broadcast(state, &message, Some(source_subscriber_id));
+        }) {
+            Self::broadcast(state, &frame, Some(source_subscriber_id));
+        }
     }
 
-    fn cached_response(&self, request_id: Uuid) -> Option<ResponseOutcome> {
+    fn cached_response(&self, request_id: Uuid) -> Option<Frame> {
         self.state
             .lock()
             .responses
             .iter()
             .rev()
-            .find_map(|(cached_id, outcome, _)| (*cached_id == request_id).then(|| outcome.clone()))
+            .find_map(|(cached_id, frame)| (*cached_id == request_id).then(|| frame.clone()))
     }
 
-    fn cache_response(&self, request_id: Uuid, outcome: ResponseOutcome) {
-        // File bytes are bulk data that clients read once; caching a copy per
-        // request would duplicate every open file in daemon memory, and the
-        // request is cheap to re-run if it is ever retried.
-        if matches!(
-            &outcome,
-            ResponseOutcome::Ok {
-                payload: ResponsePayload::BlobData { .. }
-            }
-        ) {
-            return;
-        }
-        // Outcomes carry serde payloads whose in-memory size tracks their
-        // serialized form closely enough for a cache budget.
-        let bytes = serde_json::to_string(&outcome)
-            .map(|serialized| serialized.len())
-            .unwrap_or(0);
+    /// Keep a response's serialized frame so a client that missed it can
+    /// fetch it again. The frame is the one the connection writes, so its
+    /// length is exactly what it costs.
+    fn cache_response(&self, request_id: Uuid, frame: Frame) {
+        let bytes = frame.len();
         let mut state = self.state.lock();
         state.cached_response_bytes = state.cached_response_bytes.saturating_add(bytes);
-        state.responses.push_back((request_id, outcome, bytes));
+        state.responses.push_back((request_id, frame));
         while state.responses.len() > MAX_CACHED_RESPONSES
             || state.cached_response_bytes > MAX_CACHED_RESPONSE_BYTES
         {
-            if let Some((_, _, evicted_bytes)) = state.responses.pop_front() {
+            if let Some((_, evicted)) = state.responses.pop_front() {
                 state.cached_response_bytes =
-                    state.cached_response_bytes.saturating_sub(evicted_bytes);
+                    state.cached_response_bytes.saturating_sub(evicted.len());
             }
         }
     }
 }
 
+/// Flushes pending deltas when their window closes. It blocks on its channel
+/// with no timeout while nothing is pending, and exits when the hub is gone.
+fn run_coalescer(hub: Weak<Hub>, deadlines: crossbeam_channel::Receiver<Instant>) {
+    let mut next: Option<Instant> = None;
+    loop {
+        let received = match next {
+            Some(at) => deadlines.recv_deadline(at),
+            None => deadlines
+                .recv()
+                .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected),
+        };
+        match received {
+            Ok(deadline) => {
+                next = Some(next.map_or(deadline, |next| next.min(deadline)));
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        }
+        let now = Instant::now();
+        if next.is_some_and(|next| next <= now) {
+            let Some(hub) = hub.upgrade() else {
+                return;
+            };
+            next = hub.flush_due_deltas(now);
+        }
+    }
+}
+
 impl RequestDispatcher {
-    fn new(backend: Arc<dyn Backend>, hub: Arc<Hub>) -> Self {
+    fn new(backend: Arc<dyn Backend>, hub: Arc<Hub>, runtime: tokio::runtime::Handle) -> Self {
         Self {
             backend,
             hub,
+            runtime,
             runtime_mailboxes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn dispatch(
-        &self,
-        request: Request,
-        outgoing: Sender<ServerMessage>,
-        source_subscriber_id: u64,
-    ) {
+    fn dispatch(&self, request: Request, outgoing: Outgoing, source_subscriber_id: u64) {
         profile_span!(DEBUG, "dispatch");
         if command_targets_runtime(&request.command) {
             self.dispatch_runtime(request, outgoing, source_subscriber_id);
@@ -450,287 +827,552 @@ impl RequestDispatcher {
         }
     }
 
+    /// Read-only and session-independent requests run concurrently on the
+    /// blocking pool, so a slow probe never delays a hydration.
     fn dispatch_independent(
         &self,
         request: Request,
-        outgoing: Sender<ServerMessage>,
+        outgoing: Outgoing,
         source_subscriber_id: u64,
     ) {
         let backend = self.backend.clone();
         let hub = self.hub.clone();
-        let failed_request_id = request.request_id;
-        let failed_outgoing = outgoing.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name("waku-daemon-request".into())
-            .spawn(move || {
-                handle_request(request, outgoing, source_subscriber_id, backend, hub);
-            })
-        {
-            send_dispatch_error(
-                failed_request_id,
-                failed_outgoing,
-                &self.hub,
-                format!("could not start daemon request worker: {error}"),
-            );
-        }
+        self.runtime.spawn_blocking(move || {
+            handle_request(request, outgoing, source_subscriber_id, backend, hub);
+        });
     }
 
-    fn dispatch_runtime(
-        &self,
-        request: Request,
-        outgoing: Sender<ServerMessage>,
-        source_subscriber_id: u64,
-    ) {
+    fn dispatch_runtime(&self, request: Request, outgoing: Outgoing, source_subscriber_id: u64) {
         let session_id = request.session_id;
-        let failed_request_id = request.request_id;
-        let failed_outgoing = outgoing.clone();
         let mut dispatched = DispatchedRequest {
             request,
             outgoing,
             source_subscriber_id,
         };
-        loop {
-            let mut mailboxes = self.runtime_mailboxes.lock();
-            if let Some(mailbox) = mailboxes.get(&session_id) {
-                match mailbox.sender.send(dispatched) {
-                    Ok(()) => return,
-                    Err(error) => {
-                        dispatched = error.0;
-                        mailboxes.remove(&session_id);
-                        continue;
-                    }
-                }
-            }
-
-            let mailbox_id = Uuid::new_v4();
-            let (sender, requests) = unbounded();
-            sender
-                .send(dispatched)
-                .expect("a new runtime mailbox still has its receiver");
-            mailboxes.insert(
-                session_id,
-                RuntimeMailbox {
-                    id: mailbox_id,
-                    sender,
-                },
-            );
-
-            let backend = self.backend.clone();
-            let hub = self.hub.clone();
-            let mailbox_registry = Arc::downgrade(&self.runtime_mailboxes);
-            let worker = std::thread::Builder::new()
-                .name(format!("waku-daemon-runtime-{session_id}"))
-                .spawn(move || {
-                    run_runtime_mailbox(
-                        session_id,
-                        mailbox_id,
-                        requests,
-                        mailbox_registry,
-                        backend,
-                        hub,
-                    );
-                });
-            if let Err(error) = worker {
-                if mailboxes
-                    .get(&session_id)
-                    .is_some_and(|mailbox| mailbox.id == mailbox_id)
-                {
+        let mut mailboxes = self.runtime_mailboxes.lock();
+        if let Some(mailbox) = mailboxes.get(&session_id) {
+            match mailbox.sender.send(dispatched) {
+                Ok(()) => return,
+                Err(error) => {
+                    // The previous actor exited (its backend call panicked);
+                    // a successor picks the request up.
+                    dispatched = error.0;
                     mailboxes.remove(&session_id);
                 }
-                drop(mailboxes);
-                send_dispatch_error(
-                    failed_request_id,
-                    failed_outgoing,
-                    &self.hub,
-                    format!("could not start runtime worker: {error}"),
-                );
             }
-            return;
         }
+
+        let mailbox_id = Uuid::new_v4();
+        let (sender, requests) = mpsc::unbounded_channel();
+        sender
+            .send(dispatched)
+            .expect("a new runtime mailbox still has its receiver");
+        mailboxes.insert(
+            session_id,
+            RuntimeMailbox {
+                id: mailbox_id,
+                sender,
+            },
+        );
+        drop(mailboxes);
+        self.runtime.spawn(run_runtime_mailbox(
+            session_id,
+            mailbox_id,
+            requests,
+            Arc::downgrade(&self.runtime_mailboxes),
+            self.backend.clone(),
+            self.hub.clone(),
+        ));
     }
 }
 
+/// Everything a connection task needs from the server.
+pub(crate) struct ServerContext {
+    token: String,
+    dispatcher: Arc<RequestDispatcher>,
+    hub: Arc<Hub>,
+    pub(crate) shutdown: ShutdownSignal,
+    options: ServerOptions,
+    active_connections: Arc<AtomicUsize>,
+}
+
+impl ServerContext {
+    pub(crate) fn spawn_connection<S>(self: &Arc<Self>, stream: S)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let Some(permit) = ConnectionPermit::acquire(&self.active_connections) else {
+            return;
+        };
+        let context = self.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(error) = handle_connection(stream, &context).await {
+                eprintln!("waku-daemon connection ended: {error:#}");
+            }
+        });
+    }
+}
+
+/// Where the daemon accepts connections. At least one is required.
+#[derive(Default)]
+pub struct Listeners {
+    /// Loopback or, with exposure enabled, a network address.
+    pub tcp: Option<TcpListener>,
+    /// The per-user Unix socket or named pipe (#19).
+    pub local: Option<LocalListener>,
+}
+
+/// Serve on one TCP listener.
 pub fn serve(
     listener: TcpListener,
     token: String,
     backend: Arc<dyn Backend>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: ShutdownSignal,
     options: ServerOptions,
 ) -> anyhow::Result<()> {
-    listener
-        .set_nonblocking(true)
-        .context("could not configure Waku daemon listener")?;
-    let hub = Arc::new(Hub::default());
-    let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
-    let options = Arc::new(options);
-    let active_connections = Arc::new(AtomicUsize::new(0));
-    while !shutdown.load(Ordering::Acquire) {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                if active_connections
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                        (active < MAX_CONNECTIONS).then_some(active + 1)
-                    })
-                    .is_err()
-                {
-                    continue;
-                }
-                let connection_permit = ConnectionPermit(active_connections.clone());
-                let token = token.clone();
-                let dispatcher = dispatcher.clone();
-                let hub = hub.clone();
-                let shutdown = shutdown.clone();
-                let options = options.clone();
-                std::thread::Builder::new()
-                    .name("waku-daemon-connection".into())
-                    .spawn(move || {
-                        let _connection_permit = connection_permit;
-                        if let Err(error) =
-                            handle_connection(stream, &token, dispatcher, hub, shutdown, &options)
-                        {
-                            eprintln!("waku-daemon connection ended: {error:#}");
-                        }
-                    })
-                    .context("could not start Waku daemon connection thread")?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(ACCEPT_POLL_INTERVAL);
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error).context("Waku daemon listener failed"),
-        }
-    }
-    backend.shutdown();
-    Ok(())
+    serve_listeners(
+        Listeners {
+            tcp: Some(listener),
+            local: None,
+        },
+        token,
+        backend,
+        shutdown,
+        options,
+    )
 }
 
-fn handle_connection(
-    stream: TcpStream,
-    expected_token: &str,
-    dispatcher: Arc<RequestDispatcher>,
-    hub: Arc<Hub>,
-    shutdown: Arc<AtomicBool>,
-    options: &ServerOptions,
+/// Serve on every listener in `listeners` until `shutdown` fires or one of
+/// them fails.
+pub fn serve_listeners(
+    listeners: Listeners,
+    token: String,
+    backend: Arc<dyn Backend>,
+    shutdown: ShutdownSignal,
+    options: ServerOptions,
 ) -> anyhow::Result<()> {
-    // Accepted sockets can inherit the listener's nonblocking flag on some
-    // platforms. The handshake is deliberately blocking; steady-state reads
-    // get their bounded polling behavior from SO_RCVTIMEO below.
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    if listeners.tcp.is_none() && listeners.local.is_none() {
+        bail!("the Waku daemon needs at least one listener");
+    }
+    if let Some(listener) = &listeners.tcp {
+        listener
+            .set_nonblocking(true)
+            .context("could not configure Waku daemon listener")?;
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(TRANSPORT_WORKERS)
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .thread_keep_alive(BLOCKING_THREAD_KEEP_ALIVE)
+        .thread_name("waku-daemon-worker")
+        .enable_all()
+        .build()
+        .context("could not start the Waku daemon runtime")?;
+    let hub = Arc::new(Hub::default());
+    let dispatcher = Arc::new(RequestDispatcher::new(
+        backend.clone(),
+        hub.clone(),
+        runtime.handle().clone(),
+    ));
+    let context = Arc::new(ServerContext {
+        token,
+        dispatcher,
+        hub,
+        shutdown,
+        options,
+        active_connections: Arc::new(AtomicUsize::new(0)),
+    });
+    let result = runtime.block_on(async move {
+        let mut accepting = Vec::new();
+        if let Some(listener) = listeners.tcp {
+            accepting.push(tokio::spawn(accept_tcp(listener, context.clone())));
+        }
+        if let Some(listener) = listeners.local {
+            accepting.push(tokio::spawn(crate::local_socket::accept_local(
+                listener,
+                context.clone(),
+            )));
+        }
+        // Every accept loop returns on shutdown; the first to return (or
+        // fail) ends the server.
+        let (finished, _, rest) = futures_util::future::select_all(accepting).await;
+        context.shutdown.trigger();
+        for task in rest {
+            let _ = task.await;
+        }
+        finished.context("a Waku daemon accept loop panicked")?
+    });
+    backend.shutdown();
+    // Connections still open are dropped with the runtime, which closes their
+    // sockets so clients see the daemon go away at once.
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_GRACE);
+    result
+}
+
+async fn accept_tcp(listener: TcpListener, context: Arc<ServerContext>) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .context("could not register Waku daemon listener")?;
+    loop {
+        let accepted = tokio::select! {
+            () = context.shutdown.triggered() => return Ok(()),
+            accepted = listener.accept() => accepted,
+        };
+        match accepted {
+            Ok((stream, _)) => {
+                // Replies are small and latency-bound; never wait for Nagle.
+                let _ = stream.set_nodelay(true);
+                context.spawn_connection(stream);
+            }
+            Err(error) => accept_failed(error).await?,
+        }
+    }
+}
+
+/// Transient accept failures are retried; anything else stops the server.
+pub(crate) async fn accept_failed(error: io::Error) -> anyhow::Result<()> {
+    match error.kind() {
+        io::ErrorKind::Interrupted
+        | io::ErrorKind::WouldBlock
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::ConnectionReset => Ok(()),
+        // Out of descriptors: back off briefly instead of spinning, and keep
+        // the daemon (and every live runtime) up.
+        _ if is_descriptor_exhaustion(&error) => {
+            eprintln!("waku-daemon could not accept a connection: {error}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(())
+        }
+        _ => Err(error).context("Waku daemon listener failed"),
+    }
+}
+
+fn is_descriptor_exhaustion(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// How a connection's reader stopped.
+enum ReaderExit {
+    Closed,
+    /// The client asked a desktop-owned daemon to stop.
+    Shutdown,
+}
+
+async fn handle_connection<S>(stream: S, context: &ServerContext) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let budget = Arc::new(AtomicUsize::new(MAX_PRE_AUTH_BYTES));
+    let stream = PreAuthLimit {
+        inner: stream,
+        remaining: budget.clone(),
+    };
     let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_HANDSHAKE_MESSAGE_BYTES))
-        .max_frame_size(Some(MAX_HANDSHAKE_MESSAGE_BYTES));
-    let allowed_origins = options.allowed_origins.clone();
-    let mut socket = accept_hdr_with_config(
-        stream,
-        move |request: &HandshakeRequest, response: HandshakeResponse| {
-            validate_handshake(request, response, &allowed_origins)
-        },
-        Some(config),
-    )
-    .context("WebSocket handshake failed")?;
-    let hello = read_client_message(&mut socket)?;
-    let resume_from = match hello {
+        .max_message_size(Some(MAX_WIRE_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_WIRE_MESSAGE_BYTES));
+    let allowed_origins = context.options.allowed_origins.clone();
+    let handshake = async {
+        let mut socket = tokio_tungstenite::accept_hdr_async_with_config(
+            stream,
+            move |request: &HandshakeRequest, response: HandshakeResponse| {
+                validate_handshake(request, response, &allowed_origins)
+            },
+            Some(config),
+        )
+        .await
+        .context("WebSocket handshake failed")?;
+        let hello = read_client_message(&mut socket).await?;
+        anyhow::Ok((socket, hello))
+    };
+    let (mut socket, hello) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+        .await
+        .context("daemon handshake timed out")??;
+    let (resume_from, binary_frames) = match hello {
         ClientMessage::Hello {
             protocol_version,
             token,
             resume_from,
+            binary_frames,
             ..
-        } if protocol_version == PROTOCOL_VERSION && token_matches(expected_token, &token) => {
-            resume_from
+        } if protocol_version == PROTOCOL_VERSION && token_matches(&context.token, &token) => {
+            (resume_from, binary_frames == Some(true))
         }
         ClientMessage::Hello {
             protocol_version, ..
         } if protocol_version != PROTOCOL_VERSION => {
-            write_json(
+            send_now(
                 &mut socket,
                 &ServerMessage::Rejected {
                     message: format!(
                         "protocol {protocol_version} is unsupported; expected {PROTOCOL_VERSION}"
                     ),
                 },
-            )?;
+            )
+            .await?;
             return Ok(());
         }
         ClientMessage::Hello { .. } => {
-            write_json(
+            send_now(
                 &mut socket,
                 &ServerMessage::Rejected {
                     message: "authentication failed".into(),
                 },
-            )?;
+            )
+            .await?;
             return Ok(());
         }
         _ => bail!("first daemon message was not a hello"),
     };
-    write_json(
+    budget.store(usize::MAX, Ordering::Release);
+    send_now(
         &mut socket,
         &ServerMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
+            binary_frames: binary_frames.then_some(true),
         },
-    )?;
-    socket.set_config(|config| {
-        config.max_message_size = Some(MAX_WIRE_MESSAGE_BYTES);
-        config.max_frame_size = Some(MAX_WIRE_MESSAGE_BYTES);
-    });
-    socket
-        .get_mut()
-        .set_read_timeout(Some(SOCKET_POLL_INTERVAL))?;
-    // A client that stops reading must not let its outgoing queue grow at the
-    // daemon's event rate; a write stalled past this timeout drops it.
-    socket
-        .get_mut()
-        .set_write_timeout(Some(SOCKET_WRITE_STALL_TIMEOUT))?;
+    )
+    .await?;
 
-    let (outgoing, outgoing_rx) = bounded(MAX_QUEUED_MESSAGES_PER_SUBSCRIBER);
-    let (subscriber, kicked) = Subscriber::new(outgoing.clone());
-    let subscriber_id = hub.subscribe(&resume_from, subscriber);
+    let (outgoing, outgoing_rx) = mpsc::channel(MAX_QUEUED_MESSAGES_PER_SUBSCRIBER);
+    let (subscriber, mut kicked) = Subscriber::new(outgoing.clone());
+    let subscriber_id = context.hub.subscribe(&resume_from, subscriber);
+    let (sink, stream) = socket.split();
+    let mut writer = tokio::spawn(write_outgoing(sink, outgoing_rx, binary_frames));
+    let exit = tokio::select! {
+        exit = read_incoming(stream, &outgoing, subscriber_id, context) => exit,
+        _ = &mut kicked => Ok(ReaderExit::Closed),
+        () = context.shutdown.triggered() => Ok(ReaderExit::Closed),
+        written = &mut writer => {
+            context.hub.unsubscribe(subscriber_id);
+            return written.unwrap_or(Ok(()));
+        }
+    };
+    context.hub.unsubscribe(subscriber_id);
+    drop(outgoing);
+    if matches!(exit, Ok(ReaderExit::Shutdown)) {
+        // The writer stops right after flushing `ShuttingDown`, so the
+        // desktop sees the acknowledgement before the daemon goes away.
+        let _ = tokio::time::timeout(SOCKET_WRITE_STALL_TIMEOUT, &mut writer).await;
+        context.shutdown.trigger();
+    }
+    writer.abort();
+    exit.map(|_| ())
+}
 
-    'connection: while !shutdown.load(Ordering::Acquire) {
-        if kicked.try_recv().is_ok() {
-            break;
-        }
-        while let Ok(message) = outgoing_rx.try_recv() {
-            if write_json(&mut socket, &message).is_err() {
-                break 'connection;
+type ServerSink<S> = SplitSink<WebSocketStream<PreAuthLimit<S>>, Message>;
+type ServerStream<S> = SplitStream<WebSocketStream<PreAuthLimit<S>>>;
+
+/// Drains the connection's queue onto the socket. Waits on the queue without
+/// a timeout except for keepalive: after `KEEPALIVE_INTERVAL` with nothing to
+/// send it writes a ping, which also keeps the peer's dead-connection timer
+/// fed.
+async fn write_outgoing<S>(
+    mut sink: ServerSink<S>,
+    mut outgoing: mpsc::Receiver<Outbound>,
+    binary_frames: bool,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let message = match tokio::time::timeout(KEEPALIVE_INTERVAL, outgoing.recv()).await {
+            Ok(Some(message)) => message,
+            Ok(None) => return Ok(()),
+            Err(_) => {
+                within_stall(sink.send(Message::Ping(Default::default()))).await?;
+                continue;
             }
+        };
+        let mut shutting_down = matches!(message, Outbound::Final(_));
+        within_stall(sink.feed(outbound_message(message, binary_frames)?)).await?;
+        let mut batched = 1;
+        while !shutting_down && batched < MAX_MESSAGES_PER_FLUSH {
+            let Ok(message) = outgoing.try_recv() else {
+                break;
+            };
+            shutting_down = matches!(message, Outbound::Final(_));
+            within_stall(sink.feed(outbound_message(message, binary_frames)?)).await?;
+            batched += 1;
         }
-        match socket.read() {
-            Ok(Message::Text(text)) => match serde_json::from_str(text.as_ref()) {
-                Ok(ClientMessage::Request(request)) => {
-                    dispatcher.dispatch(request, outgoing.clone(), subscriber_id);
-                }
-                Ok(ClientMessage::Shutdown) => {
-                    if options.allow_shutdown {
-                        write_json(&mut socket, &ServerMessage::ShuttingDown)?;
-                        shutdown.store(true, Ordering::Release);
-                        break;
-                    }
-                    write_json(
-                        &mut socket,
-                        &ServerMessage::Rejected {
-                            message: "daemon shutdown is managed by its service owner".into(),
-                        },
-                    )?;
-                }
-                Ok(ClientMessage::Hello { .. }) => {}
-                Err(error) => {
-                    eprintln!("waku-daemon ignored invalid message: {error}");
-                }
-            },
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) => {
-                let _ = socket.flush();
-            }
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(error)) if retryable_io(&error) => {}
-            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => break,
-            Err(error) => return Err(error).context("Waku daemon WebSocket failed"),
+        within_stall(sink.flush()).await?;
+        if shutting_down {
+            return Ok(());
         }
     }
-    hub.unsubscribe(subscriber_id);
-    Ok(())
+}
+
+fn outbound_message(outbound: Outbound, binary_frames: bool) -> anyhow::Result<Message> {
+    Ok(match outbound {
+        Outbound::Text(frame) | Outbound::Final(frame) => Message::Text(frame),
+        Outbound::Bulk(mut message) if binary_frames => {
+            let body = message.take_bulk().unwrap_or_default();
+            let header = serde_json::to_vec(&message)?;
+            Message::Binary(binary_frame::encode(&header, &body).into())
+        }
+        Outbound::Bulk(message) => text_message(&message)?,
+    })
+}
+
+async fn within_stall<T>(
+    write: impl Future<Output = Result<T, tungstenite::Error>>,
+) -> anyhow::Result<T> {
+    tokio::time::timeout(SOCKET_WRITE_STALL_TIMEOUT, write)
+        .await
+        .context("client stopped reading")?
+        .context("Waku daemon WebSocket write failed")
+}
+
+async fn read_incoming<S>(
+    mut stream: ServerStream<S>,
+    outgoing: &Outgoing,
+    subscriber_id: u64,
+    context: &ServerContext,
+) -> anyhow::Result<ReaderExit>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let Ok(next) = tokio::time::timeout(KEEPALIVE_TIMEOUT, stream.next()).await else {
+            bail!(
+                "client sent nothing for {}s, not even a pong",
+                KEEPALIVE_TIMEOUT.as_secs()
+            );
+        };
+        let message = match next {
+            None => return Ok(ReaderExit::Closed),
+            Some(Err(error)) if connection_closed(&error) => return Ok(ReaderExit::Closed),
+            Some(Err(error)) => return Err(error).context("Waku daemon WebSocket failed"),
+            Some(Ok(message)) => message,
+        };
+        let parsed = match message {
+            Message::Text(text) => serde_json::from_str(text.as_str()),
+            // A request whose bulk bytes (an upload) travel raw (#22).
+            Message::Binary(frame) => match binary_frame::split(&frame) {
+                Some((header, body)) => {
+                    serde_json::from_slice::<ClientMessage>(header).map(|mut message| {
+                        message.put_bulk(body.to_vec());
+                        message
+                    })
+                }
+                None => {
+                    eprintln!("waku-daemon ignored a malformed binary message");
+                    continue;
+                }
+            },
+            Message::Close(_) => return Ok(ReaderExit::Closed),
+            // Pings are answered by the WebSocket layer; pongs only need to
+            // arrive to reset the timeout above.
+            _ => continue,
+        };
+        match parsed {
+            Ok(ClientMessage::Request(request)) => {
+                context
+                    .dispatcher
+                    .dispatch(request, outgoing.clone(), subscriber_id);
+            }
+            Ok(ClientMessage::Shutdown) => {
+                if context.options.allow_shutdown {
+                    if let Some(frame) = encode(&ServerMessage::ShuttingDown) {
+                        let _ = outgoing.send(Outbound::Final(frame)).await;
+                    }
+                    return Ok(ReaderExit::Shutdown);
+                }
+                if let Some(frame) = encode(&ServerMessage::Rejected {
+                    message: "daemon shutdown is managed by its service owner".into(),
+                }) {
+                    let _ = outgoing.send(Outbound::Text(frame)).await;
+                }
+            }
+            Ok(ClientMessage::Hello { .. }) => {}
+            Err(error) => {
+                eprintln!("waku-daemon ignored invalid message: {error}");
+            }
+        }
+    }
+}
+
+fn connection_closed(error: &tungstenite::Error) -> bool {
+    matches!(
+        error,
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed
+    )
+}
+
+/// Caps what a peer can make the daemon read before it has authenticated.
+/// `remaining` is lifted to `usize::MAX` once the hello checks out.
+struct PreAuthLimit<S> {
+    inner: S,
+    remaining: Arc<AtomicUsize>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PreAuthLimit<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let remaining = self.remaining.load(Ordering::Acquire);
+        if remaining == usize::MAX {
+            return Pin::new(&mut self.inner).poll_read(cx, buf);
+        }
+        if remaining == 0 {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "client sent too much before authenticating",
+            )));
+        }
+        let read = if buf.remaining() <= remaining {
+            let before = buf.filled().len();
+            std::task::ready!(Pin::new(&mut self.inner).poll_read(cx, buf))?;
+            buf.filled().len() - before
+        } else {
+            let mut scratch = vec![0; remaining];
+            let mut limited = ReadBuf::new(&mut scratch);
+            std::task::ready!(Pin::new(&mut self.inner).poll_read(cx, &mut limited))?;
+            buf.put_slice(limited.filled());
+            limited.filled().len()
+        };
+        self.remaining.fetch_sub(read, Ordering::AcqRel);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PreAuthLimit<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
 }
 
 fn validate_handshake(
@@ -804,10 +1446,13 @@ fn command_targets_runtime(command: &Command) -> bool {
     )
 }
 
-fn run_runtime_mailbox(
+/// One session's ordered command stream. It runs each command on the
+/// blocking pool and awaits it before taking the next, so it holds no thread
+/// while it waits for work.
+async fn run_runtime_mailbox(
     session_id: Uuid,
     mailbox_id: Uuid,
-    requests: Receiver<DispatchedRequest>,
+    mut requests: mpsc::UnboundedReceiver<DispatchedRequest>,
     mailbox_registry: Weak<Mutex<HashMap<Uuid, RuntimeMailbox>>>,
     backend: Arc<dyn Backend>,
     hub: Arc<Hub>,
@@ -817,9 +1462,9 @@ fn run_runtime_mailbox(
     loop {
         let dispatched = match pending.take() {
             Some(request) => request,
-            None => match requests.recv() {
-                Ok(request) => request,
-                Err(_) => return,
+            None => match requests.recv().await {
+                Some(request) => request,
+                None => return,
             },
         };
         let runtime_id = dispatched.request.runtime_id;
@@ -832,44 +1477,54 @@ fn run_runtime_mailbox(
             Command::CloseSession | Command::CloseTerminal | Command::RemoveSession
         );
         let removes_session = matches!(&dispatched.request.command, Command::RemoveSession);
-        let handled = handle_request(
-            dispatched.request,
-            dispatched.outgoing,
-            dispatched.source_subscriber_id,
-            backend.clone(),
-            hub.clone(),
-        );
+        let worker_backend = backend.clone();
+        let worker_hub = hub.clone();
+        let Ok(handled) = tokio::task::spawn_blocking(move || {
+            handle_request(
+                dispatched.request,
+                dispatched.outgoing,
+                dispatched.source_subscriber_id,
+                worker_backend,
+                worker_hub,
+            )
+        })
+        .await
+        else {
+            // The backend panicked or the server is stopping. Dropping the
+            // receiver makes the next dispatch start a fresh mailbox.
+            return;
+        };
 
-        if handled.executed {
+        if let Some(outcome) = &handled.outcome {
             if starts_runtime {
                 active_runtime_id =
-                    matches!(&handled.outcome, ResponseOutcome::Ok { .. }).then_some(runtime_id);
+                    matches!(outcome, ResponseOutcome::Ok { .. }).then_some(runtime_id);
             } else if let ResponseOutcome::Ok {
                 payload:
                     ResponsePayload::SessionRuntime {
                         runtime_id: Some(attached_runtime_id),
                         ..
                     },
-            } = &handled.outcome
+            } = outcome
             {
                 // A replacement mailbox can rediscover a provider runtime
                 // that survived its previous actor worker.
                 active_runtime_id = Some(*attached_runtime_id);
             } else if closes_runtime {
                 if (removes_session || active_runtime_id == Some(runtime_id))
-                    && matches!(&handled.outcome, ResponseOutcome::Ok { .. })
+                    && matches!(outcome, ResponseOutcome::Ok { .. })
                 {
                     hub.end_runtime(session_id, (!removes_session).then_some(runtime_id));
                     active_runtime_id = None;
                 }
             } else if active_runtime_id.is_none()
                 && !matches!(
-                    &handled.outcome,
+                    outcome,
                     ResponseOutcome::Ok {
                         payload: ResponsePayload::SessionRuntime { .. }
                     }
                 )
-                && matches!(&handled.outcome, ResponseOutcome::Ok { .. })
+                && matches!(outcome, ResponseOutcome::Ok { .. })
             {
                 // Recover the supervisor state if a previous mailbox worker
                 // exited unexpectedly while the backend runtime stayed alive.
@@ -878,8 +1533,12 @@ fn run_runtime_mailbox(
         }
 
         if active_runtime_id.is_none() {
-            pending =
-                take_queued_request_or_retire(session_id, mailbox_id, &requests, &mailbox_registry);
+            pending = take_queued_request_or_retire(
+                session_id,
+                mailbox_id,
+                &mut requests,
+                &mailbox_registry,
+            );
             if pending.is_none() {
                 return;
             }
@@ -890,7 +1549,7 @@ fn run_runtime_mailbox(
 fn take_queued_request_or_retire(
     session_id: Uuid,
     mailbox_id: Uuid,
-    requests: &Receiver<DispatchedRequest>,
+    requests: &mut mpsc::UnboundedReceiver<DispatchedRequest>,
     mailbox_registry: &Weak<Mutex<HashMap<Uuid, RuntimeMailbox>>>,
 ) -> Option<DispatchedRequest> {
     let Some(mailbox_registry) = mailbox_registry.upgrade() else {
@@ -902,7 +1561,7 @@ fn take_queued_request_or_retire(
     let mut mailboxes = mailbox_registry.lock();
     match requests.try_recv() {
         Ok(request) => Some(request),
-        Err(crossbeam_channel::TryRecvError::Empty) => {
+        Err(mpsc::error::TryRecvError::Empty) => {
             if mailboxes
                 .get(&session_id)
                 .is_some_and(|mailbox| mailbox.id == mailbox_id)
@@ -911,13 +1570,14 @@ fn take_queued_request_or_retire(
             }
             None
         }
-        Err(crossbeam_channel::TryRecvError::Disconnected) => None,
+        Err(mpsc::error::TryRecvError::Disconnected) => None,
     }
 }
 
 struct HandledRequest {
-    outcome: ResponseOutcome,
-    executed: bool,
+    /// The backend's outcome; `None` when a cached response was resent
+    /// instead of running the request again.
+    outcome: Option<ResponseOutcome>,
 }
 
 enum TaskCatalogAction {
@@ -927,9 +1587,11 @@ enum TaskCatalogAction {
     Changed,
 }
 
+/// Runs one request on the calling (blocking-pool) thread and queues its
+/// response on the connection that sent it.
 fn handle_request(
     request: Request,
-    outgoing: Sender<ServerMessage>,
+    outgoing: Outgoing,
     source_subscriber_id: u64,
     backend: Arc<dyn Backend>,
     hub: Arc<Hub>,
@@ -944,57 +1606,74 @@ fn handle_request(
         &request.command,
         Command::Start { .. } | Command::OpenTerminal { .. }
     );
-    let (outcome, executed) = if !notification && let Some(cached) = hub.cached_response(request_id)
-    {
-        (cached, false)
-    } else {
-        if starts_runtime {
-            hub.begin_runtime(session_id, runtime_id);
-        }
-        let outcome = match backend.handle(request, hub.event_sink(session_id, runtime_id)) {
-            Ok(payload) => ResponseOutcome::Ok { payload },
-            Err(error) => ResponseOutcome::Error {
-                error: RpcError::from(error),
-            },
-        };
-        if !notification {
-            hub.cache_response(request_id, outcome.clone());
-        }
-        (outcome, true)
+    if !notification && let Some(cached) = hub.cached_response(request_id) {
+        let _ = outgoing.blocking_send(Outbound::Text(cached));
+        return HandledRequest { outcome: None };
+    }
+    if starts_runtime {
+        hub.begin_runtime(session_id, runtime_id);
+    }
+    let mut outcome = match backend.handle(request, hub.event_sink(session_id, runtime_id)) {
+        Ok(payload) => ResponseOutcome::Ok { payload },
+        Err(error) => ResponseOutcome::Error {
+            error: RpcError::from(error),
+        },
     };
-    if executed && starts_runtime && matches!(&outcome, ResponseOutcome::Error { .. }) {
+    if starts_runtime && matches!(&outcome, ResponseOutcome::Error { .. }) {
         hub.end_runtime(session_id, Some(runtime_id));
     }
-    if executed {
-        match (&task_catalog_action, &outcome) {
-            (
-                TaskCatalogAction::Load,
-                ResponseOutcome::Ok {
-                    payload:
-                        ResponsePayload::TaskState {
-                            projects, sessions, ..
-                        },
-                },
-            ) => hub.replace_task_catalog(projects, sessions),
-            (
-                TaskCatalogAction::Save { projects },
-                ResponseOutcome::Ok {
-                    payload: ResponsePayload::TaskStateSaved { sessions },
-                },
-            ) => hub.task_state_saved(source_subscriber_id, projects, sessions),
-            (TaskCatalogAction::Changed, ResponseOutcome::Ok { .. }) => {
-                hub.task_state_changed(source_subscriber_id);
-            }
-            _ => {}
+    match (&task_catalog_action, &outcome) {
+        (
+            TaskCatalogAction::Load,
+            ResponseOutcome::Ok {
+                payload:
+                    ResponsePayload::TaskState {
+                        projects, sessions, ..
+                    },
+            },
+        ) => hub.replace_task_catalog(projects, sessions),
+        (
+            TaskCatalogAction::Save { projects },
+            ResponseOutcome::Ok {
+                payload: ResponsePayload::TaskStateSaved { sessions },
+            },
+        ) => hub.task_state_saved(source_subscriber_id, projects, sessions),
+        (TaskCatalogAction::Changed, ResponseOutcome::Ok { .. }) => {
+            hub.task_state_changed(source_subscriber_id);
         }
+        _ => {}
     }
-    if !notification {
-        let _ = outgoing.send(ServerMessage::Response {
+    if !notification
+        && let ResponseOutcome::Ok {
+            payload: ResponsePayload::BlobData { bytes },
+        } = &mut outcome
+    {
+        // File bytes are bulk data that clients read once: they are not
+        // cached (that would duplicate every open file in daemon memory, and
+        // the request is cheap to re-run), and they go to the writer as is so
+        // a binary-frame client receives them without base64 (#22). The
+        // returned outcome keeps the variant without the bytes.
+        let bytes = std::mem::take(bytes);
+        let _ = outgoing.blocking_send(Outbound::Bulk(Box::new(ServerMessage::Response {
             request_id,
-            outcome: outcome.clone(),
-        });
+            outcome: ResponseOutcome::Ok {
+                payload: ResponsePayload::BlobData { bytes },
+            },
+        })));
+    } else if !notification
+        && let Some(frame) = encode(&ResponseFrame {
+            request_id,
+            outcome: &outcome,
+        })
+    {
+        hub.cache_response(request_id, frame.clone());
+        // A full queue means the connection is being kicked for falling
+        // behind; waiting here is bounded by its writer draining or closing.
+        let _ = outgoing.blocking_send(Outbound::Text(frame));
     }
-    HandledRequest { outcome, executed }
+    HandledRequest {
+        outcome: Some(outcome),
+    }
 }
 
 fn task_catalog_action(command: &Command) -> TaskCatalogAction {
@@ -1010,66 +1689,30 @@ fn task_catalog_action(command: &Command) -> TaskCatalogAction {
     }
 }
 
-fn send_dispatch_error(
-    request_id: Uuid,
-    outgoing: Sender<ServerMessage>,
-    hub: &Arc<Hub>,
-    message: String,
-) {
-    if request_id.is_nil() {
-        return;
-    }
-    let outcome = hub
-        .cached_response(request_id)
-        .unwrap_or_else(|| ResponseOutcome::Error {
-            error: RpcError { message },
-        });
-    hub.cache_response(request_id, outcome.clone());
-    let _ = outgoing.send(ServerMessage::Response {
-        request_id,
-        outcome,
-    });
-}
-
-fn retryable_io(error: &io::Error) -> bool {
-    retryable_error(error)
-}
-
-fn retryable_error(error: &(dyn std::error::Error + 'static)) -> bool {
-    if let Some(error) = error.downcast_ref::<io::Error>() {
-        if matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-        ) {
-            return true;
-        }
-        #[cfg(unix)]
-        if error.raw_os_error() == Some(libc::EAGAIN)
-            || error.raw_os_error() == Some(libc::EWOULDBLOCK)
-        {
-            return true;
-        }
-    }
-    error.source().is_some_and(retryable_error)
-}
-
-fn read_client_message(socket: &mut WebSocket<TcpStream>) -> anyhow::Result<ClientMessage> {
+async fn read_client_message<S>(socket: &mut WebSocketStream<S>) -> anyhow::Result<ClientMessage>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     loop {
-        match socket.read()? {
-            Message::Text(text) => return Ok(serde_json::from_str(text.as_ref())?),
-            Message::Ping(_) => socket.flush()?,
-            Message::Close(_) => bail!("client closed during daemon handshake"),
-            _ => {}
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => return Ok(serde_json::from_str(text.as_str())?),
+            Some(Ok(Message::Close(_))) | None => bail!("client closed during daemon handshake"),
+            Some(Ok(_)) => {}
+            Some(Err(error)) => return Err(error.into()),
         }
     }
 }
 
-fn write_json<S: io::Read + io::Write, T: serde::Serialize>(
-    socket: &mut WebSocket<S>,
-    value: &T,
-) -> anyhow::Result<()> {
-    socket.send(Message::Text(serde_json::to_string(value)?.into()))?;
-    Ok(())
+fn text_message<T: serde::Serialize>(value: &T) -> anyhow::Result<Message> {
+    Ok(Message::Text(serde_json::to_string(value)?.into()))
+}
+
+async fn send_now<S, T>(socket: &mut WebSocketStream<S>, value: &T) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: serde::Serialize,
+{
+    within_stall(socket.send(text_message(value)?)).await
 }
 
 #[cfg(test)]
@@ -1087,10 +1730,78 @@ mod tests {
     use crate::{DaemonSettings, WireDriverStartOptions};
     #[cfg(unix)]
     use base64::Engine as _;
-    use crossbeam_channel::{RecvTimeoutError, bounded};
+    use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
     use serde_json::json;
     use std::path::PathBuf;
     use waku_client::{DaemonClient, DaemonSupervisor};
+
+    /// The receiving end of a connection queue, for driving the hub and the
+    /// dispatcher without a socket.
+    struct TestQueue(mpsc::Receiver<Outbound>);
+
+    fn decode(outbound: Outbound) -> ServerMessage {
+        match outbound {
+            Outbound::Text(frame) | Outbound::Final(frame) => {
+                serde_json::from_str(frame.as_str()).unwrap()
+            }
+            Outbound::Bulk(message) => *message,
+        }
+    }
+
+    /// A non-delta event that carries `text`, so it is never coalesced.
+    fn marker(text: &str) -> WireDriverEvent {
+        WireDriverEvent::Error(text.into())
+    }
+
+    fn marker_text(event: &SequencedEvent) -> &str {
+        match &event.event {
+            WireDriverEvent::Error(text) => text,
+            other => panic!("expected a marker event, got {}", other.kind()),
+        }
+    }
+
+    impl TestQueue {
+        fn try_recv(&mut self) -> Result<ServerMessage, mpsc::error::TryRecvError> {
+            self.0.try_recv().map(decode)
+        }
+
+        fn recv_timeout(&mut self, timeout: Duration) -> Result<ServerMessage, ()> {
+            let deadline = Instant::now() + timeout;
+            loop {
+                match self.0.try_recv() {
+                    Ok(message) => return Ok(decode(message)),
+                    Err(mpsc::error::TryRecvError::Disconnected) => return Err(()),
+                    Err(mpsc::error::TryRecvError::Empty) if Instant::now() >= deadline => {
+                        return Err(());
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            }
+        }
+
+        fn recv(&mut self) -> Result<ServerMessage, ()> {
+            self.recv_timeout(Duration::from_secs(5))
+        }
+    }
+
+    fn test_queue() -> (Outgoing, TestQueue) {
+        test_queue_with_capacity(MAX_QUEUED_MESSAGES_PER_SUBSCRIBER)
+    }
+
+    fn test_queue_with_capacity(capacity: usize) -> (Outgoing, TestQueue) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (sender, TestQueue(receiver))
+    }
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
 
     #[derive(Default)]
     struct TestBackend {
@@ -1104,7 +1815,7 @@ mod tests {
             match request.command {
                 Command::Start { .. } => {
                     self.runtimes.lock().insert(session_id, runtime_id);
-                    events.send(WireDriverEvent::new("connected", json!({})))?;
+                    events.send(WireDriverEvent::Connected(None))?;
                     Ok(ResponsePayload::Started {
                         supports_steer: true,
                     })
@@ -1117,7 +1828,7 @@ mod tests {
                     settings: DaemonSettings::default(),
                 }),
                 Command::Prompt { prompt, .. } => {
-                    events.send(WireDriverEvent::new("textDelta", json!(prompt)))?;
+                    events.send(WireDriverEvent::TextDelta(prompt))?;
                     Ok(ResponsePayload::Ack)
                 }
                 Command::CloseSession => {
@@ -1166,9 +1877,9 @@ mod tests {
     #[test]
     fn task_state_revisions_notify_other_clients_only() {
         let hub = Hub::default();
-        let (source_tx, source_rx) = unbounded();
+        let (source_tx, mut source_rx) = test_queue();
         let source_id = hub.subscribe(&[], Subscriber::new(source_tx).0);
-        let (observer_tx, observer_rx) = unbounded();
+        let (observer_tx, mut observer_rx) = test_queue();
         hub.subscribe(&[], Subscriber::new(observer_tx).0);
 
         hub.task_state_changed(source_id);
@@ -1184,7 +1895,7 @@ mod tests {
     fn websocket_task_state_changes_reach_another_client() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             serve(
@@ -1308,7 +2019,7 @@ mod tests {
         .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             serve(
@@ -1375,7 +2086,7 @@ mod tests {
     fn websocket_round_trip_sequences_provider_events() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             serve(
@@ -1431,7 +2142,7 @@ mod tests {
         let event = events.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(event.runtime_id, runtime_id);
         assert_eq!(event.sequence, 1);
-        assert_eq!(event.event.kind, "connected");
+        assert_eq!(event.event.kind(), "connected");
 
         client.shutdown();
         assert!(matches!(
@@ -1445,7 +2156,7 @@ mod tests {
     fn late_client_attaches_to_replay_and_live_runtime_events() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             serve(
@@ -1491,7 +2202,7 @@ mod tests {
                 .recv_timeout(Duration::from_secs(1))
                 .unwrap()
                 .event
-                .kind,
+                .kind(),
             "connected"
         );
 
@@ -1507,7 +2218,7 @@ mod tests {
         let late_events = late.subscribe(session_id, runtime_id);
         let replayed = late_events.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(replayed.sequence, 1);
-        assert_eq!(replayed.event.kind, "connected");
+        assert_eq!(replayed.event.kind(), "connected");
 
         source
             .request(
@@ -1523,8 +2234,11 @@ mod tests {
         for events in [&source_events, &late_events] {
             let live = events.recv_timeout(Duration::from_secs(1)).unwrap();
             assert_eq!(live.sequence, 2);
-            assert_eq!(live.event.kind, "textDelta");
-            assert_eq!(live.event.payload, json!("streamed from the first client"));
+            assert_eq!(live.event.kind(), "textDelta");
+            assert_eq!(
+                live.event.payload(),
+                json!("streamed from the first client")
+            );
         }
 
         source
@@ -1561,7 +2275,7 @@ mod tests {
         let replacement_listener = listener.try_clone().unwrap();
         let address = listener.local_addr().unwrap();
         let backend = Arc::new(TestBackend::default());
-        let first_shutdown = Arc::new(AtomicBool::new(false));
+        let first_shutdown = ShutdownSignal::new();
         let first_server = {
             let backend = backend.clone();
             let shutdown = first_shutdown.clone();
@@ -1604,10 +2318,10 @@ mod tests {
             )
             .unwrap();
 
-        first_shutdown.store(true, Ordering::Release);
+        first_shutdown.trigger();
         first_server.join().unwrap();
 
-        let second_shutdown = Arc::new(AtomicBool::new(false));
+        let second_shutdown = ShutdownSignal::new();
         let second_server = {
             let backend = backend.clone();
             let shutdown = second_shutdown.clone();
@@ -1635,7 +2349,7 @@ mod tests {
             } if attached == runtime_id
         ));
 
-        second_shutdown.store(true, Ordering::Release);
+        second_shutdown.trigger();
         second_server.join().unwrap();
     }
 
@@ -1700,7 +2414,7 @@ mod tests {
         )));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             serve(
@@ -1795,11 +2509,11 @@ mod tests {
             let Ok(event) = events.recv_timeout(remaining) else {
                 break;
             };
-            seen_events.push(event.event.kind.clone());
-            if event.event.kind != "terminalOutput" {
+            seen_events.push(event.event.kind());
+            let WireDriverEvent::TerminalOutput(chunk) = &event.event else {
                 continue;
-            }
-            let data = event.event.payload["data"].as_str().unwrap();
+            };
+            let data = &chunk.data;
             output.extend(
                 base64::engine::general_purpose::STANDARD
                     .decode(data)
@@ -1816,7 +2530,7 @@ mod tests {
 
     #[test]
     fn nil_request_ids_execute_without_responses_or_cache_entries() {
-        let (outgoing, responses) = unbounded();
+        let (outgoing, mut responses) = test_queue();
         let hub = Arc::new(Hub::default());
         let handled = handle_request(
             Request {
@@ -1831,8 +2545,7 @@ mod tests {
             hub.clone(),
         );
 
-        assert!(handled.executed);
-        assert!(matches!(handled.outcome, ResponseOutcome::Ok { .. }));
+        assert!(matches!(handled.outcome, Some(ResponseOutcome::Ok { .. })));
         assert!(responses.try_recv().is_err());
         assert!(hub.cached_response(Uuid::nil()).is_none());
     }
@@ -1882,6 +2595,340 @@ mod tests {
     }
 
     #[test]
+    fn unauthenticated_clients_cannot_send_more_than_a_hello() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = ShutdownSignal::new();
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(TestBackend::default()),
+                server_shutdown,
+                ServerOptions::default(),
+            )
+            .unwrap()
+        });
+
+        // A hello far larger than the pre-authentication budget is refused
+        // before the daemon buffers it, so the handshake fails.
+        let oversized = "x".repeat(MAX_PRE_AUTH_BYTES * 2);
+        assert!(DaemonClient::connect(&address.to_string(), oversized).is_err());
+        // An ordinary client is unaffected, and its requests are answered
+        // without the old 25 ms polling delay.
+        let client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let started = Instant::now();
+        for _ in 0..20 {
+            assert!(matches!(
+                client
+                    .request(Uuid::nil(), Uuid::nil(), Command::GetSettings)
+                    .unwrap(),
+                ResponsePayload::Settings { .. }
+            ));
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "20 round trips took {:?}",
+            started.elapsed()
+        );
+
+        shutdown.trigger();
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_socket_is_private_and_serves_without_tcp() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Short, so the path fits in `sun_path` on every runner.
+        let root =
+            PathBuf::from("/tmp").join(format!("wk-{}", &Uuid::new_v4().simple().to_string()[..8]));
+        let path = root.join("run").join("daemon.sock");
+        let listener = LocalListener::bind(&path).unwrap();
+        assert_eq!(listener.path(), path);
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        // A second daemon of the same user cannot take the locked default
+        // path, so it binds a pid-suffixed one beside it.
+        let second = LocalListener::bind(&path).unwrap();
+        assert_ne!(second.path(), path);
+        drop(second);
+
+        let shutdown = ShutdownSignal::new();
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve_listeners(
+                Listeners {
+                    tcp: None,
+                    local: Some(listener),
+                },
+                "secret".into(),
+                Arc::new(TestBackend::default()),
+                server_shutdown,
+                ServerOptions::default(),
+            )
+            .unwrap()
+        });
+        let address = format!("unix:{}", path.display());
+        assert!(DaemonClient::connect(&address, "wrong".into()).is_err());
+        let client = DaemonClient::connect(&address, "secret".into()).unwrap();
+        assert!(matches!(
+            client
+                .request(Uuid::nil(), Uuid::nil(), Command::GetSettings)
+                .unwrap(),
+            ResponsePayload::Settings { .. }
+        ));
+
+        shutdown.trigger();
+        server.join().unwrap();
+        assert!(
+            !path.exists(),
+            "the daemon removes its socket when it stops"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn next_event(queue: &mut TestQueue) -> SequencedEvent {
+        match queue.recv().expect("an event") {
+            ServerMessage::Event(event) => event,
+            other => panic!("expected an event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn streamed_deltas_are_coalesced_in_order() {
+        let hub = Arc::new(Hub::default());
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let (outgoing, mut events) = test_queue();
+        hub.subscribe(&[], Subscriber::new(outgoing).0);
+        hub.begin_runtime(session_id, runtime_id);
+        let sink = hub.event_sink(session_id, runtime_id);
+
+        for chunk in ["Hel", "lo", ", world"] {
+            sink.send(WireDriverEvent::TextDelta(chunk.into())).unwrap();
+        }
+        // Nothing is sent before the window closes...
+        assert!(events.try_recv().is_err());
+        // ...and then the chunks arrive as one event.
+        let merged = next_event(&mut events);
+        assert!(
+            matches!(&merged.event, WireDriverEvent::TextDelta(text) if text == "Hello, world")
+        );
+        assert_eq!(merged.sequence, 1);
+
+        // A different kind, or any other event, flushes what is pending
+        // first, so the stream keeps its order.
+        sink.send(WireDriverEvent::TextDelta("a".into())).unwrap();
+        sink.send(WireDriverEvent::ReasoningDelta("b".into()))
+            .unwrap();
+        sink.send(marker("done")).unwrap();
+        let text = next_event(&mut events);
+        let reasoning = next_event(&mut events);
+        let done = next_event(&mut events);
+        assert!(matches!(&text.event, WireDriverEvent::TextDelta(text) if text == "a"));
+        assert!(matches!(&reasoning.event, WireDriverEvent::ReasoningDelta(text) if text == "b"));
+        assert_eq!(marker_text(&done), "done");
+        assert_eq!(
+            [text.sequence, reasoning.sequence, done.sequence],
+            [2, 3, 4]
+        );
+
+        // Closing the runtime sends text still inside its window.
+        sink.send(WireDriverEvent::TextDelta("tail".into()))
+            .unwrap();
+        hub.end_runtime(session_id, Some(runtime_id));
+        let tail = next_event(&mut events);
+        assert!(matches!(&tail.event, WireDriverEvent::TextDelta(text) if text == "tail"));
+    }
+
+    #[test]
+    fn replay_journal_is_bounded_by_bytes() {
+        let hub = Arc::new(Hub::default());
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        hub.begin_runtime(session_id, runtime_id);
+        let sink = hub.event_sink(session_id, runtime_id);
+        let large = "x".repeat(1024 * 1024);
+        for index in 0..20 {
+            sink.send(marker(&format!("{index}:{large}"))).unwrap();
+        }
+
+        let (outgoing, mut events) = test_queue();
+        hub.subscribe(&[], Subscriber::new(outgoing).0);
+        let mut replayed = Vec::new();
+        while let Ok(ServerMessage::Event(event)) = events.try_recv() {
+            replayed.push(event);
+        }
+        // About 8 MiB of 1 MiB events survive, newest last.
+        assert!((6..=8).contains(&replayed.len()), "{}", replayed.len());
+        assert!(marker_text(replayed.last().unwrap()).starts_with("19:"));
+        assert!(
+            replayed
+                .windows(2)
+                .all(|pair| pair[1].sequence == pair[0].sequence + 1)
+        );
+    }
+
+    /// Stores uploaded blobs in memory and serves them back; `LocateBlob`
+    /// points at a file whose content differs, so a test can tell a local
+    /// disk read from bytes sent over the socket.
+    struct BlobBackend {
+        stored: Mutex<Vec<u8>>,
+        on_disk: PathBuf,
+    }
+
+    impl Backend for BlobBackend {
+        fn handle(&self, request: Request, _: EventSink) -> anyhow::Result<ResponsePayload> {
+            match request.command {
+                Command::StoreBlob { bytes, .. } => {
+                    *self.stored.lock() = bytes;
+                    Ok(ResponsePayload::BlobStored {
+                        reference: "waku-blob:test.png".into(),
+                        path: self.on_disk.clone(),
+                    })
+                }
+                Command::ReadBlob { .. } => Ok(ResponsePayload::BlobData {
+                    bytes: self.stored.lock().clone(),
+                }),
+                Command::LocateBlob { .. } => Ok(ResponsePayload::BlobLocation {
+                    path: self.on_disk.clone(),
+                }),
+                _ => Ok(ResponsePayload::Ack),
+            }
+        }
+    }
+
+    fn serve_blobs(
+        listeners: Listeners,
+        on_disk: PathBuf,
+    ) -> (ShutdownSignal, std::thread::JoinHandle<()>) {
+        let shutdown = ShutdownSignal::new();
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve_listeners(
+                listeners,
+                "secret".into(),
+                Arc::new(BlobBackend {
+                    stored: Mutex::new(Vec::new()),
+                    on_disk,
+                }),
+                server_shutdown,
+                ServerOptions::default(),
+            )
+            .unwrap()
+        });
+        (shutdown, server)
+    }
+
+    #[test]
+    fn blobs_travel_as_binary_frames_over_tcp() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let on_disk = std::env::temp_dir().join(format!("waku-blob-{}", Uuid::new_v4()));
+        std::fs::write(&on_disk, b"on disk").unwrap();
+        let (shutdown, server) = serve_blobs(
+            Listeners {
+                tcp: Some(listener),
+                local: None,
+            },
+            on_disk.clone(),
+        );
+
+        let client = DaemonClient::connect(&address, "secret".into()).unwrap();
+        // Every byte value, 3 MiB: an upload and a download that would be
+        // 4 MiB of base64 each.
+        let bytes = (0..3 * 1024 * 1024).map(|i| i as u8).collect::<Vec<_>>();
+        client
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::StoreBlob {
+                    mime_type: "image/png".into(),
+                    bytes: bytes.clone(),
+                },
+            )
+            .unwrap();
+        let ResponsePayload::BlobData { bytes: read } = client
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::ReadBlob {
+                    reference: "waku-blob:test.png".into(),
+                },
+            )
+            .unwrap()
+        else {
+            panic!("expected blob data");
+        };
+        assert!(read == bytes, "the blob changed in transit");
+        // Over TCP the daemon's files are not assumed to be local.
+        assert!(client.read_reference("waku-blob:test.png", None).unwrap() == bytes);
+
+        shutdown.trigger();
+        server.join().unwrap();
+        std::fs::remove_file(on_disk).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_local_client_reads_blob_files_from_disk() {
+        let root =
+            PathBuf::from("/tmp").join(format!("wk-{}", &Uuid::new_v4().simple().to_string()[..8]));
+        let path = root.join("daemon.sock");
+        let listener = LocalListener::bind(&path).unwrap();
+        let on_disk = root.join("blob.png");
+        std::fs::write(&on_disk, b"on disk").unwrap();
+        let (shutdown, server) = serve_blobs(
+            Listeners {
+                tcp: None,
+                local: Some(listener),
+            },
+            on_disk,
+        );
+
+        let client =
+            DaemonClient::connect(&format!("unix:{}", path.display()), "secret".into()).unwrap();
+        assert_eq!(
+            client.read_reference("waku-blob:test.png", None).unwrap(),
+            b"on disk"
+        );
+
+        shutdown.trigger();
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clients_without_binary_frames_still_get_base64_json() {
+        let message = ServerMessage::Response {
+            request_id: Uuid::from_u128(7),
+            outcome: ResponseOutcome::Ok {
+                payload: ResponsePayload::BlobData {
+                    bytes: vec![0, 1, 2, 255],
+                },
+            },
+        };
+        let Message::Text(text) =
+            outbound_message(Outbound::Bulk(Box::new(message.clone())), false).unwrap()
+        else {
+            panic!("a legacy client must get a text message");
+        };
+        assert!(text.as_str().contains("\"bytes\":\"AAEC/w==\""));
+        let Message::Binary(frame) =
+            outbound_message(Outbound::Bulk(Box::new(message)), true).unwrap()
+        else {
+            panic!("a binary-frame client must get a binary message");
+        };
+        let (_, body) = binary_frame::split(&frame).unwrap();
+        assert_eq!(body, [0, 1, 2, 255]);
+    }
+
+    #[test]
     fn daemon_tokens_require_an_exact_match() {
         assert!(token_matches("secret", "secret"));
         assert!(!token_matches("secret", "Secret"));
@@ -1894,25 +2941,21 @@ mod tests {
         let session_id = Uuid::new_v4();
         let old_runtime_id = Uuid::new_v4();
         let new_runtime_id = Uuid::new_v4();
-        let (outgoing, events) = unbounded();
+        let (outgoing, mut events) = test_queue();
         hub.subscribe(&[], Subscriber::new(outgoing).0);
 
         hub.begin_runtime(session_id, old_runtime_id);
         let old_sink = hub.event_sink(session_id, old_runtime_id);
-        old_sink
-            .send(WireDriverEvent::new("old", serde_json::Value::Null))
-            .unwrap();
+        old_sink.send(marker("old")).unwrap();
         assert!(matches!(
             events.recv().unwrap(),
             ServerMessage::Event(event) if event.runtime_id == old_runtime_id
         ));
 
         hub.begin_runtime(session_id, new_runtime_id);
-        old_sink
-            .send(WireDriverEvent::new("stale", serde_json::Value::Null))
-            .unwrap();
+        old_sink.send(marker("stale")).unwrap();
         hub.event_sink(session_id, new_runtime_id)
-            .send(WireDriverEvent::new("new", serde_json::Value::Null))
+            .send(marker("new"))
             .unwrap();
 
         let ServerMessage::Event(event) = events.recv().unwrap() else {
@@ -1920,7 +2963,7 @@ mod tests {
         };
         assert_eq!(event.runtime_id, new_runtime_id);
         assert_eq!(event.sequence, 1);
-        assert_eq!(event.event.kind, "new");
+        assert_eq!(marker_text(&event), "new");
         assert!(events.try_recv().is_err());
     }
 
@@ -1931,10 +2974,10 @@ mod tests {
         let runtime_id = Uuid::new_v4();
         hub.begin_runtime(session_id, runtime_id);
         hub.event_sink(session_id, runtime_id)
-            .send(WireDriverEvent::new("new-daemon", serde_json::Value::Null))
+            .send(marker("new-daemon"))
             .unwrap();
 
-        let (outgoing, events) = unbounded();
+        let (outgoing, mut events) = test_queue();
         hub.subscribe(
             &[ReplayCursor {
                 session_id,
@@ -1958,27 +3001,24 @@ mod tests {
         let session_id = Uuid::new_v4();
         let runtime_id = Uuid::new_v4();
         // Capacity one and no drainer: the second queued message overflows.
-        let (outgoing, events) = bounded(1);
-        let (subscriber, kicked) = Subscriber::new(outgoing);
+        let (outgoing, mut events) = test_queue_with_capacity(1);
+        let (subscriber, mut kicked) = Subscriber::new(outgoing);
         hub.subscribe(&[], subscriber);
         hub.begin_runtime(session_id, runtime_id);
         let sink = hub.event_sink(session_id, runtime_id);
 
-        sink.send(WireDriverEvent::new("one", serde_json::Value::Null))
-            .unwrap();
+        sink.send(marker("one")).unwrap();
         // Nobody drains, so a second queued message overflows: the subscriber
         // is dropped from the hub and its connection is told to close.
-        sink.send(WireDriverEvent::new("two", serde_json::Value::Null))
-            .unwrap();
+        sink.send(marker("two")).unwrap();
         assert!(kicked.try_recv().is_ok());
 
         assert!(matches!(
             events.try_recv(),
-            Ok(ServerMessage::Event(event)) if event.event.kind == "one"
+            Ok(ServerMessage::Event(event)) if marker_text(&event) == "one"
         ));
         assert!(events.try_recv().is_err());
-        sink.send(WireDriverEvent::new("three", serde_json::Value::Null))
-            .unwrap();
+        sink.send(marker("three")).unwrap();
         assert!(events.try_recv().is_err());
     }
 
@@ -1993,19 +3033,38 @@ mod tests {
                 )),
             },
         };
-        hub.cache_response(oversized_id, oversized);
+        hub.cache_response(
+            oversized_id,
+            encode(&ResponseFrame {
+                request_id: oversized_id,
+                outcome: &oversized,
+            })
+            .unwrap(),
+        );
         // A single outcome larger than the whole byte budget is never
         // retained; retrying the request runs it again instead of pinning a
         // >64 MB payload in daemon memory.
         assert!(hub.cached_response(oversized_id).is_none());
 
         let kept_id = Uuid::new_v4();
-        hub.cache_response(
-            kept_id,
-            ResponseOutcome::Ok {
-                payload: ResponsePayload::Ack,
-            },
+        let kept = ResponseOutcome::Ok {
+            payload: ResponsePayload::Ack,
+        };
+        let frame = encode(&ResponseFrame {
+            request_id: kept_id,
+            outcome: &kept,
+        })
+        .unwrap();
+        // The borrowed frame is exactly what `ServerMessage::Response` writes.
+        assert_eq!(
+            frame.as_str(),
+            serde_json::to_string(&ServerMessage::Response {
+                request_id: kept_id,
+                outcome: kept,
+            })
+            .unwrap()
         );
+        hub.cache_response(kept_id, frame);
         assert!(hub.cached_response(kept_id).is_some());
         assert!(hub.cached_response(oversized_id).is_none());
     }
@@ -2027,7 +3086,7 @@ mod tests {
 
     #[test]
     fn slow_background_command_does_not_block_session_hydration() {
-        let (outgoing, response_rx) = unbounded();
+        let (outgoing, mut response_rx) = test_queue();
         let (probe_started, probe_started_rx) = bounded(1);
         let (release_probe, release_probe_rx) = bounded(1);
         let backend: Arc<dyn Backend> = Arc::new(BlockingProbeBackend {
@@ -2035,7 +3094,8 @@ mod tests {
             release_probe: release_probe_rx,
         });
         let hub = Arc::new(Hub::default());
-        let dispatcher = RequestDispatcher::new(backend, hub);
+        let runtime = test_runtime();
+        let dispatcher = RequestDispatcher::new(backend, hub, runtime.handle().clone());
 
         let probe_id = Uuid::new_v4();
         dispatcher.dispatch(
@@ -2117,6 +3177,7 @@ mod tests {
         let other_runtime_id = Uuid::new_v4();
         let (handled, handled_rx) = unbounded();
         let (release_start, release_start_rx) = bounded(1);
+        let runtime = test_runtime();
         let dispatcher = RequestDispatcher::new(
             Arc::new(RuntimeOrderingBackend {
                 blocked_session_id,
@@ -2124,10 +3185,11 @@ mod tests {
                 release_start: release_start_rx,
             }),
             Arc::new(Hub::default()),
+            runtime.handle().clone(),
         );
-        let (start_outgoing, start_responses) = unbounded();
-        let (second_client_outgoing, second_client_responses) = unbounded();
-        let (other_outgoing, other_responses) = unbounded();
+        let (start_outgoing, mut start_responses) = test_queue();
+        let (second_client_outgoing, mut second_client_responses) = test_queue();
+        let (other_outgoing, mut other_responses) = test_queue();
 
         let blocked_start_id = Uuid::new_v4();
         dispatcher.dispatch(

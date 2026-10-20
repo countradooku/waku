@@ -21,14 +21,13 @@ mod platform {
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
+    use crate::{EventSink, WireDriverEvent};
     use alacritty_terminal::event::{OnResize as _, WindowSize};
     use alacritty_terminal::tty::{self, EventedPty as _, EventedReadWrite as _, Shell};
     use anyhow::{Context as _, bail};
     use base64::Engine as _;
     use parking_lot::Mutex;
-    use serde_json::json;
-
-    use crate::{EventSink, WireDriverEvent};
+    use waku_protocol::wire_event::TerminalOutputPayload;
 
     const CELL_WIDTH: u16 = 8;
     const CELL_HEIGHT: u16 = 16;
@@ -104,18 +103,14 @@ mod platform {
                     while !reader_stopped.load(Ordering::Acquire) {
                         match output.read(&mut buffer) {
                             Ok(0) => {
-                                let _ = events.send_ephemeral(WireDriverEvent::new(
-                                    "terminalExited",
-                                    serde_json::Value::Null,
-                                ));
+                                let _ = events.send_ephemeral(WireDriverEvent::TerminalExited);
                                 break;
                             }
                             Ok(read) => {
                                 let data = base64::engine::general_purpose::STANDARD
                                     .encode(&buffer[..read]);
-                                let _ = events.send_ephemeral(WireDriverEvent::new(
-                                    "terminalOutput",
-                                    json!({ "data": data }),
+                                let _ = events.send_ephemeral(WireDriverEvent::TerminalOutput(
+                                    TerminalOutputPayload { data },
                                 ));
                             }
                             Err(error)
@@ -134,18 +129,14 @@ mod platform {
                                 // Only treat it as EOF after Alacritty's SIGCHLD
                                 // channel confirms the child actually exited.
                                 if reader_pty.lock().next_child_event().is_some() {
-                                    let _ = events.send_ephemeral(WireDriverEvent::new(
-                                        "terminalExited",
-                                        serde_json::Value::Null,
-                                    ));
+                                    let _ = events.send_ephemeral(WireDriverEvent::TerminalExited);
                                     break;
                                 }
                                 std::thread::sleep(Duration::from_millis(4));
                             }
                             Err(error) => {
-                                let _ = events.send_ephemeral(WireDriverEvent::new(
-                                    "terminalError",
-                                    serde_json::Value::String(error.to_string()),
+                                let _ = events.send_ephemeral(WireDriverEvent::TerminalError(
+                                    error.to_string(),
                                 ));
                                 break;
                             }

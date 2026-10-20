@@ -100,7 +100,10 @@ describe('mobile runtime projection', () => {
       runtimeId: 'runtime',
       epoch: 'epoch',
       sequence: 4,
-      event: { kind: 'permission', payload: {} },
+      event: {
+        kind: 'permission',
+        payload: { requestId: 'request', title: 'Allow?', detail: '', options: [] },
+      },
     } satisfies SequencedEvent;
     const text = {
       ...permission,

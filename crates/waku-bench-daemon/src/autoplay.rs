@@ -21,8 +21,6 @@
 //!    to the desktop's socket only and its CPU is not doubled.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -61,7 +59,7 @@ impl Autoplay {
         address: &str,
         token: String,
         backend: &BenchBackend,
-        shutdown: Arc<AtomicBool>,
+        shutdown: waku_core::ShutdownSignal,
         options: AutoplayOptions,
     ) -> anyhow::Result<Self> {
         let client = DaemonClient::connect(address, token)
@@ -95,7 +93,7 @@ impl Autoplay {
             .spawn(move || {
                 let waited = Instant::now();
                 loop {
-                    if shutdown.load(Ordering::Acquire) {
+                    if shutdown.is_triggered() {
                         client.disconnect();
                         return;
                     }
@@ -117,7 +115,7 @@ impl Autoplay {
                 );
                 let deadline = Instant::now() + options.delay;
                 while Instant::now() < deadline {
-                    if shutdown.load(Ordering::Acquire) {
+                    if shutdown.is_triggered() {
                         client.disconnect();
                         return;
                     }

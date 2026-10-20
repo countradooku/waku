@@ -1438,25 +1438,9 @@ pub fn read_remote_reference(
     daemon_path: Option<&Path>,
     daemon: &DaemonSupervisor,
 ) -> Option<Vec<u8>> {
-    let command = if waku_protocol::blob::is_reference(reference) {
-        Command::ReadBlob {
-            reference: reference.to_owned(),
-        }
-    } else if reference.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME) {
-        let path = daemon_path?;
-        Command::ReadAttachment {
-            reference: reference.to_owned(),
-            path: path.to_owned(),
-        }
-    } else {
-        return None;
-    };
-    let Ok(ResponsePayload::BlobData { bytes }) =
-        daemon.client().request(Uuid::nil(), Uuid::nil(), command)
-    else {
-        return None;
-    };
-    Some(bytes)
+    // A local daemon's files are read straight from disk; a remote one sends
+    // them as binary frames (#22).
+    daemon.client().read_reference(reference, daemon_path).ok()
 }
 
 fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {

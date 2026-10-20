@@ -83,12 +83,10 @@ impl DaemonExposureSettings {
         Ok(self)
     }
 
-    fn bind_address(&self) -> String {
-        if self.enabled {
-            format!("0.0.0.0:{}", self.port)
-        } else {
-            "127.0.0.1:0".into()
-        }
+    /// The TCP listener the managed daemon opens, only when exposure is on.
+    /// The desktop itself always talks to it over the local socket.
+    fn bind_address(&self) -> Option<String> {
+        self.enabled.then(|| format!("0.0.0.0:{}", self.port))
     }
 }
 
@@ -154,13 +152,15 @@ impl DaemonProcess {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
+        // The desktop reaches its daemon over the per-user local socket (#19);
+        // TCP is opened only for exposure to other devices and browsers.
         command
-            .arg("--bind")
-            .arg(settings.bind_address())
+            .arg("--socket")
+            .arg(waku_protocol::identity::daemon_socket_path())
             .arg("--parent-pid")
             .arg(std::process::id().to_string());
-        if settings.enabled {
-            command.arg("--allow-non-loopback");
+        if let Some(bind) = settings.bind_address() {
+            command.arg("--bind").arg(bind).arg("--allow-non-loopback");
         }
         for origin in &settings.allowed_origins {
             command.arg("--allow-origin").arg(origin);
@@ -216,7 +216,11 @@ impl DaemonProcess {
                 PROTOCOL_VERSION
             );
         }
-        let client_address = match desktop_client_address(&ready.address) {
+        let client_address = match ready.socket.as_deref() {
+            Some(socket) => Ok(crate::local_endpoint_address(socket)),
+            None => desktop_client_address(&ready.address),
+        };
+        let client_address = match client_address {
             Ok(address) => address,
             Err(error) => {
                 let _ = child.kill();

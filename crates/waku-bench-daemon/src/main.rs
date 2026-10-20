@@ -309,7 +309,7 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 
 /// Ctrl-C and SIGTERM stop the server cleanly so the summary still prints.
-fn install_signal_handlers(shutdown: Arc<AtomicBool>) {
+fn install_signal_handlers(shutdown: waku_core::ShutdownSignal) {
     #[cfg(unix)]
     unsafe {
         let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
@@ -319,9 +319,9 @@ fn install_signal_handlers(shutdown: Arc<AtomicBool>) {
     let _ = std::thread::Builder::new()
         .name("waku-bench-daemon-signals".into())
         .spawn(move || {
-            while !shutdown.load(Ordering::Acquire) {
+            while !shutdown.is_triggered() {
                 if SIGNALED.load(Ordering::Acquire) {
-                    shutdown.store(true, Ordering::Release);
+                    shutdown.trigger();
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(50));
