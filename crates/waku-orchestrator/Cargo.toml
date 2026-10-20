@@ -1,0 +1,31 @@
+[package]
+name = "waku-orchestrator"
+version = "0.1.0"
+edition = "2024"
+description = "Event-sourced orchestrator core for the Waku daemon (RFC 0001)"
+license = "GPL-3.0-only"
+
+# Blocking APIs only, no async runtime (RFC 0001 R9): `decide` is pure and the
+# sink is one rusqlite connection.
+[dependencies]
+anyhow = "1.0"
+crossbeam-channel = "0.5"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+smallvec = "1"
+uuid = { version = "1.18", features = ["v4", "v5", "v7", "serde"] }
+waku-protocol = { path = "../waku-protocol" }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3"
+
+[[bench]]
+name = "dispatch"
+harness = false
+
+[lints]
+workspace = true

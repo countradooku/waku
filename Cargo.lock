@@ -9030,6 +9030,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "waku-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "crossbeam-channel",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "smallvec",
+ "tempfile",
+ "uuid",
+ "waku-protocol",
+]
+
+[[package]]
 name = "waku-protocol"
 version = "0.1.0"
 dependencies = [
