@@ -6,7 +6,6 @@ mod common;
 
 use std::net::TcpListener;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::{FakeDir, png_url, sample_timeline};
@@ -19,7 +18,7 @@ use waku_core::{DaemonSettingsStore, ServerOptions};
 
 struct RealDaemon {
     address: String,
-    shutdown: Arc<AtomicBool>,
+    shutdown: waku_core::ShutdownSignal,
     server: Option<std::thread::JoinHandle<()>>,
     root: std::path::PathBuf,
 }
@@ -35,7 +34,7 @@ impl RealDaemon {
         .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = waku_core::ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             waku_core::serve(
@@ -58,7 +57,7 @@ impl RealDaemon {
 
 impl Drop for RealDaemon {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.trigger();
         if let Some(server) = self.server.take() {
             let _ = server.join();
         }
@@ -278,13 +277,22 @@ fn waku_claude_driver_renders_the_fake_claude_stream() {
         "max",
     );
     let events = run_turn("claude", &fake);
-    assert!(
+    // `PromptSubmitted` is emitted when the daemon accepts the prompt and can
+    // land before or after the driver reports `Connected`, so check that the
+    // session connected before the turn started rather than the exact order.
+    let connected = events.iter().position(|event| {
         matches!(
-            events.first(),
-            Some(DriverEvent::Connected {
+            event,
+            DriverEvent::Connected {
                 provider_cursor: Some(ProviderResumeCursor::Claude { .. })
-            })
-        ),
+            }
+        )
+    });
+    let turn_started = events
+        .iter()
+        .position(|event| matches!(event, DriverEvent::TurnStarted));
+    assert!(
+        matches!((connected, turn_started), (Some(c), Some(t)) if c < t),
         "{events:#?}"
     );
     assert_common_transcript("claude", &events);

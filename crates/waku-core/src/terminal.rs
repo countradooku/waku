@@ -21,24 +21,35 @@ mod platform {
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
+    use crate::{EventSink, WireDriverEvent};
     use alacritty_terminal::event::{OnResize as _, WindowSize};
     use alacritty_terminal::tty::{self, EventedPty as _, EventedReadWrite as _, Shell};
     use anyhow::{Context as _, bail};
     use base64::Engine as _;
     use parking_lot::Mutex;
-    use serde_json::json;
-
-    use crate::{EventSink, WireDriverEvent};
+    use polling::{Event, Events, PollMode, Poller};
+    use waku_protocol::wire_event::TerminalOutputPayload;
 
     const CELL_WIDTH: u16 = 8;
     const CELL_HEIGHT: u16 = 16;
     const MIN_COLUMNS: u16 = 2;
     const MIN_ROWS: u16 = 1;
     const SHELL_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
+    /// One `read` from the PTY master.
+    const READ_CHUNK: usize = 32 * 1024;
+    /// Output already waiting in the PTY is coalesced into one event, up to
+    /// this many bytes.
+    const MAX_OUTPUT_BATCH: usize = 64 * 1024;
+    /// Retry interval while the PTY reports `EIO` before the child has
+    /// attached its slave. That window is brief and only at start-up; an
+    /// open terminal otherwise never wakes without output.
+    const SLAVE_ATTACH_RETRY: Duration = Duration::from_millis(4);
 
     pub struct DaemonTerminal {
         pty: Arc<Mutex<tty::Pty>>,
         stopped: Arc<AtomicBool>,
+        /// The output thread blocks on this; dropping the terminal wakes it.
+        poller: Arc<Poller>,
         reader: Option<JoinHandle<()>>,
     }
 
@@ -92,71 +103,31 @@ mod platform {
             let size = window_size(cols, rows);
             let pty = tty::new(&options, size, 0)
                 .with_context(|| format!("spawn terminal in {}", cwd.display()))?;
-            let mut output = pty.file().try_clone().context("clone terminal output")?;
+            let output = pty.file().try_clone().context("clone terminal output")?;
+            let poller = Arc::new(Poller::new().context("create terminal output poller")?);
+            // SAFETY: the output thread owns `output` and deletes it from the
+            // poller before the descriptor is closed.
+            unsafe { poller.add_with_mode(&output, Event::readable(0), PollMode::Level) }
+                .context("watch terminal output")?;
             let pty = Arc::new(Mutex::new(pty));
             let stopped = Arc::new(AtomicBool::new(false));
-            let reader_pty = pty.clone();
-            let reader_stopped = stopped.clone();
-            let reader = std::thread::Builder::new()
-                .name("waku-daemon-terminal-output".into())
-                .spawn(move || {
-                    let mut buffer = [0_u8; 32 * 1024];
-                    while !reader_stopped.load(Ordering::Acquire) {
-                        match output.read(&mut buffer) {
-                            Ok(0) => {
-                                let _ = events.send_ephemeral(WireDriverEvent::new(
-                                    "terminalExited",
-                                    serde_json::Value::Null,
-                                ));
-                                break;
-                            }
-                            Ok(read) => {
-                                let data = base64::engine::general_purpose::STANDARD
-                                    .encode(&buffer[..read]);
-                                let _ = events.send_ephemeral(WireDriverEvent::new(
-                                    "terminalOutput",
-                                    json!({ "data": data }),
-                                ));
-                            }
-                            Err(error)
-                                if matches!(
-                                    error.kind(),
-                                    std::io::ErrorKind::WouldBlock
-                                        | std::io::ErrorKind::TimedOut
-                                        | std::io::ErrorKind::Interrupted
-                                ) =>
-                            {
-                                std::thread::sleep(Duration::from_millis(4));
-                            }
-                            Err(error) if error.raw_os_error() == Some(libc::EIO) => {
-                                // A PTY master may report EIO briefly before the
-                                // freshly spawned child has attached its slave.
-                                // Only treat it as EOF after Alacritty's SIGCHLD
-                                // channel confirms the child actually exited.
-                                if reader_pty.lock().next_child_event().is_some() {
-                                    let _ = events.send_ephemeral(WireDriverEvent::new(
-                                        "terminalExited",
-                                        serde_json::Value::Null,
-                                    ));
-                                    break;
-                                }
-                                std::thread::sleep(Duration::from_millis(4));
-                            }
-                            Err(error) => {
-                                let _ = events.send_ephemeral(WireDriverEvent::new(
-                                    "terminalError",
-                                    serde_json::Value::String(error.to_string()),
-                                ));
-                                break;
-                            }
-                        }
-                    }
-                })
-                .context("start terminal output thread")?;
+            let reader = {
+                let pty = pty.clone();
+                let stopped = stopped.clone();
+                let poller = poller.clone();
+                std::thread::Builder::new()
+                    .name("waku-daemon-terminal-output".into())
+                    .spawn(move || {
+                        read_output(&output, &pty, &stopped, &poller, &events);
+                        let _ = poller.delete(&output);
+                    })
+                    .context("start terminal output thread")?
+            };
 
             Ok(Self {
                 pty,
                 stopped,
+                poller,
                 reader: Some(reader),
             })
         }
@@ -180,6 +151,7 @@ mod platform {
     impl Drop for DaemonTerminal {
         fn drop(&mut self) {
             self.stopped.store(true, Ordering::Release);
+            let _ = self.poller.notify();
             // Alacritty's PTY destructor sends SIGHUP and then waits for the
             // child without a timeout. A shell can ignore or defer SIGHUP,
             // so bound its grace period before either join or PTY drop.
@@ -188,6 +160,106 @@ mod platform {
             terminate_shell(&self.pty.lock());
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
+            }
+        }
+    }
+
+    /// How one drain of the PTY ended.
+    enum Drained {
+        /// Nothing more to read right now.
+        Idle,
+        /// The batch is full; more output may be waiting.
+        Full,
+        /// The slave side is closed (end of file).
+        Closed,
+        /// `EIO`: the slave is closed, or not yet attached.
+        Io,
+        Failed(std::io::Error),
+    }
+
+    /// Streams PTY output as ephemeral `TerminalOutput` events (#178). The
+    /// thread blocks on the PTY's readiness instead of sleeping between
+    /// non-blocking reads, so an idle terminal costs no wakeups. Each wake
+    /// reads everything already buffered, up to [`MAX_OUTPUT_BATCH`], into
+    /// one event.
+    fn read_output(
+        mut output: &std::fs::File,
+        pty: &Mutex<tty::Pty>,
+        stopped: &AtomicBool,
+        poller: &Poller,
+        events: &EventSink,
+    ) {
+        let mut buffer = vec![0_u8; READ_CHUNK];
+        let mut batch = Vec::with_capacity(READ_CHUNK);
+        let mut ready = Events::new();
+        loop {
+            ready.clear();
+            match poller.wait(&mut ready, None) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    let _ =
+                        events.send_ephemeral(WireDriverEvent::TerminalError(error.to_string()));
+                    return;
+                }
+            }
+            if stopped.load(Ordering::Acquire) {
+                return;
+            }
+            loop {
+                let drained = loop {
+                    match output.read(&mut buffer) {
+                        Ok(0) => break Drained::Closed,
+                        Ok(read) => {
+                            batch.extend_from_slice(&buffer[..read]);
+                            if batch.len() >= MAX_OUTPUT_BATCH {
+                                break Drained::Full;
+                            }
+                        }
+                        Err(error) => match error.kind() {
+                            std::io::ErrorKind::Interrupted => {}
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                                break Drained::Idle;
+                            }
+                            _ if error.raw_os_error() == Some(libc::EIO) => break Drained::Io,
+                            _ => break Drained::Failed(error),
+                        },
+                    }
+                };
+                if !batch.is_empty() {
+                    let data = base64::engine::general_purpose::STANDARD.encode(&batch);
+                    batch.clear();
+                    let _ = events.send_ephemeral(WireDriverEvent::TerminalOutput(
+                        TerminalOutputPayload { data },
+                    ));
+                }
+                match drained {
+                    Drained::Full => continue,
+                    Drained::Idle => break,
+                    Drained::Closed => {
+                        let _ = events.send_ephemeral(WireDriverEvent::TerminalExited);
+                        return;
+                    }
+                    Drained::Io => {
+                        // A PTY master may report EIO briefly before the
+                        // freshly spawned child has attached its slave.
+                        // Only treat it as EOF after Alacritty's SIGCHLD
+                        // channel confirms the child actually exited.
+                        if pty.lock().next_child_event().is_some() {
+                            let _ = events.send_ephemeral(WireDriverEvent::TerminalExited);
+                            return;
+                        }
+                        // The PTY stays ready while it reports EIO, so the
+                        // next wait returns at once; pace it instead.
+                        std::thread::sleep(SLAVE_ATTACH_RETRY);
+                        break;
+                    }
+                    Drained::Failed(error) => {
+                        let _ = events
+                            .send_ephemeral(WireDriverEvent::TerminalError(error.to_string()));
+                        return;
+                    }
+                }
             }
         }
     }

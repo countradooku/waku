@@ -307,9 +307,11 @@ Resume rules per stream are in [§4](#4-cursors). Replies are never replayed acr
 - terminal operations are ordered per terminal.
 
 **Rust client (`waku-client`):**
-- one reader thread blocked on the socket and one writer thread blocked on a crossbeam channel, using `recv_timeout(pingInterval)` for keepalive;
+- one connection thread running a current-thread tokio runtime, with a reader task blocked on the socket and a writer task blocked on the outgoing queue; keepalive is a `timeout(pingInterval)` around the writer's wait;
 - wakes GPUI through the existing smol channel;
-- deliberately runtime-agnostic.
+- deliberately runtime-agnostic: the runtime is private to the connection thread, and callers block on crossbeam channels.
+
+> **Changed in #18 (v7 transport).** The draft above called for a blocking reader thread and writer thread. A blocking `tungstenite` socket cannot be split safely: its reader answers pings by writing on the same stream, and a `wss://` (rustls) stream cannot be cloned at all. A private current-thread runtime with `tokio-tungstenite` gives the same shape — reads and writes never wait on each other, nothing polls — on one thread, and the same code serves TCP, TLS, the Unix socket and the named pipe (#19). The daemon side uses the multi-thread runtime described above, with backend calls on its blocking pool.
 
 **Timers** exist only for keepalive, coalescing windows and backoff, and each is armed only while it has pending work.
 

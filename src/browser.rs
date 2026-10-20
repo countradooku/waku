@@ -24,7 +24,9 @@
 //!
 //! [`Waku`]: crate::app::Waku
 
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::{
     App, Context, Div, Entity, FocusHandle, Focusable, HitboxBehavior, IntoElement, ObjectFit,
@@ -1167,6 +1169,12 @@ pub struct BrowserView {
     current_url: Option<String>,
     page_title: Option<String>,
     loading: bool,
+    /// A 10 Hz progress sampler is running for the current load; see
+    /// [`BrowserView::ensure_progress_poll`].
+    progress_polling: bool,
+    /// The progress the toolbar last drew, so a sample that would not move
+    /// the bar causes no frame.
+    drawn_progress: Cell<Option<f64>>,
     can_go_back: bool,
     can_go_forward: bool,
     /// The user has edited the address since it last echoed the page, so page
@@ -1275,6 +1283,8 @@ impl BrowserView {
             current_url: None,
             page_title: None,
             loading: false,
+            progress_polling: false,
+            drawn_progress: Cell::new(None),
             can_go_back: false,
             can_go_forward: false,
             address_dirty: false,
@@ -1824,6 +1834,45 @@ impl BrowserView {
         0.0
     }
 
+    /// The load bar's fill for this frame, `None` when nothing is loading.
+    fn toolbar_progress(&self) -> Option<f64> {
+        toolbar_progress(self.loading, self.estimated_progress())
+    }
+
+    /// Sample `estimatedProgress` at [`PROGRESS_POLL_INTERVAL`] while a load
+    /// is in flight, notifying only when the bar would move.
+    ///
+    /// WebKit moves the value without any notification this view observes.
+    /// Re-arming `request_animation_frame` instead redrew the window at
+    /// display rate (120 Hz) for the whole load; this caps progress frames at
+    /// 10 a second and stops with the load. Only WebKit reports progress —
+    /// elsewhere the bar holds its floor and needs no frames at all.
+    fn ensure_progress_poll(&mut self, cx: &mut Context<Self>) {
+        if !cfg!(target_os = "macos") || !self.loading || self.progress_polling {
+            return;
+        }
+        self.progress_polling = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PROGRESS_POLL_INTERVAL).await;
+                let polling = this.update(cx, |this, cx| {
+                    if !this.loading {
+                        this.progress_polling = false;
+                        return false;
+                    }
+                    if this.toolbar_progress() != this.drawn_progress.get() {
+                        cx.notify();
+                    }
+                    true
+                });
+                if !matches!(polling, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn go_back(&mut self, _cx: &mut Context<Self>) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(host) = &self.host {
@@ -2010,9 +2059,8 @@ impl BrowserView {
         let theme = Theme::current(cx);
         let has_page = self.navigation_requested;
         let secure = self.current_url.as_deref().is_some_and(is_secure_url);
-        let progress = self
-            .loading
-            .then(|| (self.estimated_progress().clamp(0.04, 1.0) * 1000.0).round() / 1000.0);
+        let progress = self.toolbar_progress();
+        self.drawn_progress.set(progress);
 
         div()
             .h(px(TOOLBAR_HEIGHT))
@@ -2470,6 +2518,17 @@ fn reveal_in_finder(path: &std::path::Path) {
     NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls);
 }
 
+/// How often a loading page's progress is sampled: at most 10 frames a
+/// second for the load bar.
+const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The load bar's fill: `None` while idle, otherwise WebKit's estimate
+/// floored to a visible sliver and quantized to a thousandth, so estimate
+/// jitter below what the 2px bar can show is not a change.
+fn toolbar_progress(loading: bool, estimated: f64) -> Option<f64> {
+    loading.then(|| (estimated.clamp(0.04, 1.0) * 1000.0).round() / 1000.0)
+}
+
 impl Focusable for BrowserView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -2480,11 +2539,7 @@ impl Render for BrowserView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current(cx);
         self.reconcile_focus(window, cx);
-        if self.loading {
-            // `estimatedProgress` moves without any observable notification;
-            // while a load is in flight the toolbar redraws with the frames.
-            window.request_animation_frame();
-        }
+        self.ensure_progress_poll(cx);
 
         let body = if let Some(error) = self.host_error.clone() {
             self.render_host_error(error.into(), theme)
@@ -2532,6 +2587,22 @@ impl BrowserView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_load_bar_moves_in_visible_steps_and_hides_when_idle() {
+        assert_eq!(toolbar_progress(false, 0.5), None);
+        // A fresh load shows a sliver rather than nothing.
+        assert_eq!(toolbar_progress(true, 0.0), Some(0.04));
+        assert_eq!(toolbar_progress(true, 1.7), Some(1.0));
+        // Sub-step jitter in WebKit's estimate does not count as movement,
+        // so the 10 Hz sampler skips the frame.
+        assert_eq!(
+            toolbar_progress(true, 0.4321),
+            toolbar_progress(true, 0.43214)
+        );
+        assert_ne!(toolbar_progress(true, 0.43), toolbar_progress(true, 0.44));
+        assert!(PROGRESS_POLL_INTERVAL >= Duration::from_millis(100));
+    }
 
     #[test]
     fn addresses_resolve_like_an_omnibox() {

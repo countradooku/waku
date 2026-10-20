@@ -77,6 +77,37 @@ fn start_options(provider: &str) -> WireDriverStartOptions {
     }
 }
 
+/// `(kind, payload)` of each received event, adjacent deltas merged (see
+/// [`coalesced`]).
+fn wire_parts(events: &[SequencedEvent]) -> Vec<(String, Value)> {
+    coalesced(
+        &events
+            .iter()
+            .map(|event| TimedEvent::new(0, event.event.kind(), event.event.payload()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Events with adjacent text (or reasoning) deltas merged. The daemon merges
+/// deltas that arrive within its coalescing window, so how a run groups them
+/// depends on timing; comparing both sides in this form checks that every
+/// event arrived, in order and unaltered, whatever the grouping.
+fn coalesced(events: &[TimedEvent]) -> Vec<(String, Value)> {
+    let mut merged: Vec<(String, Value)> = Vec::new();
+    for event in events {
+        let delta = matches!(event.kind.as_str(), "textDelta" | "reasoningDelta");
+        if delta
+            && let Some((kind, Value::String(text))) = merged.last_mut()
+            && *kind == event.kind
+        {
+            text.push_str(event.payload.as_str().unwrap_or_default());
+            continue;
+        }
+        merged.push((event.kind.clone(), event.payload.clone()));
+    }
+    merged
+}
+
 /// Start a runtime, prompt it, and collect events through `turnFinished`.
 fn run_turn(client: &DaemonClient, session_id: Uuid, prompt: &str) -> Vec<SequencedEvent> {
     let runtime_id = Uuid::new_v4();
@@ -109,7 +140,7 @@ fn run_turn(client: &DaemonClient, session_id: Uuid, prompt: &str) -> Vec<Sequen
         let event = events
             .recv_timeout(remaining)
             .expect("timed out waiting for the replay to finish");
-        let finished = event.event.kind == "turnFinished";
+        let finished = event.event.kind() == "turnFinished";
         received.push(event);
         if finished {
             break;
@@ -191,19 +222,17 @@ fn desktop_handshake_task_state_and_replay_round_trip() {
     let received = run_turn(&client, session_id, "do the thing");
     let kinds = received
         .iter()
-        .map(|event| event.event.kind.as_str())
+        .map(|event| event.event.kind())
         .collect::<Vec<_>>();
     assert_eq!(kinds[0], "connected");
     assert_eq!(kinds[1], "promptSubmitted");
-    assert_eq!(received[1].event.payload["message"], "do the thing");
+    assert_eq!(received[1].event.payload()["message"], "do the thing");
     let replayed = &received[2..];
-    assert_eq!(replayed.len(), timeline.events.len());
-    for (got, expected) in replayed.iter().zip(&timeline.events) {
-        assert_eq!(got.event.kind, expected.kind);
-        assert_eq!(got.event.payload, expected.payload);
+    for got in replayed {
         // Every event must decode with the desktop's own decoder.
         waku_client::event_from_wire(got.event.clone()).unwrap();
     }
+    assert_eq!(wire_parts(replayed), coalesced(&timeline.events));
     assert!(
         received
             .windows(2)
@@ -228,13 +257,8 @@ fn builtin_timelines_arrive_complete_and_in_order_at_max_rate() {
     for timeline in [&burst, &images] {
         let received = run_turn(&client, fixture::session_id("burst"), &timeline.name);
         let replayed = &received[2..];
-        assert_eq!(replayed.len(), timeline.events.len(), "{}", timeline.name);
         assert!(
-            replayed
-                .iter()
-                .zip(&timeline.events)
-                .all(|(got, expected)| got.event.kind == expected.kind
-                    && got.event.payload == expected.payload),
+            wire_parts(replayed) == coalesced(&timeline.events),
             "{} arrived out of order or altered",
             timeline.name
         );
@@ -249,14 +273,17 @@ fn loops_and_cancel() {
     let received = run_turn(&client, fixture::session_id("roundtrip"), "go");
     let text = received
         .iter()
-        .filter(|event| event.event.kind == "textDelta")
-        .filter_map(|event| event.event.payload.as_str())
+        .filter(|event| event.event.kind() == "textDelta")
+        .filter_map(|event| match &event.event {
+            waku_protocol::WireDriverEvent::TextDelta(text) => Some(text.as_str()),
+            _ => None,
+        })
         .collect::<String>();
     assert_eq!(text, "Hello, world".repeat(3));
     assert_eq!(
         received
             .iter()
-            .filter(|event| event.event.kind == "turnStarted")
+            .filter(|event| event.event.kind() == "turnStarted")
             .count(),
         1
     );
@@ -296,7 +323,7 @@ fn loops_and_cancel() {
     let mut deltas = 0;
     while deltas < 3 {
         let event = events.recv_timeout(Duration::from_secs(10)).unwrap();
-        if event.event.kind == "textDelta" {
+        if event.event.kind() == "textDelta" {
             deltas += 1;
         }
     }
@@ -305,11 +332,60 @@ fn loops_and_cancel() {
         .unwrap();
     let finished = loop {
         let event = events.recv_timeout(Duration::from_secs(10)).unwrap();
-        if event.event.kind == "turnFinished" {
+        if event.event.kind() == "turnFinished" {
             break event;
         }
     };
-    assert_eq!(finished.event.payload["success"], false);
+    assert_eq!(finished.event.payload()["success"], false);
     let stats = server.stop().unwrap();
     assert!(stats[0].canceled);
+}
+
+/// Wire cost of the `burst` timeline at its recorded rate, as a client
+/// receives it: events and JSON bytes. Not a pass/fail test; run with
+/// `cargo test -p waku-bench-daemon --release --test protocol_roundtrip --
+/// --ignored --nocapture burst_wire_cost`.
+#[test]
+#[ignore = "measurement; takes the timeline's full replay time"]
+fn burst_wire_cost() {
+    let burst = Timeline::builtin("burst").unwrap();
+    let server = start(vec![burst.clone()], Rate::Factor(1.0), 1);
+    let client = DaemonClient::connect(&server.address.to_string(), "secret".into()).unwrap();
+    let started = Instant::now();
+    let received = run_turn(&client, fixture::session_id("burst"), &burst.name);
+    let elapsed = started.elapsed().as_secs_f64();
+    let bytes = received
+        .iter()
+        .map(|event| {
+            serde_json::to_string(&waku_client::ServerMessage::Event(event.clone()))
+                .unwrap()
+                .len()
+        })
+        .sum::<usize>();
+    // What the same replay costs one event per provider chunk, as before
+    // daemon-side coalescing.
+    let template = &received[0];
+    let uncoalesced_bytes = burst
+        .events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let mut sequenced = template.clone();
+            sequenced.sequence = index as u64 + 3;
+            sequenced.event = event.to_wire();
+            serde_json::to_string(&waku_client::ServerMessage::Event(sequenced))
+                .unwrap()
+                .len()
+        })
+        .sum::<usize>();
+    println!(
+        "burst: {} timeline events ({} JSON bytes one event per chunk) -> {} wire events, {} JSON bytes, over {elapsed:.2}s ({:.0} events/s)",
+        burst.events.len(),
+        uncoalesced_bytes,
+        received.len(),
+        bytes,
+        received.len() as f64 / elapsed,
+    );
+    assert_eq!(wire_parts(&received[2..]), coalesced(&burst.events));
+    server.stop().unwrap();
 }

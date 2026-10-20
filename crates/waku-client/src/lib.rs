@@ -13,7 +13,7 @@ pub mod persistence;
 mod process;
 mod workspace_client;
 
-pub use client::DaemonClient;
+pub use client::{DaemonClient, local_endpoint_address};
 pub use process::{
     DEFAULT_EXPOSED_DAEMON_PORT, DaemonExposureSettings, DaemonProcess, DaemonSupervisor,
     parse_allowed_origins,

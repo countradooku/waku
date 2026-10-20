@@ -1,12 +1,14 @@
 use anyhow::{Context as _, anyhow, bail};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use uuid::Uuid;
+use serde_json::Value;
 
-use crate::WireDriverEvent;
-use crate::computer_use::{ComputerTarget, ComputerUsePhase, ComputerUseState};
-use crate::model::{ActivityKind, DriverEvent, PermissionOption, UserInputQuestion};
+use crate::model::DriverEvent;
+use crate::wire_event::{
+    ActivityPayload, PermissionPayload, PromptSubmittedPayload, SteerAcceptedPayload,
+    SteerRejectedPayload, TurnFinishedPayload, UsagePayload, UserInputRequestPayload,
+    WireDriverEvent,
+};
 
 pub fn decode_enum<T: DeserializeOwned>(value: &str) -> anyhow::Result<T> {
     serde_json::from_value(Value::String(value.to_owned()))
@@ -20,269 +22,149 @@ pub fn encode_enum<T: Serialize>(value: T) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("protocol enum did not serialize as a string"))
 }
 
+/// The wire form of a provider event. Only the client-only cursor variant
+/// has none.
 pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
-    let (kind, payload) = match event {
+    Ok(match event {
         DriverEvent::RuntimeEventCursorAdvanced(_) => {
             bail!("client-only runtime cursors cannot be sent by the daemon")
         }
-        DriverEvent::Connected { provider_cursor } => {
-            ("connected", serde_json::to_value(provider_cursor)?)
-        }
-        DriverEvent::AgentPresetSelected(preset) => {
-            ("agentPresetSelected", serde_json::to_value(preset)?)
-        }
-        DriverEvent::AutoTitleUpdated(title) => ("autoTitleUpdated", serde_json::to_value(title)?),
-        DriverEvent::AvailableCommands(commands) => {
-            ("availableCommands", serde_json::to_value(commands)?)
-        }
-        DriverEvent::TurnStarted => ("turnStarted", Value::Null),
-        DriverEvent::TurnParked => ("turnParked", Value::Null),
-        DriverEvent::TextDelta(text) => ("textDelta", Value::String(text)),
-        DriverEvent::ReasoningDelta(text) => ("reasoningDelta", Value::String(text)),
+        DriverEvent::Connected { provider_cursor } => WireDriverEvent::Connected(provider_cursor),
+        DriverEvent::AgentPresetSelected(preset) => WireDriverEvent::AgentPresetSelected(preset),
+        DriverEvent::AutoTitleUpdated(title) => WireDriverEvent::AutoTitleUpdated(title),
+        DriverEvent::AvailableCommands(commands) => WireDriverEvent::AvailableCommands(commands),
+        DriverEvent::TurnStarted => WireDriverEvent::TurnStarted,
+        DriverEvent::TurnParked => WireDriverEvent::TurnParked,
+        DriverEvent::TextDelta(text) => WireDriverEvent::TextDelta(text),
+        DriverEvent::ReasoningDelta(text) => WireDriverEvent::ReasoningDelta(text),
         DriverEvent::Activity {
             id,
             kind,
             title,
             detail,
             complete,
-        } => (
-            "activity",
-            json!({
-                "id": id,
-                "kind": kind,
-                "title": title,
-                "detail": detail,
-                "complete": complete,
-            }),
-        ),
-        DriverEvent::RichActivity(activity) => ("richActivity", serde_json::to_value(activity)?),
-        DriverEvent::BackgroundWork(work) => ("backgroundWork", serde_json::to_value(work)?),
+        } => WireDriverEvent::Activity(ActivityPayload {
+            id,
+            kind,
+            title,
+            detail,
+            complete,
+        }),
+        DriverEvent::RichActivity(activity) => WireDriverEvent::RichActivity(activity),
+        DriverEvent::BackgroundWork(work) => WireDriverEvent::BackgroundWork(work),
         DriverEvent::Permission {
             request_id,
             title,
             detail,
             options,
-        } => (
-            "permission",
-            json!({
-                "requestId": request_id,
-                "title": title,
-                "detail": detail,
-                "options": options,
-            }),
-        ),
+        } => WireDriverEvent::Permission(PermissionPayload {
+            request_id,
+            title,
+            detail,
+            options,
+        }),
         DriverEvent::UserInputRequested {
             request_id,
             questions,
-        } => (
-            "userInputRequested",
-            json!({
-                "requestId": request_id,
-                "questions": questions,
-            }),
-        ),
-        DriverEvent::ComputerUseUpdated(state) => (
-            "computerUseUpdated",
-            serde_json::to_value(ComputerUseWire {
-                target: state.target,
-                phase: state.phase,
-                visible: state.visible,
-                image_url: state.image_url,
-            })?,
-        ),
+        } => WireDriverEvent::UserInputRequested(UserInputRequestPayload {
+            request_id,
+            questions,
+        }),
+        DriverEvent::ComputerUseUpdated(state) => WireDriverEvent::ComputerUseUpdated(state),
         DriverEvent::PromptSubmitted {
             message,
             turn_id,
             message_id,
-        } => (
-            "promptSubmitted",
-            json!({ "message": message, "turnId": turn_id, "messageId": message_id }),
-        ),
-        DriverEvent::SteerAccepted { message } => ("steerAccepted", json!({ "message": message })),
-        DriverEvent::SteerRejected { message, reason } => (
-            "steerRejected",
-            json!({ "message": message, "reason": reason }),
-        ),
+        } => WireDriverEvent::PromptSubmitted(PromptSubmittedPayload {
+            message,
+            turn_id,
+            message_id,
+        }),
+        DriverEvent::SteerAccepted { message } => {
+            WireDriverEvent::SteerAccepted(SteerAcceptedPayload { message })
+        }
+        DriverEvent::SteerRejected { message, reason } => {
+            WireDriverEvent::SteerRejected(SteerRejectedPayload { message, reason })
+        }
         DriverEvent::UsageUpdated {
             context_tokens,
             context_window,
-        } => (
-            "usageUpdated",
-            json!({
-                "contextTokens": context_tokens,
-                "contextWindow": context_window,
-            }),
-        ),
-        DriverEvent::PlanUsageUpdated(usage) => ("planUsageUpdated", serde_json::to_value(usage)?),
-        DriverEvent::GoalUpdated(goal) => ("goalUpdated", serde_json::to_value(goal)?),
-        DriverEvent::TurnFinished { success, summary } => (
-            "turnFinished",
-            json!({ "success": success, "summary": summary }),
-        ),
-        DriverEvent::Error(error) => ("error", Value::String(error)),
-        DriverEvent::ProcessExited => ("processExited", Value::Null),
-    };
-    Ok(WireDriverEvent::new(kind, payload))
-}
-
-pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
-    let payload = event.payload;
-    Ok(match event.kind.as_str() {
-        "connected" => DriverEvent::Connected {
-            provider_cursor: serde_json::from_value(payload)?,
-        },
-        "agentPresetSelected" => DriverEvent::AgentPresetSelected(serde_json::from_value(payload)?),
-        "autoTitleUpdated" => DriverEvent::AutoTitleUpdated(serde_json::from_value(payload)?),
-        "availableCommands" => DriverEvent::AvailableCommands(serde_json::from_value(payload)?),
-        "turnStarted" => DriverEvent::TurnStarted,
-        "turnParked" => DriverEvent::TurnParked,
-        "textDelta" => DriverEvent::TextDelta(serde_json::from_value(payload)?),
-        "reasoningDelta" => DriverEvent::ReasoningDelta(serde_json::from_value(payload)?),
-        "activity" => {
-            let activity: ActivityWire = serde_json::from_value(payload)?;
-            DriverEvent::Activity {
-                id: activity.id,
-                kind: activity.kind,
-                title: activity.title,
-                detail: activity.detail,
-                complete: activity.complete,
-            }
+        } => WireDriverEvent::UsageUpdated(UsagePayload {
+            context_tokens,
+            context_window,
+        }),
+        DriverEvent::PlanUsageUpdated(usage) => WireDriverEvent::PlanUsageUpdated(usage),
+        DriverEvent::GoalUpdated(goal) => WireDriverEvent::GoalUpdated(goal),
+        DriverEvent::TurnFinished { success, summary } => {
+            WireDriverEvent::TurnFinished(TurnFinishedPayload { success, summary })
         }
-        "richActivity" => DriverEvent::RichActivity(serde_json::from_value(payload)?),
-        "backgroundWork" => DriverEvent::BackgroundWork(serde_json::from_value(payload)?),
-        "permission" => {
-            let permission: PermissionWire = serde_json::from_value(payload)?;
-            DriverEvent::Permission {
-                request_id: permission.request_id,
-                title: permission.title,
-                detail: permission.detail,
-                options: permission.options,
-            }
-        }
-        "userInputRequested" => {
-            let request: UserInputWire = serde_json::from_value(payload)?;
-            DriverEvent::UserInputRequested {
-                request_id: request.request_id,
-                questions: request.questions,
-            }
-        }
-        "computerUseUpdated" => {
-            let state: ComputerUseWire = serde_json::from_value(payload)?;
-            DriverEvent::ComputerUseUpdated(ComputerUseState {
-                target: state.target,
-                phase: state.phase,
-                visible: state.visible,
-                image_url: state.image_url,
-            })
-        }
-        "promptSubmitted" => {
-            let submitted: SubmittedPromptWire = serde_json::from_value(payload)?;
-            DriverEvent::PromptSubmitted {
-                message: submitted.message,
-                turn_id: submitted.turn_id,
-                message_id: submitted.message_id,
-            }
-        }
-        "steerAccepted" => {
-            let steer: AcceptedSteerWire = serde_json::from_value(payload)?;
-            DriverEvent::SteerAccepted {
-                message: steer.message,
-            }
-        }
-        "steerRejected" => {
-            let steer: RejectedSteerWire = serde_json::from_value(payload)?;
-            DriverEvent::SteerRejected {
-                message: steer.message,
-                reason: steer.reason,
-            }
-        }
-        "usageUpdated" => {
-            let usage: UsageWire = serde_json::from_value(payload)?;
-            DriverEvent::UsageUpdated {
-                context_tokens: usage.context_tokens,
-                context_window: usage.context_window,
-            }
-        }
-        "planUsageUpdated" => DriverEvent::PlanUsageUpdated(serde_json::from_value(payload)?),
-        "goalUpdated" => DriverEvent::GoalUpdated(serde_json::from_value(payload)?),
-        "turnFinished" => {
-            let finished: TurnFinishedWire = serde_json::from_value(payload)?;
-            DriverEvent::TurnFinished {
-                success: finished.success,
-                summary: finished.summary,
-            }
-        }
-        "error" => DriverEvent::Error(serde_json::from_value(payload)?),
-        "processExited" => DriverEvent::ProcessExited,
-        kind => bail!("daemon sent an unsupported driver event {kind:?}"),
+        DriverEvent::Error(error) => WireDriverEvent::Error(error),
+        DriverEvent::ProcessExited => WireDriverEvent::ProcessExited,
     })
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SubmittedPromptWire {
-    message: String,
-    turn_id: Uuid,
-    message_id: Uuid,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ActivityWire {
-    id: Option<String>,
-    kind: ActivityKind,
-    title: String,
-    detail: Option<String>,
-    complete: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PermissionWire {
-    request_id: String,
-    title: String,
-    detail: String,
-    options: Vec<PermissionOption>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UserInputWire {
-    request_id: String,
-    questions: Vec<UserInputQuestion>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ComputerUseWire {
-    target: Option<ComputerTarget>,
-    phase: ComputerUsePhase,
-    visible: bool,
-    image_url: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AcceptedSteerWire {
-    message: String,
-}
-
-#[derive(Deserialize)]
-struct RejectedSteerWire {
-    message: String,
-    reason: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UsageWire {
-    context_tokens: Option<u64>,
-    context_window: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct TurnFinishedWire {
-    success: bool,
-    summary: Option<String>,
+/// The provider event a wire event carries. Terminal events belong to a
+/// terminal emulator, not a provider session, and are refused.
+pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
+    Ok(match event {
+        WireDriverEvent::Connected(provider_cursor) => DriverEvent::Connected { provider_cursor },
+        WireDriverEvent::AgentPresetSelected(preset) => DriverEvent::AgentPresetSelected(preset),
+        WireDriverEvent::AutoTitleUpdated(title) => DriverEvent::AutoTitleUpdated(title),
+        WireDriverEvent::AvailableCommands(commands) => DriverEvent::AvailableCommands(commands),
+        WireDriverEvent::TurnStarted => DriverEvent::TurnStarted,
+        WireDriverEvent::TurnParked => DriverEvent::TurnParked,
+        WireDriverEvent::TextDelta(text) => DriverEvent::TextDelta(text),
+        WireDriverEvent::ReasoningDelta(text) => DriverEvent::ReasoningDelta(text),
+        WireDriverEvent::Activity(activity) => DriverEvent::Activity {
+            id: activity.id,
+            kind: activity.kind,
+            title: activity.title,
+            detail: activity.detail,
+            complete: activity.complete,
+        },
+        WireDriverEvent::RichActivity(activity) => DriverEvent::RichActivity(activity),
+        WireDriverEvent::BackgroundWork(work) => DriverEvent::BackgroundWork(work),
+        WireDriverEvent::Permission(permission) => DriverEvent::Permission {
+            request_id: permission.request_id,
+            title: permission.title,
+            detail: permission.detail,
+            options: permission.options,
+        },
+        WireDriverEvent::UserInputRequested(request) => DriverEvent::UserInputRequested {
+            request_id: request.request_id,
+            questions: request.questions,
+        },
+        WireDriverEvent::ComputerUseUpdated(state) => DriverEvent::ComputerUseUpdated(state),
+        WireDriverEvent::PromptSubmitted(submitted) => DriverEvent::PromptSubmitted {
+            message: submitted.message,
+            turn_id: submitted.turn_id,
+            message_id: submitted.message_id,
+        },
+        WireDriverEvent::SteerAccepted(steer) => DriverEvent::SteerAccepted {
+            message: steer.message,
+        },
+        WireDriverEvent::SteerRejected(steer) => DriverEvent::SteerRejected {
+            message: steer.message,
+            reason: steer.reason,
+        },
+        WireDriverEvent::UsageUpdated(usage) => DriverEvent::UsageUpdated {
+            context_tokens: usage.context_tokens,
+            context_window: usage.context_window,
+        },
+        WireDriverEvent::PlanUsageUpdated(usage) => DriverEvent::PlanUsageUpdated(usage),
+        WireDriverEvent::GoalUpdated(goal) => DriverEvent::GoalUpdated(goal),
+        WireDriverEvent::TurnFinished(finished) => DriverEvent::TurnFinished {
+            success: finished.success,
+            summary: finished.summary,
+        },
+        WireDriverEvent::Error(error) => DriverEvent::Error(error),
+        WireDriverEvent::ProcessExited => DriverEvent::ProcessExited,
+        event @ (WireDriverEvent::TerminalOutput(_)
+        | WireDriverEvent::TerminalExited
+        | WireDriverEvent::TerminalError(_)) => {
+            bail!("{} is a terminal event, not a provider event", event.kind())
+        }
+    })
 }
 
 #[cfg(test)]
@@ -300,9 +182,9 @@ mod tests {
             time_used_seconds: 90,
         })))
         .unwrap();
-        assert_eq!(wire.kind, "goalUpdated");
+        assert_eq!(wire.kind(), "goalUpdated");
         // The status spelling is Codex's own camelCase vocabulary.
-        assert_eq!(wire.payload["status"], "usageLimited");
+        assert_eq!(wire.payload()["status"], "usageLimited");
 
         let DriverEvent::GoalUpdated(Some(goal)) = event_from_wire(wire).unwrap() else {
             panic!("the event changed variants during its wire round trip");
@@ -334,7 +216,7 @@ mod tests {
             }],
         })
         .unwrap();
-        assert_eq!(wire.kind, "userInputRequested");
+        assert_eq!(wire.kind(), "userInputRequested");
 
         let DriverEvent::UserInputRequested {
             request_id,

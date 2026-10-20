@@ -156,7 +156,7 @@ function event(kind: string, payload: unknown): SequencedEvent {
     runtimeId: 'runtime',
     epoch: 'epoch',
     sequence: 1,
-    event: { kind, payload: payload as never },
+    event: { kind, payload } as SequencedEvent['event'],
   }
 }
 

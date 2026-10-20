@@ -58,11 +58,15 @@ pub struct BenchBackend {
     attach_watch: Mutex<Option<(Uuid, crossbeam_channel::Sender<()>)>>,
     stats: Arc<Mutex<Vec<ReplayStats>>>,
     finished: Arc<AtomicUsize>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: waku_core::ShutdownSignal,
 }
 
 impl BenchBackend {
-    pub fn new(inner: WakuBackend, settings: BenchSettings, shutdown: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        inner: WakuBackend,
+        settings: BenchSettings,
+        shutdown: waku_core::ShutdownSignal,
+    ) -> Self {
         Self {
             inner,
             settings,
@@ -202,7 +206,7 @@ impl BenchBackend {
                 stats.lock().push(replayed);
                 let done = finished.fetch_add(1, Ordering::AcqRel) + 1;
                 if exit_after.is_some_and(|limit| done >= limit) {
-                    shutdown.store(true, Ordering::Release);
+                    shutdown.trigger();
                 }
             })
             .context("could not start replay thread")?;

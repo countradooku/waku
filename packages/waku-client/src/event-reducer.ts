@@ -56,7 +56,10 @@ export function reduceRuntimeEvent(
   processExitError: string | null = null,
 ): RuntimeEventResult {
   const session = clone(current)
-  const { kind, payload } = wire.event
+  const { kind } = wire.event
+  // Events without data (`turnStarted`, `processExited`, ...) carry no
+  // payload; the checks below narrow the rest at runtime.
+  const payload: unknown = 'payload' in wire.event ? wire.event.payload : null
   const result: RuntimeEventResult = {
     session,
     settled: false,

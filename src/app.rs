@@ -145,13 +145,6 @@ fn signal_event_pump(wake: &smol::channel::Sender<()>) {
     let _ = wake.try_send(());
 }
 
-/// Source bytes of parsed messages kept across session switches.
-///
-/// Measured at ~17x expansion into parsed structures, plus flattened text and
-/// shaped runs on top, so this is bounded by source size rather than entry
-/// count — one long message costs far more than several short ones. 512 KB
-/// holds several sessions' transcripts for a few MB of structures.
-const MAX_CACHED_MESSAGE_SOURCE_BYTES: usize = 512 * 1024;
 /// Projects whose workspace lookups are remembered — branch, diff listing,
 /// working tree. A window rarely has more than a handful open, and the diff
 /// and tree caches are invalidated on every refresh, so they hold one entry in
@@ -313,12 +306,7 @@ struct ComposerAttachment {
     blob_reference: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-enum RemoteImageState {
-    Loading,
-    Ready(Arc<gpui::Image>),
-    Unavailable,
-}
+use memory::RemoteImageState;
 
 /// One accepted composer submission. `prompt` preserves the composer and
 /// transcript syntax; provider-specific command syntax resolves only at the
@@ -679,13 +667,14 @@ impl WakuPane {
     fn bind(&mut self, waku: &Entity<Waku>, cx: &mut Context<Self>) {
         self.waku = Some(waku.downgrade());
         cx.observe(waku, |_, waku, cx| {
-            // A panel slide notifies the root at display rate for its 200ms,
-            // and this fan-out would price every one of those ticks at a
-            // three-island rebuild. Skipping it hands the decision to the
-            // cached-view keys: the sliding panel (its clip moves) and the
-            // transcript (its bounds move) miss their caches and re-render
-            // with fresh state anyway, while the island nothing is moving
-            // re-plays its cached subtree. Root-state changes it displays
+            // A panel slide (opt-in: **Animate panels**) notifies the root at
+            // display rate for its 200ms, and this fan-out would price every
+            // one of those ticks at a three-island rebuild. Skipping it hands
+            // the decision to the cached-view keys: the sliding panel (its
+            // clip moves) and, for a sidebar slide, the transcript (its
+            // origin moves; its width is held at the settled one) miss their
+            // caches and re-render with fresh state anyway, while the island
+            // nothing is moving re-plays its cached subtree. Root-state changes it displays
             // can wait out the slide: updates born inside an island
             // (terminal output, pulse leases) dirty their ancestor pane
             // without this observer, and the slide's retirement notify
@@ -1277,8 +1266,14 @@ pub struct Waku {
     image_preview_generation: u64,
     /// In-memory GPUI images for daemon-owned bytes. A missing entry schedules
     /// one background fetch only when a visible row asks to render it; the
-    /// desktop never creates another attachment file.
-    remote_images: RefCell<HashMap<String, RemoteImageState>>,
+    /// desktop never creates another attachment file. Legacy inline `data:`
+    /// images are decoded once into the same cache. Bounded by decoded bytes;
+    /// see `memory::ImageCache`.
+    remote_images: RefCell<memory::ImageCache>,
+    /// When the user last left each session, for dehydrating idle ones.
+    session_left_at: HashMap<Uuid, Instant>,
+    /// A delayed dehydration sweep is already scheduled.
+    dehydration_sweep_scheduled: bool,
     /// Coalesced edge trigger for provider and background result queues. The
     /// payloads stay in their typed channels; this channel only wakes the UI.
     event_wake_tx: smol::channel::Sender<()>,
@@ -1564,12 +1559,21 @@ pub struct Waku {
     transcript_scrollbar_dragging: Cell<bool>,
     transcript_layout_width: Cell<Pixels>,
     /// Parsed markdown per assistant message, keeping each response's
-    /// incremental parse and flattened blocks alive across frames.
-    message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// incremental parse and flattened blocks alive across frames. Keyed by
+    /// message id (unique across sessions), so switching back to a recent
+    /// session costs no re-parse; a byte-budgeted LRU bounds it.
+    message_markdown: RefCell<memory::ByteBudgetLru<Uuid, MarkdownView>>,
+    /// Element ids of message rows; see [`Waku::message_row_ids`].
+    transcript_row_ids: RefCell<HashMap<Uuid, Rc<transcript_view::MessageRowIds>>>,
+    /// The Markdown palette of the transcript frame being built, resolved
+    /// once by `render_transcript` instead of once per row.
+    transcript_palette: Cell<Option<MarkdownPalette>>,
     /// Stable offsets for capped user bubbles, including across virtualized row rebuilds.
     user_message_viewports: RefCell<HashMap<Uuid, UserMessageScrollViewport>>,
-    /// Parsed markdown for reasoning activities, keyed by stable activity id.
-    activity_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// Parsed markdown for reasoning activities, keyed by (session id,
+    /// activity id) so a session switch keeps it and a dehydration can drop
+    /// one session's entries. A byte-budgeted LRU bounds it.
+    activity_markdown: RefCell<memory::ByteBudgetLru<(Uuid, Uuid), MarkdownView>>,
     /// Byte offsets live reasoning peeks render from, slid forward as the
     /// thought grows; see `live_reasoning_window_start`.
     reasoning_window_starts: RefCell<HashMap<Uuid, usize>>,
@@ -1610,6 +1614,8 @@ pub struct Waku {
     sidebar_pane: Entity<WakuPane>,
     transcript_pane: Entity<WakuPane>,
     right_panel_pane: Entity<WakuPane>,
+    /// Notified for a root-only frame; see [`RootFrame`].
+    root_frame: Entity<RootFrame>,
     /// The unix second the pending time-label wake-up targets, or `None` when
     /// none is armed. See `schedule_time_label_wake`.
     time_label_wake: Cell<Option<u64>>,
@@ -1629,10 +1635,12 @@ mod command_palette;
 mod commit_dialog;
 mod components;
 mod composer;
+mod dirty;
 mod drafts;
 mod file_search;
 mod goal_dialog;
 mod image_preview;
+mod memory;
 mod project_picker;
 mod render;
 mod right_panel;
@@ -1657,12 +1665,16 @@ use background_work::{
 pub use command_palette::init as init_command_palette;
 pub use commit_dialog::init as init_commit_dialog_keys;
 use components::*;
+use dirty::{
+    DirtySet, DriverEventImpact, RootFrame, driver_event_impact, session_drain_dirty,
+    session_sidebar_fingerprint, widest_impact,
+};
 pub use goal_dialog::init as init_goal_dialog_keys;
 pub use image_preview::init as init_image_preview_keys;
 use project_picker::ProjectPickerSite;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
-use sidebar::{SidebarGroup, SidebarRow};
+use sidebar::{SidebarGroup, SidebarRow, sidebar_session_fingerprint};
 pub use skills_page::init as init_skills_keys;
 use streaming::*;
 use transcript::*;
@@ -1884,7 +1896,18 @@ impl Waku {
                 }
                 // Consumed: the notified frame re-arms the next boundary.
                 this.time_label_wake.set(None);
-                cx.notify();
+                // Relative reply times live in the sidebar, "Working for Ns"
+                // in the sidebar and the transcript; the right panel shows
+                // neither and replays.
+                this.notify_dirty(
+                    DirtySet {
+                        root: true,
+                        sidebar: true,
+                        transcript: true,
+                        right_panel: false,
+                    },
+                    cx,
+                );
             });
         })
         .detach();
@@ -1951,17 +1974,19 @@ impl Waku {
         }
     }
 
-    pub fn new(
-        window: &mut Window,
-        cx: &mut App,
-        daemon: waku_client::DaemonSupervisor,
-    ) -> Entity<Self> {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let store = StateStore::remote(daemon.clone());
+    /// Build the app view from what the startup thread loaded
+    /// (`crate::startup`): the daemon, task state, drafts and the hydrated
+    /// selected session all arrive ready, so nothing here waits on the
+    /// daemon except a legacy projectless migration.
+    pub fn new(window: &mut Window, cx: &mut App, loaded: crate::startup::Loaded) -> Entity<Self> {
+        let crate::startup::Loaded {
+            daemon,
+            store,
+            mut state,
+            composer_draft_store,
+            composer_drafts,
+        } = loaded;
         let daemon_hostname = crate::daemon::local_hostname().unwrap_or_else(|| "this-mac".into());
-        let composer_draft_store = ComposerDraftStore::remote(daemon.clone());
-        let composer_drafts = composer_draft_store.load().unwrap_or_default();
-        let mut state = store.load_or_fresh(cwd);
         let home_directory = crate::projectless::home_directory();
         state.apply_daemon_settings(daemon.settings());
         if let Err(error) = daemon.update_settings(state.daemon_settings()) {
@@ -2059,6 +2084,7 @@ impl Waku {
         let sidebar_pane = WakuPane::new(Waku::sidebar_pane_content, cx);
         let transcript_pane = WakuPane::new(Waku::transcript_pane_content, cx);
         let right_panel_pane = WakuPane::new(Waku::right_panel_pane_content, cx);
+        let root_frame = cx.new(|_| RootFrame);
         let workspace_client = waku_client::WorkspaceClient::new(daemon.client());
         let (projectless_migrated, projectless_migration_error) =
             migrate_legacy_projectless_projects(&mut state, &workspace_client);
@@ -2273,26 +2299,31 @@ impl Waku {
         // when a bottom-aligned list reaches the end — it represents that end as
         // no logical offset — but a turn renders through the top-aligned
         // anchored list, whose end is an ordinary offset, so only this can.
+        //
+        // Everything these handlers record is read by the transcript island
+        // alone (tail recheck, scroll-to-bottom affordance, rail emphasis), and
+        // `ListState::scroll` notifies the view that painted the list — that
+        // island — right after the handler returns. A `window.refresh()` here
+        // used to rebuild the sidebar and right panel (terminal, diff, editor)
+        // on every scroll tick for nothing.
         transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
             let transcript_tail_recheck = transcript_tail_recheck.clone();
-            move |event, window, _| {
+            move |event, _, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
                 transcript_tail_recheck.set(true);
-                window.refresh();
             }
         });
         anchored_transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
             let transcript_tail_recheck = transcript_tail_recheck.clone();
-            move |event, window, _| {
+            move |event, _, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
                 transcript_tail_recheck.set(true);
-                window.refresh();
             }
         });
         // Enable GPUI's experimental overlay plane so deferred draws (menus,
@@ -2306,11 +2337,6 @@ impl Waku {
         // surface falls back to freezing the page to a bitmap while an
         // overlay is open.
         let scene_overlay_enabled = window.enable_scene_overlay().is_ok();
-        let (updater_status, updater_events) = cx
-            .try_global::<crate::updater::UpdaterState>()
-            .and_then(|state| state.0.as_ref())
-            .map(|updater| (updater.status(), Some(updater.events())))
-            .unwrap_or_default();
         let entity = cx.new(|cx| {
             let settings_focus = cx.focus_handle();
             let onboarding_add_project_focus = cx.focus_handle();
@@ -2339,22 +2365,6 @@ impl Waku {
                 this.set_updater_button_focused(false, cx);
             })
             .detach();
-
-            if let Some(updater_events) = updater_events {
-                cx.spawn(async move |this: WeakEntity<Self>, cx| {
-                    while let Ok(event) = updater_events.recv().await {
-                        if this
-                            .update(cx, |this: &mut Self, cx| {
-                                this.handle_updater_event(event, cx)
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                })
-                .detach();
-            }
 
             cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
                 if this.state.theme == ThemePreference::System {
@@ -2503,13 +2513,21 @@ impl Waku {
             .detach();
 
             // Window-frame changes are only mirrored in memory; the quit save
-            // is what lands the final position and size on disk.
-            cx.on_app_quit(|this, _| {
+            // is what lands the final position and size on disk. Saves are
+            // debounced on a background writer, so quit flushes it with a full
+            // sync off the UI thread; GPUI waits briefly for the future.
+            cx.on_app_quit(|this, cx| {
                 this.save();
                 // After the save, so the final report counts it.
                 #[cfg(feature = "perf-counters")]
                 crate::perf_counters::write_final();
-                async {}
+                let flush = this
+                    .store
+                    .app_files_flush(waku_client::persistence::Durability::Full);
+                let flush = cx.background_executor().spawn(async move { flush() });
+                async move {
+                    let _ = flush.await;
+                }
             })
             .detach();
 
@@ -2781,11 +2799,10 @@ impl Waku {
                 settings_focus,
                 onboarding_add_project_focus,
                 onboarding_projectless_focus,
-                automatic_updates_enabled: cx
-                    .try_global::<crate::updater::UpdaterState>()
-                    .and_then(|updater| updater.0.as_ref())
-                    .is_some_and(|updater| updater.automatically_checks_for_updates()),
-                updater_status,
+                // Filled in by `attach_updater` once the updater starts,
+                // after the first frame.
+                automatic_updates_enabled: false,
+                updater_status: Default::default(),
                 updater_button_focus,
                 updater_button_hovered: false,
                 updater_button_focused: false,
@@ -2882,7 +2899,9 @@ impl Waku {
                 composer_attachments,
                 image_preview: None,
                 image_preview_generation: 0,
-                remote_images: RefCell::new(HashMap::new()),
+                remote_images: RefCell::new(memory::ImageCache::default()),
+                session_left_at: HashMap::new(),
+                dehydration_sweep_scheduled: false,
                 event_wake_tx,
                 task_state_sync_tx,
                 task_state_sync_events,
@@ -3035,9 +3054,19 @@ impl Waku {
                 transcript_scroll_to_bottom_visible: Cell::new(false),
                 transcript_scrollbar_dragging: Cell::new(false),
                 transcript_layout_width: Cell::new(Pixels::ZERO),
-                message_markdown: RefCell::new(HashMap::new()),
+                message_markdown: RefCell::new(memory::ByteBudgetLru::new(
+                    memory::MESSAGE_MARKDOWN_BUDGET,
+                    memory::MARKDOWN_MIN_ENTRIES,
+                    MarkdownView::source_len,
+                )),
+                transcript_row_ids: RefCell::new(HashMap::new()),
+                transcript_palette: Cell::new(None),
                 user_message_viewports: RefCell::new(HashMap::new()),
-                activity_markdown: RefCell::new(HashMap::new()),
+                activity_markdown: RefCell::new(memory::ByteBudgetLru::new(
+                    memory::ACTIVITY_MARKDOWN_BUDGET,
+                    memory::MARKDOWN_MIN_ENTRIES,
+                    MarkdownView::source_len,
+                )),
                 reasoning_window_starts: RefCell::new(HashMap::new()),
                 activity_scroll_viewports: RefCell::new(HashMap::new()),
                 activity_diffs: RefCell::new(HashMap::new()),
@@ -3054,6 +3083,7 @@ impl Waku {
                 sidebar_pane: sidebar_pane.clone(),
                 transcript_pane: transcript_pane.clone(),
                 right_panel_pane: right_panel_pane.clone(),
+                root_frame: root_frame.clone(),
                 time_label_wake: Cell::new(None),
                 time_label_wake_generation: Cell::new(0),
                 fps_last_frame: Instant::now(),
@@ -3065,6 +3095,10 @@ impl Waku {
         for pane in [&sidebar_pane, &transcript_pane, &right_panel_pane] {
             pane.update(cx, |pane, cx| pane.bind(&entity, cx));
         }
+        // A pulse loader or overlay scrollbar painted by the root view leases
+        // the root itself. Redirect those ticks to the root frame so they
+        // repaint the root without fanning out to every island.
+        crate::ui::motion::redirect_notifications(entity.entity_id(), root_frame.entity_id(), cx);
         let initial_row_count = entity.read(cx).transcript_row_count();
         entity.read(cx).reset_transcript_rows(initial_row_count);
         // Everything launch needs from `git` or the filesystem, started now
@@ -3075,25 +3109,66 @@ impl Waku {
             for session_id in startup_live_session_ids {
                 this.start_runtime_attachment(session_id, cx);
             }
-            this.start_pending_checkpoint_captures(cx);
-            // The autocomplete indexes prefetch alongside, so typing `/` or
-            // `@` into the very first prompt already has data to draw.
-            this.refresh_composer_sources(cx);
-            // Re-detect providers after resolving the user's login-shell
-            // environment off-thread. Detection then starts model and version
-            // discovery for every CLI it finds, including nvm/fnm-managed
-            // installs.
-            this.refresh_provider_detection(None);
-            // The skill library too: the Skills settings page must open onto
-            // data, not a scan.
-            this.ensure_skills_catalog(false, cx);
-            // And the header's "open project in app" targets, so its menu
-            // lists installed apps and icons without ever probing on a frame.
-            this.detect_open_in_apps(cx);
             #[cfg(feature = "perf-counters")]
             this.start_perf_session_visits(cx);
         });
+        // The rest only prefetches: none of it is on the first frame, and
+        // provider detection spawns a login shell and every provider CLI.
+        // Let the first frame go out before it competes for CPU and the
+        // daemon (#29).
+        let prefetch = entity.downgrade();
+        crate::startup::after_first_frame(window, cx, move |_, cx| {
+            prefetch
+                .update(cx, |this, cx| {
+                    this.start_pending_checkpoint_captures(cx);
+                    // The autocomplete indexes prefetch alongside, so typing
+                    // `/` or `@` into the very first prompt already has data
+                    // to draw.
+                    this.refresh_composer_sources(cx);
+                    // Re-detect providers after resolving the user's
+                    // login-shell environment off-thread. Detection then
+                    // starts model and version discovery for every CLI it
+                    // finds, including nvm/fnm-managed installs.
+                    this.refresh_provider_detection(None);
+                    // The skill library too: the Skills settings page must
+                    // open onto data, not a scan.
+                    this.ensure_skills_catalog(false, cx);
+                    // And the header's "open project in app" targets, so its
+                    // menu lists installed apps and icons without ever
+                    // probing on a frame.
+                    this.detect_open_in_apps(cx);
+                })
+                .ok();
+        });
         entity
+    }
+
+    /// Subscribe to the updater, once `crate::startup` has started it. A
+    /// no-op while there is none (development builds, unconfigured releases).
+    pub(crate) fn attach_updater(&mut self, cx: &mut Context<Self>) {
+        let Some(updater) = cx
+            .try_global::<crate::updater::UpdaterState>()
+            .and_then(|state| state.0.as_ref())
+        else {
+            return;
+        };
+        self.updater_status = updater.status();
+        self.automatic_updates_enabled = updater.automatically_checks_for_updates();
+        let updater_events = updater.events();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            while let Ok(event) = updater_events.recv().await {
+                if this
+                    .update(cx, |this: &mut Self, cx| {
+                        this.handle_updater_event(event, cx)
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 }
 

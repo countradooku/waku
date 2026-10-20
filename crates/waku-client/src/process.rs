@@ -21,7 +21,18 @@ use waku_protocol::{
 };
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+/// How often a development supervisor (`watch_for_rebuilds`, which only
+/// debug builds of the app pass) checks the daemon binary for a rebuild. A
+/// release supervisor never polls: it sleeps until the child exits or the
+/// connection closes (#178).
 const REBUILD_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// First delay before retrying a failed restart or reconnect; it doubles up
+/// to [`MAX_RETRY_INTERVAL`]. These timers only run while the daemon is
+/// unreachable, never while it is healthy.
+const MIN_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+/// Settings writes that fail are retried after this.
+const SETTINGS_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 pub const DEFAULT_EXPOSED_DAEMON_PORT: u16 = 34_123;
 
 /// Desktop-owned launch configuration for the daemon it supervises.
@@ -83,12 +94,10 @@ impl DaemonExposureSettings {
         Ok(self)
     }
 
-    fn bind_address(&self) -> String {
-        if self.enabled {
-            format!("0.0.0.0:{}", self.port)
-        } else {
-            "127.0.0.1:0".into()
-        }
+    /// The TCP listener the managed daemon opens, only when exposure is on.
+    /// The desktop itself always talks to it over the local socket.
+    fn bind_address(&self) -> Option<String> {
+        self.enabled.then(|| format!("0.0.0.0:{}", self.port))
     }
 }
 
@@ -154,13 +163,15 @@ impl DaemonProcess {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
+        // The desktop reaches its daemon over the per-user local socket (#19);
+        // TCP is opened only for exposure to other devices and browsers.
         command
-            .arg("--bind")
-            .arg(settings.bind_address())
+            .arg("--socket")
+            .arg(waku_protocol::identity::daemon_socket_path())
             .arg("--parent-pid")
             .arg(std::process::id().to_string());
-        if settings.enabled {
-            command.arg("--allow-non-loopback");
+        if let Some(bind) = settings.bind_address() {
+            command.arg("--bind").arg(bind).arg("--allow-non-loopback");
         }
         for origin in &settings.allowed_origins {
             command.arg("--allow-origin").arg(origin);
@@ -216,7 +227,11 @@ impl DaemonProcess {
                 PROTOCOL_VERSION
             );
         }
-        let client_address = match desktop_client_address(&ready.address) {
+        let client_address = match ready.socket.as_deref() {
+            Some(socket) => Ok(crate::local_endpoint_address(socket)),
+            None => desktop_client_address(&ready.address),
+        };
+        let client_address = match client_address {
             Ok(address) => address,
             Err(error) => {
                 let _ = child.kill();
@@ -242,6 +257,41 @@ impl DaemonProcess {
     fn has_exited(&mut self) -> bool {
         !matches!(self.child.try_wait(), Ok(None))
     }
+
+    /// Send `wake` when the child exits, from a thread that blocks in
+    /// `waitid(WNOWAIT)`: the kernel wakes it on exit and the zombie is left
+    /// for [`Self::has_exited`] or [`Self::stop`] to reap, so this never races
+    /// the owner of the `Child`. Any failure (the child was already reaped)
+    /// also wakes the supervisor, which then checks for itself.
+    ///
+    /// Elsewhere there is no exit thread; the daemon's exit closes its
+    /// connection, and the supervisor's disconnect wake covers it.
+    #[cfg(unix)]
+    fn notify_on_exit(&self, wake: Sender<()>) {
+        let pid = self.child.id() as libc::id_t;
+        let spawned = std::thread::Builder::new()
+            .name("waku-daemon-exit".into())
+            .spawn(move || {
+                loop {
+                    let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                    let result = unsafe {
+                        libc::waitid(libc::P_PID, pid, &mut status, libc::WEXITED | libc::WNOWAIT)
+                    };
+                    if result == 0
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                    {
+                        break;
+                    }
+                }
+                let _ = wake.send(());
+            });
+        if spawned.is_err() {
+            eprintln!("could not watch the Waku daemon for exit; relying on its connection");
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn notify_on_exit(&self, _wake: Sender<()>) {}
 
     fn stop(&mut self) {
         self.client.shutdown();
@@ -307,6 +357,32 @@ struct SupervisorInner {
     settings_updates: Sender<DaemonSettings>,
     client_updates: Mutex<Vec<Sender<DaemonClient>>>,
     running: AtomicBool,
+    /// Wakes the monitor thread: the child exited, the connection closed,
+    /// a restart needs retrying, or the supervisor is gone.
+    wake: Sender<()>,
+}
+
+impl Drop for SupervisorInner {
+    fn drop(&mut self) {
+        // The monitor holds only a weak reference; this wake lets it notice.
+        let _ = self.wake.send(());
+    }
+}
+
+impl SupervisorInner {
+    /// Wake the monitor when `client`'s connection closes.
+    fn watch_client(&self, client: &DaemonClient) {
+        let wake = self.wake.clone();
+        client.on_disconnect(move || {
+            let _ = wake.send(());
+        });
+    }
+
+    /// Wake the monitor when `process` exits or its connection closes.
+    fn watch_process(&self, process: &DaemonProcess) {
+        process.notify_on_exit(self.wake.clone());
+        self.watch_client(&process.client);
+    }
 }
 
 enum DaemonTarget {
@@ -354,16 +430,21 @@ impl DaemonSupervisor {
         let process = DaemonProcess::spawn_configured(executable, exposure.clone())?;
         let settings = read_settings(&process.client())?;
         let initial_stamp = ExecutableStamp::read(executable)?;
-        let supervisor = Self::from_target(
+        let (supervisor, wake) = Self::from_target(
             DaemonTarget::Local(process),
             Some(executable.to_owned()),
             Some(exposure),
             settings,
         )?;
+        if let DaemonTarget::Local(process) = &*supervisor.inner.target.lock() {
+            supervisor.inner.watch_process(process);
+        }
         let weak_inner = Arc::downgrade(&supervisor.inner);
         std::thread::Builder::new()
             .name("waku-daemon-supervisor".into())
-            .spawn(move || monitor_daemon(weak_inner, Some(initial_stamp), watch_for_rebuilds))
+            .spawn(move || {
+                monitor_daemon(weak_inner, wake, Some(initial_stamp), watch_for_rebuilds)
+            })
             .context("could not start Waku daemon supervisor")?;
         Ok(supervisor)
     }
@@ -373,9 +454,9 @@ impl DaemonSupervisor {
     pub fn connect(address: &str, token: String) -> anyhow::Result<Self> {
         let client = DaemonClient::connect(address, token.clone())?;
         let settings = read_settings(&client)?;
-        let supervisor = Self::from_target(
+        let (supervisor, wake) = Self::from_target(
             DaemonTarget::Remote {
-                client,
+                client: client.clone(),
                 address: address.to_owned(),
                 token,
             },
@@ -383,10 +464,11 @@ impl DaemonSupervisor {
             None,
             settings,
         )?;
+        supervisor.inner.watch_client(&client);
         let weak_inner = Arc::downgrade(&supervisor.inner);
         std::thread::Builder::new()
             .name("waku-remote-daemon-supervisor".into())
-            .spawn(move || monitor_daemon(weak_inner, None, false))
+            .spawn(move || monitor_daemon(weak_inner, wake, None, false))
             .context("could not start remote Waku daemon supervisor")?;
         Ok(supervisor)
     }
@@ -396,8 +478,9 @@ impl DaemonSupervisor {
         executable: Option<PathBuf>,
         exposure: Option<DaemonExposureSettings>,
         settings: DaemonSettings,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(Self, Receiver<()>)> {
         let (settings_updates, settings_update_rx) = unbounded();
+        let (wake, wake_rx) = unbounded();
         let inner = Arc::new(SupervisorInner {
             executable,
             target: Mutex::new(target),
@@ -410,13 +493,14 @@ impl DaemonSupervisor {
             settings_updates,
             client_updates: Mutex::new(Vec::new()),
             running: AtomicBool::new(true),
+            wake,
         });
         let weak_inner = Arc::downgrade(&inner);
         std::thread::Builder::new()
             .name("waku-daemon-settings".into())
             .spawn(move || persist_settings(weak_inner, settings_update_rx))
             .context("could not start Waku daemon settings writer")?;
-        Ok(Self { inner })
+        Ok((Self { inner }, wake_rx))
     }
 
     pub fn client(&self) -> DaemonClient {
@@ -472,9 +556,14 @@ impl DaemonSupervisor {
                     queue_settings_refresh(&self.inner);
                     Err(error)
                 }
-                Err(restore_error) => Err(error.context(format!(
-                    "the previous daemon configuration also failed to restart: {restore_error:#}"
-                ))),
+                Err(restore_error) => {
+                    // The target is left `Restarting`; the monitor retries
+                    // with the previous settings from here.
+                    let _ = self.inner.wake.send(());
+                    Err(error.context(format!(
+                        "the previous daemon configuration also failed to restart: {restore_error:#}"
+                    )))
+                }
             },
         }
     }
@@ -500,93 +589,173 @@ impl Drop for DaemonSupervisor {
     }
 }
 
+/// Sleeps until something can have changed the daemon's state, then checks
+/// it. Wakes come from the child's exit, the connection closing, a failed
+/// `reconfigure`, and the supervisor being dropped; the only timers are the
+/// retry backoff while the daemon is unreachable and, with
+/// `watch_for_rebuilds` (debug builds of the app only), the rebuild poll. A
+/// healthy release supervisor therefore never wakes (#178).
 fn monitor_daemon(
     weak_inner: std::sync::Weak<SupervisorInner>,
+    wake: Receiver<()>,
     mut active_stamp: Option<ExecutableStamp>,
     watch_for_rebuilds: bool,
 ) {
+    let mut retry: Option<Duration> = None;
     loop {
-        std::thread::sleep(REBUILD_POLL_INTERVAL);
+        let rebuild_poll = watch_for_rebuilds.then_some(REBUILD_POLL_INTERVAL);
+        let timeout = match (retry, rebuild_poll) {
+            (Some(retry), Some(poll)) => Some(retry.min(poll)),
+            (timeout, None) | (None, timeout) => timeout,
+        };
+        let closed = match timeout {
+            Some(timeout) => matches!(
+                wake.recv_timeout(timeout),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+            ),
+            None => wake.recv().is_err(),
+        };
+        if closed {
+            return;
+        }
+        // One check covers every wake queued so far.
+        while wake.try_recv().is_ok() {}
         let Some(inner) = weak_inner.upgrade() else {
             return;
         };
         if !inner.running.load(Ordering::Acquire) {
             return;
         }
-        let remote_reconnect = {
-            let target = inner.target.lock();
-            match &*target {
-                DaemonTarget::Remote {
-                    client,
-                    address,
-                    token,
-                } if client.is_disconnected() => Some((
-                    client.clone(),
-                    address.clone(),
-                    token.clone(),
-                    client.last_sequences(),
-                )),
-                _ => None,
-            }
+        retry = match check_daemon(&inner, &mut active_stamp, watch_for_rebuilds) {
+            Check::Settled => None,
+            Check::Retry => Some(retry.map_or(MIN_RETRY_INTERVAL, |previous| {
+                (previous * 2).min(MAX_RETRY_INTERVAL)
+            })),
         };
-        if let Some((disconnected, address, token, resume_from)) = remote_reconnect {
-            let _restart = inner.restart.lock();
-            let still_current = matches!(
-                &*inner.target.lock(),
-                DaemonTarget::Remote { client, .. }
-                    if client.same_connection(&disconnected) && client.is_disconnected()
-            );
-            if !still_current {
-                continue;
-            }
-            let Ok(replacement) =
-                DaemonClient::connect_with_resume(&address, token.clone(), resume_from)
-            else {
-                continue;
-            };
-            *inner.target.lock() = DaemonTarget::Remote {
-                client: replacement.clone(),
+    }
+}
+
+enum Check {
+    /// Nothing to do until the next wake.
+    Settled,
+    /// The daemon is unreachable and the attempt to fix it failed; try again
+    /// after a backoff.
+    Retry,
+}
+
+/// What [`check_daemon`] reads of a local target.
+struct LocalState {
+    /// The process exited (or a restart is pending), or the binary changed.
+    needs_restart: bool,
+    connection_closed: bool,
+    observed_stamp: Option<ExecutableStamp>,
+}
+
+fn local_state(
+    inner: &SupervisorInner,
+    executable: &Path,
+    active_stamp: Option<ExecutableStamp>,
+    watch_for_rebuilds: bool,
+) -> Option<LocalState> {
+    let (process_exited, connection_closed) = match &mut *inner.target.lock() {
+        DaemonTarget::Local(process) => (process.has_exited(), process.client.is_disconnected()),
+        DaemonTarget::Restarting(_) => (true, true),
+        DaemonTarget::Remote { .. } => return None,
+    };
+    let observed_stamp = watch_for_rebuilds
+        .then(|| ExecutableStamp::read(executable).ok())
+        .flatten();
+    let executable_changed = observed_stamp.is_some_and(|observed| Some(observed) != active_stamp);
+    Some(LocalState {
+        needs_restart: process_exited || executable_changed,
+        connection_closed,
+        observed_stamp,
+    })
+}
+
+fn check_daemon(
+    inner: &SupervisorInner,
+    active_stamp: &mut Option<ExecutableStamp>,
+    watch_for_rebuilds: bool,
+) -> Check {
+    let remote_reconnect = {
+        let target = inner.target.lock();
+        match &*target {
+            DaemonTarget::Remote {
+                client,
                 address,
                 token,
-            };
-            inner
-                .client_updates
-                .lock()
-                .retain(|subscriber| subscriber.send(replacement.clone()).is_ok());
-            continue;
+            } if client.is_disconnected() => Some((
+                client.clone(),
+                address.clone(),
+                token.clone(),
+                client.last_sequences(),
+            )),
+            _ => None,
         }
-        let process_exited = match &mut *inner.target.lock() {
-            DaemonTarget::Local(process) => process.has_exited(),
-            DaemonTarget::Restarting(_) => true,
-            DaemonTarget::Remote { .. } => continue,
-        };
-        let Some(executable) = inner.executable.as_ref() else {
-            return;
-        };
-        let observed_stamp = ExecutableStamp::read(executable).ok();
-        let executable_changed = watch_for_rebuilds
-            && observed_stamp.is_some_and(|observed| Some(observed) != active_stamp);
-        if !process_exited && !executable_changed {
-            continue;
-        }
+    };
+    if let Some((disconnected, address, token, resume_from)) = remote_reconnect {
         let _restart = inner.restart.lock();
-        let Some(exposure) = inner.exposure.lock().clone() else {
-            return;
+        let still_current = matches!(
+            &*inner.target.lock(),
+            DaemonTarget::Remote { client, .. }
+                if client.same_connection(&disconnected) && client.is_disconnected()
+        );
+        if !still_current {
+            return Check::Settled;
+        }
+        let Ok(replacement) =
+            DaemonClient::connect_with_resume(&address, token.clone(), resume_from)
+        else {
+            return Check::Retry;
         };
-        match replace_local_daemon(&inner, executable, &exposure) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("could not restart rebuilt Waku daemon: {error:#}");
-                continue;
-            }
-        }
-        queue_settings_refresh(&inner);
-        if let Some(observed_stamp) = observed_stamp {
-            active_stamp = Some(observed_stamp);
-        }
-        drop(_restart);
-        drop(inner);
+        inner.watch_client(&replacement);
+        *inner.target.lock() = DaemonTarget::Remote {
+            client: replacement.clone(),
+            address,
+            token,
+        };
+        inner
+            .client_updates
+            .lock()
+            .retain(|subscriber| subscriber.send(replacement.clone()).is_ok());
+        return Check::Settled;
     }
+    let Some(executable) = inner.executable.as_deref() else {
+        return Check::Settled;
+    };
+    let Some(state) = local_state(inner, executable, *active_stamp, watch_for_rebuilds) else {
+        return Check::Settled;
+    };
+    if !state.needs_restart {
+        // Without an exit thread a closed connection is the only sign of
+        // exit, and it can arrive just before the process is gone.
+        return if cfg!(not(unix)) && state.connection_closed {
+            Check::Retry
+        } else {
+            Check::Settled
+        };
+    }
+    let _restart = inner.restart.lock();
+    // `reconfigure` may have replaced the daemon while this waited for the
+    // lock (its old process's exit is what woke us), so look again.
+    let Some(state) = local_state(inner, executable, *active_stamp, watch_for_rebuilds)
+        .filter(|state| state.needs_restart)
+    else {
+        return Check::Settled;
+    };
+    let Some(exposure) = inner.exposure.lock().clone() else {
+        return Check::Settled;
+    };
+    if let Err(error) = replace_local_daemon(inner, executable, &exposure) {
+        eprintln!("could not restart rebuilt Waku daemon: {error:#}");
+        return Check::Retry;
+    }
+    queue_settings_refresh(inner);
+    if let Some(observed_stamp) = state.observed_stamp {
+        *active_stamp = Some(observed_stamp);
+    }
+    Check::Settled
 }
 
 fn replace_local_daemon(
@@ -616,6 +785,7 @@ fn replace_local_daemon(
     // already released so UI actions never block behind process teardown.
     drop(previous);
     let replacement = DaemonProcess::spawn_configured(executable, exposure.clone())?;
+    inner.watch_process(&replacement);
     let client = replacement.client();
     *inner.target.lock() = DaemonTarget::Local(replacement);
     inner
@@ -678,7 +848,7 @@ fn persist_settings(
                 }
             }
             drop(inner);
-            std::thread::sleep(REBUILD_POLL_INTERVAL);
+            std::thread::sleep(SETTINGS_RETRY_INTERVAL);
         }
     }
 }

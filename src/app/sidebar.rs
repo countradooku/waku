@@ -249,6 +249,34 @@ fn sidebar_session_timestamp(session: &AgentSession) -> u64 {
     session.last_reply_at.unwrap_or(session.created_at)
 }
 
+/// Everything one sidebar row (and the row order) reads from its session, at
+/// the granularity the row draws it. The event pump compares this across a
+/// drain to decide whether streaming touched the sidebar at all: text and
+/// reasoning deltas move `updated_at` and the transcript but none of these.
+///
+/// Time-derived labels ("Working for 12s", "5m") are not in here; they move
+/// with the clock, not with events, and the time-label wake repaints them.
+pub(super) fn sidebar_session_fingerprint(session: &AgentSession) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    session.id.hash(&mut hasher);
+    session.project_id.hash(&mut hasher);
+    session.has_started().hash(&mut hasher);
+    (session.status as u8).hash(&mut hasher);
+    session.display_title().hash(&mut hasher);
+    sidebar_session_timestamp(session).hash(&mut hasher);
+    session.last_reply_at.hash(&mut hasher);
+    persisted_sidebar_branch_label(&session.workspace).hash(&mut hasher);
+    matches!(&session.workspace, SessionWorkspace::Local).hash(&mut hasher);
+    session
+        .turns
+        .last()
+        .map(|turn| (turn.status as u8, turn.started_at))
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
 fn sort_sidebar_sessions(sessions: &mut Vec<&AgentSession>, ordering: SidebarOrdering) {
     match ordering {
         SidebarOrdering::Newest => {
@@ -2349,6 +2377,66 @@ impl Waku {
                             .child(tr_cow!("onboarding.question_mark"))
                     }),
             )
+    }
+}
+
+impl Waku {
+    /// The sidebar as plain rows for the next launch's shell
+    /// (`crate::startup::snapshot`), or `None` when the task state never
+    /// loaded and the rows would describe a placeholder. Reuses the rows the
+    /// sidebar itself last built; one pass over at most `MAX_ROWS` of them.
+    pub(crate) fn startup_snapshot(&self) -> Option<crate::startup::snapshot::SidebarSnapshot> {
+        use crate::startup::snapshot::{MAX_ROWS, ShellSettings, SidebarSnapshot, SnapshotRow};
+
+        if !self.store.task_state_loaded() {
+            return None;
+        }
+        let rows = self.sidebar_rows_cached(Local::now().date_naive(), unix_time());
+        let selected = self
+            .pending_session_activation
+            .map(|pending| pending.session_id)
+            .or(self.state.selected_session);
+        let rows = rows
+            .iter()
+            .filter_map(|row| match *row {
+                SidebarRow::Search | SidebarRow::ShowMore(_) => None,
+                SidebarRow::GroupSpacer => Some(SnapshotRow::Spacer),
+                SidebarRow::Header(group) => Some(SnapshotRow::Header {
+                    label: match group {
+                        SidebarGroup::Updated(group) => group.label(),
+                        SidebarGroup::Project(project_id) => self
+                            .state
+                            .projects
+                            .iter()
+                            .find(|project| project.id == project_id)
+                            .map(Project::display_name)
+                            .unwrap_or_else(|| tr!("project.no_project_name")),
+                        SidebarGroup::Projectless => tr!("project.no_project_name"),
+                    },
+                }),
+                SidebarRow::Session(session_id) => self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| SnapshotRow::Session {
+                        title: localized_session_title(session),
+                        selected: selected == Some(session_id),
+                    }),
+            })
+            .take(MAX_ROWS)
+            .collect();
+        Some(SidebarSnapshot::new(
+            crate::startup::snapshot::daemon_key(),
+            ShellSettings {
+                theme: self.state.theme,
+                language: self.state.language,
+                ui_font_size: self.state.ui_font_size,
+                sidebar_visible: self.sidebar_visible,
+                sidebar_width: self.sidebar_width,
+            },
+            rows,
+        ))
     }
 }
 

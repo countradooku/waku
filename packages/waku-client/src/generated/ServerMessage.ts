@@ -2,4 +2,8 @@
 import type { ResponseOutcome } from "./ResponseOutcome";
 import type { SequencedEvent } from "./SequencedEvent";
 
-export type ServerMessage = { "type": "hello", protocolVersion: number, daemonVersion: string, } | { "type": "rejected", message: string, } | { "type": "response", requestId: string, outcome: ResponseOutcome, } | { "type": "event" } & SequencedEvent | { "type": "taskStateChanged", revision: number, } | { "type": "shuttingDown" };
+export type ServerMessage = { "type": "hello", protocolVersion: number, daemonVersion: string,
+/**
+ * The daemon agreed to binary frames for bulk bytes.
+ */
+binaryFrames?: boolean, } | { "type": "rejected", message: string, } | { "type": "response", requestId: string, outcome: ResponseOutcome, } | { "type": "event" } & SequencedEvent | { "type": "taskStateChanged", revision: number, } | { "type": "shuttingDown" };

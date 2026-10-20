@@ -2,6 +2,9 @@ _version: 1
 
 diff.ignore_whitespace: 空白の変更を無視
 
+startup.daemon_failed: Waku のデーモンを起動できませんでした
+startup.daemon_failed_hint: Waku を終了して開き直すと再試行します。
+
 commit.pull: プル（早送りのみ）
 commit.pulling: プル中…
 commit.pulled: プルしました
@@ -173,6 +176,8 @@ settings.code_font_size: コードのフォントサイズ
 settings.code_font_size_description: ファイルエディタ、差分表示、コードブロック、ツール出力の文字サイズ
 settings.render_math: 数式を描画
 settings.render_math_description: Markdown の数式を整形して表示します。オフにすると LaTeX ソースを表示します。
+settings.animate_panels: パネルをアニメーション
+settings.animate_panels_description: サイドバーとサイドパネルをスライドして開閉します。オフにすると即座に表示します。
 settings.theme_system: システム
 settings.theme_light: ライト
 settings.theme_dark: ダーク

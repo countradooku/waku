@@ -22,6 +22,11 @@ use waku_bench_daemon::timeline::{BUILTIN_NAMES, Timeline};
 use waku_bench_daemon::{autoplay, generate};
 use waku_protocol::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, decode_enum};
 
+/// The real daemon's allocator (`crates/waku-daemon/src/main.rs`), so the
+/// bench daemon's CPU and memory stay comparable to it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const USAGE: &str = "\
 usage:
   waku-bench-daemon [serve] [options]   replay timelines to a connected Waku desktop
@@ -309,7 +314,7 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 
 /// Ctrl-C and SIGTERM stop the server cleanly so the summary still prints.
-fn install_signal_handlers(shutdown: Arc<AtomicBool>) {
+fn install_signal_handlers(shutdown: waku_core::ShutdownSignal) {
     #[cfg(unix)]
     unsafe {
         let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
@@ -319,9 +324,9 @@ fn install_signal_handlers(shutdown: Arc<AtomicBool>) {
     let _ = std::thread::Builder::new()
         .name("waku-bench-daemon-signals".into())
         .spawn(move || {
-            while !shutdown.load(Ordering::Acquire) {
+            while !shutdown.is_triggered() {
                 if SIGNALED.load(Ordering::Acquire) {
-                    shutdown.store(true, Ordering::Release);
+                    shutdown.trigger();
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(50));

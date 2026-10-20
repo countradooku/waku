@@ -10,20 +10,20 @@ use crate::{
 };
 use anyhow::{Context as _, anyhow, bail};
 use parking_lot::Mutex;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::attachments::AttachmentStore;
-use crate::computer_use::{ComputerTarget, ComputerUsePhase, ComputerUseState};
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::model::{
-    ActivityKind, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, PermissionOption,
-    Project, ProviderKind, ProviderResumeCursor, SessionStatus,
+    AgentSession, Checkpoint, CheckpointStatus, DriverEvent, Project, ProviderKind,
+    ProviderResumeCursor, SessionStatus,
 };
 use crate::persistence::{ComposerDraftStore, PersistedState, StateStore};
 use crate::settings::DaemonSettingsStore;
+use waku_protocol::event_to_wire;
 use waku_protocol::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
 
 /// How many fully hydrated transcripts the daemon keeps resident.
@@ -680,6 +680,20 @@ impl Backend for WakuBackend {
             Command::ReadAttachment { reference, path } => Ok(ResponsePayload::BlobData {
                 bytes: self.attachments.read_file(&reference, &path)?,
             }),
+            Command::LocateBlob { reference } => {
+                let path = self
+                    .task_store
+                    .blobs()
+                    .path_for(&reference)
+                    .ok_or_else(|| anyhow!("invalid blob reference"))?;
+                if !path.is_file() {
+                    bail!("blob {reference} does not exist");
+                }
+                Ok(ResponsePayload::BlobLocation { path })
+            }
+            Command::LocateAttachment { reference, path } => Ok(ResponsePayload::BlobLocation {
+                path: self.attachments.locate_file(&reference, &path)?,
+            }),
             Command::SweepBlobs => {
                 self.task_store.blob_sweep()();
                 Ok(ResponsePayload::Ack)
@@ -801,12 +815,9 @@ impl Backend for WakuBackend {
                     .spawn(move || {
                         while let Ok(event) = event_receiver.recv() {
                             let wire = event_to_wire(event).unwrap_or_else(|error| {
-                                WireDriverEvent::new(
-                                    "error",
-                                    Value::String(format!(
-                                        "could not encode daemon event: {error}"
-                                    )),
-                                )
+                                WireDriverEvent::Error(format!(
+                                    "could not encode daemon event: {error}"
+                                ))
                             });
                             if events.send(wire).is_err() {
                                 break;
@@ -1799,6 +1810,8 @@ fn handle_driver_command(
         | Command::ImportPathAttachment { .. }
         | Command::ReadBlob { .. }
         | Command::ReadAttachment { .. }
+        | Command::LocateBlob { .. }
+        | Command::LocateAttachment { .. }
         | Command::SweepBlobs
         | Command::ForkSessionFromResponse { .. }
         | Command::RewindSessionToMessage { .. }
@@ -1834,274 +1847,10 @@ pub fn encode_enum<T: Serialize>(value: T) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("protocol enum did not serialize as a string"))
 }
 
-fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
-    let (kind, payload) = match event {
-        DriverEvent::RuntimeEventCursorAdvanced(_) => {
-            bail!("client-only runtime cursors cannot be sent by the daemon")
-        }
-        DriverEvent::Connected { provider_cursor } => {
-            ("connected", serde_json::to_value(provider_cursor)?)
-        }
-        DriverEvent::AgentPresetSelected(preset) => {
-            ("agentPresetSelected", serde_json::to_value(preset)?)
-        }
-        DriverEvent::AutoTitleUpdated(title) => ("autoTitleUpdated", serde_json::to_value(title)?),
-        DriverEvent::AvailableCommands(commands) => {
-            ("availableCommands", serde_json::to_value(commands)?)
-        }
-        DriverEvent::TurnStarted => ("turnStarted", Value::Null),
-        DriverEvent::TurnParked => ("turnParked", Value::Null),
-        DriverEvent::TextDelta(text) => ("textDelta", Value::String(text)),
-        DriverEvent::ReasoningDelta(text) => ("reasoningDelta", Value::String(text)),
-        DriverEvent::Activity {
-            id,
-            kind,
-            title,
-            detail,
-            complete,
-        } => (
-            "activity",
-            json!({
-                "id": id,
-                "kind": kind,
-                "title": title,
-                "detail": detail,
-                "complete": complete,
-            }),
-        ),
-        DriverEvent::RichActivity(activity) => ("richActivity", serde_json::to_value(activity)?),
-        DriverEvent::BackgroundWork(work) => ("backgroundWork", serde_json::to_value(work)?),
-        DriverEvent::Permission {
-            request_id,
-            title,
-            detail,
-            options,
-        } => (
-            "permission",
-            json!({
-                "requestId": request_id,
-                "title": title,
-                "detail": detail,
-                "options": options,
-            }),
-        ),
-        DriverEvent::UserInputRequested {
-            request_id,
-            questions,
-        } => (
-            "userInputRequested",
-            json!({
-                "requestId": request_id,
-                "questions": questions,
-            }),
-        ),
-        DriverEvent::ComputerUseUpdated(state) => (
-            "computerUseUpdated",
-            serde_json::to_value(ComputerUseWire {
-                target: state.target,
-                phase: state.phase,
-                visible: state.visible,
-                image_url: state.image_url,
-            })?,
-        ),
-        DriverEvent::PromptSubmitted {
-            message,
-            turn_id,
-            message_id,
-        } => (
-            "promptSubmitted",
-            json!({ "message": message, "turnId": turn_id, "messageId": message_id }),
-        ),
-        DriverEvent::SteerAccepted { message } => ("steerAccepted", json!({ "message": message })),
-        DriverEvent::SteerRejected { message, reason } => (
-            "steerRejected",
-            json!({ "message": message, "reason": reason }),
-        ),
-        DriverEvent::UsageUpdated {
-            context_tokens,
-            context_window,
-        } => (
-            "usageUpdated",
-            json!({
-                "contextTokens": context_tokens,
-                "contextWindow": context_window,
-            }),
-        ),
-        DriverEvent::PlanUsageUpdated(usage) => ("planUsageUpdated", serde_json::to_value(usage)?),
-        DriverEvent::GoalUpdated(goal) => ("goalUpdated", serde_json::to_value(goal)?),
-        DriverEvent::TurnFinished { success, summary } => (
-            "turnFinished",
-            json!({ "success": success, "summary": summary }),
-        ),
-        DriverEvent::Error(error) => ("error", Value::String(error)),
-        DriverEvent::ProcessExited => ("processExited", Value::Null),
-    };
-    Ok(WireDriverEvent::new(kind, payload))
-}
-
-pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
-    let payload = event.payload;
-    Ok(match event.kind.as_str() {
-        "connected" => DriverEvent::Connected {
-            provider_cursor: serde_json::from_value(payload)?,
-        },
-        "agentPresetSelected" => DriverEvent::AgentPresetSelected(serde_json::from_value(payload)?),
-        "autoTitleUpdated" => DriverEvent::AutoTitleUpdated(serde_json::from_value(payload)?),
-        "availableCommands" => DriverEvent::AvailableCommands(serde_json::from_value(payload)?),
-        "turnStarted" => DriverEvent::TurnStarted,
-        "turnParked" => DriverEvent::TurnParked,
-        "textDelta" => DriverEvent::TextDelta(serde_json::from_value(payload)?),
-        "reasoningDelta" => DriverEvent::ReasoningDelta(serde_json::from_value(payload)?),
-        "activity" => {
-            let activity: ActivityWire = serde_json::from_value(payload)?;
-            DriverEvent::Activity {
-                id: activity.id,
-                kind: activity.kind,
-                title: activity.title,
-                detail: activity.detail,
-                complete: activity.complete,
-            }
-        }
-        "richActivity" => DriverEvent::RichActivity(serde_json::from_value(payload)?),
-        "backgroundWork" => DriverEvent::BackgroundWork(serde_json::from_value(payload)?),
-        "permission" => {
-            let permission: PermissionWire = serde_json::from_value(payload)?;
-            DriverEvent::Permission {
-                request_id: permission.request_id,
-                title: permission.title,
-                detail: permission.detail,
-                options: permission.options,
-            }
-        }
-        "userInputRequested" => {
-            let request: UserInputWire = serde_json::from_value(payload)?;
-            DriverEvent::UserInputRequested {
-                request_id: request.request_id,
-                questions: request.questions,
-            }
-        }
-        "computerUseUpdated" => {
-            let state: ComputerUseWire = serde_json::from_value(payload)?;
-            DriverEvent::ComputerUseUpdated(ComputerUseState {
-                target: state.target,
-                phase: state.phase,
-                visible: state.visible,
-                image_url: state.image_url,
-            })
-        }
-        "promptSubmitted" => {
-            let submitted: SubmittedPromptWire = serde_json::from_value(payload)?;
-            DriverEvent::PromptSubmitted {
-                message: submitted.message,
-                turn_id: submitted.turn_id,
-                message_id: submitted.message_id,
-            }
-        }
-        "steerAccepted" => {
-            let steer: AcceptedSteerWire = serde_json::from_value(payload)?;
-            DriverEvent::SteerAccepted {
-                message: steer.message,
-            }
-        }
-        "steerRejected" => {
-            let steer: RejectedSteerWire = serde_json::from_value(payload)?;
-            DriverEvent::SteerRejected {
-                message: steer.message,
-                reason: steer.reason,
-            }
-        }
-        "usageUpdated" => {
-            let usage: UsageWire = serde_json::from_value(payload)?;
-            DriverEvent::UsageUpdated {
-                context_tokens: usage.context_tokens,
-                context_window: usage.context_window,
-            }
-        }
-        "planUsageUpdated" => DriverEvent::PlanUsageUpdated(serde_json::from_value(payload)?),
-        "goalUpdated" => DriverEvent::GoalUpdated(serde_json::from_value(payload)?),
-        "turnFinished" => {
-            let finished: TurnFinishedWire = serde_json::from_value(payload)?;
-            DriverEvent::TurnFinished {
-                success: finished.success,
-                summary: finished.summary,
-            }
-        }
-        "error" => DriverEvent::Error(serde_json::from_value(payload)?),
-        "processExited" => DriverEvent::ProcessExited,
-        kind => bail!("daemon sent an unsupported driver event {kind:?}"),
-    })
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SubmittedPromptWire {
-    message: String,
-    turn_id: Uuid,
-    message_id: Uuid,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ActivityWire {
-    id: Option<String>,
-    kind: ActivityKind,
-    title: String,
-    detail: Option<String>,
-    complete: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PermissionWire {
-    request_id: String,
-    title: String,
-    detail: String,
-    options: Vec<PermissionOption>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UserInputWire {
-    request_id: String,
-    questions: Vec<crate::model::UserInputQuestion>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ComputerUseWire {
-    target: Option<ComputerTarget>,
-    phase: ComputerUsePhase,
-    visible: bool,
-    image_url: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AcceptedSteerWire {
-    message: String,
-}
-
-#[derive(Deserialize)]
-struct RejectedSteerWire {
-    message: String,
-    reason: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UsageWire {
-    context_tokens: Option<u64>,
-    context_window: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct TurnFinishedWire {
-    success: bool,
-    summary: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waku_protocol::event_from_wire;
 
     #[test]
     fn stale_runtime_projection_keeps_newer_transcript_cursor() {
@@ -2209,7 +1958,7 @@ mod tests {
     #[test]
     fn wire_event_round_trip_preserves_ordered_delta_payload() {
         let wire = event_to_wire(DriverEvent::TextDelta("hello".into())).unwrap();
-        assert_eq!(wire.kind, "textDelta");
+        assert_eq!(wire.kind(), "textDelta");
         assert!(matches!(
             event_from_wire(wire).unwrap(),
             DriverEvent::TextDelta(text) if text == "hello"
@@ -2226,10 +1975,10 @@ mod tests {
             message_id,
         })
         .unwrap();
-        assert_eq!(wire.kind, "promptSubmitted");
-        assert_eq!(wire.payload["message"], "ship it");
-        assert_eq!(wire.payload["turnId"], turn_id.to_string());
-        assert_eq!(wire.payload["messageId"], message_id.to_string());
+        assert_eq!(wire.kind(), "promptSubmitted");
+        assert_eq!(wire.payload()["message"], "ship it");
+        assert_eq!(wire.payload()["turnId"], turn_id.to_string());
+        assert_eq!(wire.payload()["messageId"], message_id.to_string());
         assert!(matches!(
             event_from_wire(wire).unwrap(),
             DriverEvent::PromptSubmitted { message, turn_id: decoded_turn, message_id: decoded_message }

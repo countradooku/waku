@@ -34,13 +34,13 @@ function fixture(options: { attached?: boolean } = {}) {
   };
   let sequence = 0;
   let history = createSession('project', 'codex', false, clock);
-  function event(kind: string, payload: SequencedEvent['event']['payload']): SequencedEvent {
+  function event(kind: string, payload: unknown): SequencedEvent {
     return {
       sessionId: history.id,
       runtimeId: 'runtime',
       epoch: 'epoch',
       sequence: ++sequence,
-      event: { kind, payload },
+      event: { kind, payload } as SequencedEvent['event'],
     };
   }
   history = beginTurn(history, 'Previous request', clock);
@@ -121,7 +121,7 @@ function fixture(options: { attached?: boolean } = {}) {
   });
   return {
     history, skeleton, hydration, commands, client, queryClient, key, runtime,
-    emit(kind: string, payload: SequencedEvent['event']['payload']) {
+    emit(kind: string, payload: unknown) {
       if (!listener) throw new Error('The runtime is not subscribed');
       listener(event(kind, payload));
     },

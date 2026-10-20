@@ -89,13 +89,19 @@ fn review_diff(c: &mut Criterion) {
 
 fn terminal(c: &mut Criterion) {
     let output = fixtures::terminal_output(TERMINAL_COLUMNS, TERMINAL_ROWS * 3);
-    let grid = support::TerminalSnapshotBench::new(TERMINAL_COLUMNS, TERMINAL_ROWS, &output);
+    let mut grid = support::TerminalSnapshotBench::new(TERMINAL_COLUMNS, TERMINAL_ROWS, &output);
     let mut group = c.benchmark_group("terminal");
     group.throughput(Throughput::Elements(
         (TERMINAL_COLUMNS * TERMINAL_ROWS) as u64,
     ));
+    // Every row rebuilt: a frame after a scroll, resize or theme change.
     group.bench_function("snapshot_200x60", |b| {
-        b.iter(|| black_box(&grid).snapshot());
+        b.iter(|| black_box(&mut grid).snapshot());
+    });
+    // Output rewrote one row in place: parse the edit, rebuild that row only.
+    group.throughput(Throughput::Elements(TERMINAL_COLUMNS as u64));
+    group.bench_function("incremental_1_row_200x60", |b| {
+        b.iter(|| black_box(&mut grid).incremental());
     });
     group.finish();
 }

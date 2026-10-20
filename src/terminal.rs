@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,24 +9,26 @@ use std::time::Duration;
 use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
 use alacritty_terminal::event::{Event, EventListener, VoidListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
-use alacritty_terminal::grid::{BidirectionalIterator, Dimensions, Scroll};
+use alacritty_terminal::grid::{BidirectionalIterator, Dimensions, Row, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point as TerminalPoint, Side};
-use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::tty::{self, Shell};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontFallbacks,
-    FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task, TextRun,
-    UnderlineStyle, Window, canvas, div, font, px, rgb,
+    App, AppContext, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId, FocusHandle,
+    Focusable, FontFallbacks, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId,
+    InteractiveElement, IntoElement, KeyDownEvent, Keystroke, LayoutId, LineLayout, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine,
+    SharedString, StrikethroughStyle, Style, Styled, Subscription, Task, TextAlign, TextRun,
+    UnderlineStyle, Window, canvas, div, fill, font, point, px, relative, rgb, size,
 };
 use parking_lot::Mutex;
 
@@ -84,6 +86,19 @@ fn terminal_font() -> gpui::Font {
     terminal_font
 }
 
+/// The four face variants a terminal run can use, built once: regular, bold,
+/// italic, bold italic. Indexed by [`TerminalRunStyle::font_index`].
+static TERMINAL_FONTS: LazyLock<[gpui::Font; 4]> = LazyLock::new(|| {
+    let regular = terminal_font();
+    let mut bold = regular.clone();
+    bold.weight = FontWeight::BOLD;
+    let mut italic = regular.clone();
+    italic.style = FontStyle::Italic;
+    let mut bold_italic = bold.clone();
+    bold_italic.style = FontStyle::Italic;
+    [regular, bold, italic, bold_italic]
+});
+
 enum TerminalUiEvent {
     Title(String),
     ResetTitle,
@@ -95,6 +110,12 @@ enum TerminalUiEvent {
 #[derive(Clone)]
 struct TerminalEventProxy {
     dirty: Arc<AtomicBool>,
+    /// Wakes the view's UI task. Bounded to one slot, so a burst of PTY reads
+    /// queues at most one wakeup and the sender never blocks or allocates.
+    wakeup: smol::channel::Sender<()>,
+    /// Cleared while the view is not on screen: content changes then only set
+    /// `dirty`, and the next render picks them up through the damage state.
+    visible: Arc<AtomicBool>,
     sender: Arc<OnceLock<EventLoopSender>>,
     ui_events: Sender<TerminalUiEvent>,
     window_size: Arc<Mutex<WindowSize>>,
@@ -109,27 +130,36 @@ impl TerminalEventProxy {
             let _ = sender.send(Msg::Input(bytes.into()));
         }
     }
+
+    /// Grid content changed: mark it and wake the view only if it is shown.
+    fn content_changed(&self) {
+        self.dirty.store(true, Ordering::Release);
+        if self.visible.load(Ordering::SeqCst) {
+            let _ = self.wakeup.try_send(());
+        }
+    }
+
+    /// Queue an event the view must handle even while hidden (titles,
+    /// clipboard requests the shell is waiting on, exit).
+    fn send_ui_event(&self, event: TerminalUiEvent) {
+        let _ = self.ui_events.send(event);
+        let _ = self.wakeup.try_send(());
+    }
 }
 
 impl EventListener for TerminalEventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {
-                self.dirty.store(true, Ordering::Release);
+                self.content_changed();
             }
-            Event::Title(title) => {
-                let _ = self.ui_events.send(TerminalUiEvent::Title(title));
-            }
-            Event::ResetTitle => {
-                let _ = self.ui_events.send(TerminalUiEvent::ResetTitle);
-            }
+            Event::Title(title) => self.send_ui_event(TerminalUiEvent::Title(title)),
+            Event::ResetTitle => self.send_ui_event(TerminalUiEvent::ResetTitle),
             Event::ClipboardStore(_, text) => {
-                let _ = self.ui_events.send(TerminalUiEvent::ClipboardStore(text));
+                self.send_ui_event(TerminalUiEvent::ClipboardStore(text));
             }
             Event::ClipboardLoad(_, formatter) => {
-                let _ = self
-                    .ui_events
-                    .send(TerminalUiEvent::ClipboardLoad(formatter));
+                self.send_ui_event(TerminalUiEvent::ClipboardLoad(formatter));
             }
             Event::PtyWrite(text) => self.write_pty(text.into_bytes()),
             Event::ColorRequest(index, formatter) => {
@@ -141,8 +171,8 @@ impl EventListener for TerminalEventProxy {
             }
             Event::Bell => {}
             Event::Exit | Event::ChildExit(_) => {
-                let _ = self.ui_events.send(TerminalUiEvent::Exited);
                 self.dirty.store(true, Ordering::Release);
+                self.send_ui_event(TerminalUiEvent::Exited);
             }
         }
     }
@@ -171,6 +201,7 @@ struct TerminalSession {
     term: Arc<FairMutex<Term<TerminalEventProxy>>>,
     sender: EventLoopSender,
     dirty: Arc<AtomicBool>,
+    visible: Arc<AtomicBool>,
     ui_events: Receiver<TerminalUiEvent>,
     window_size: Arc<Mutex<WindowSize>>,
     grid_size: (usize, usize),
@@ -179,7 +210,12 @@ struct TerminalSession {
 }
 
 impl TerminalSession {
-    fn new(working_directory: &Path, columns: usize, rows: usize) -> Result<Self> {
+    fn new(
+        working_directory: &Path,
+        columns: usize,
+        rows: usize,
+        wakeup: smol::channel::Sender<()>,
+    ) -> Result<Self> {
         let columns = columns.max(TERMINAL_MIN_COLUMNS);
         let rows = rows.max(TERMINAL_MIN_ROWS);
         let window_size = WindowSize {
@@ -190,6 +226,7 @@ impl TerminalSession {
         };
         let shared_window_size = Arc::new(Mutex::new(window_size));
         let dirty = Arc::new(AtomicBool::new(true));
+        let visible = Arc::new(AtomicBool::new(true));
         let sender_slot = Arc::new(OnceLock::new());
         let dark_theme = Arc::new(AtomicBool::new(true));
         let (ui_event_tx, ui_events) = unbounded();
@@ -197,6 +234,8 @@ impl TerminalSession {
             .map_err(|error| anyhow::anyhow!("compile terminal link regex: {error}"))?;
         let proxy = TerminalEventProxy {
             dirty: dirty.clone(),
+            wakeup,
+            visible: visible.clone(),
             sender: sender_slot.clone(),
             ui_events: ui_event_tx,
             window_size: shared_window_size.clone(),
@@ -244,6 +283,7 @@ impl TerminalSession {
             term,
             sender,
             dirty,
+            visible,
             ui_events,
             window_size: shared_window_size,
             grid_size: (columns, rows),
@@ -306,139 +346,359 @@ impl TerminalSession {
         Some(TerminalLink { value, bounds })
     }
 
+    /// Bring `grid` up to date with the terminal, rebuilding only the rows
+    /// that changed since the previous call.
     fn snapshot(
         &self,
+        grid: &mut TerminalGrid,
         theme: Theme,
         selection_color: Hsla,
         cursor_style: TerminalCursorStyle,
         hovered_link: Option<&Match>,
-    ) -> TerminalSnapshot {
+    ) {
         self.dark_theme.store(theme.is_dark, Ordering::Release);
-        let term = self.term.lock();
-        snapshot_term(
-            &term,
+        let mut term = self.term.lock();
+        grid.update(
+            &mut term,
             self.grid_size,
             theme,
             selection_color,
             cursor_style,
             hovered_link,
-        )
+        );
     }
 }
 
-/// Paint-ready rows for the visible grid. Pure over the terminal state, so the
-/// per-frame cost can be benchmarked without a PTY (see [`SnapshotBench`]).
-fn snapshot_term<T: EventListener>(
-    term: &Term<T>,
-    (columns, rows): (usize, usize),
+/// Grid-wide inputs to row colors that alacritty's damage does not track. Any
+/// change to them invalidates every cached row.
+#[derive(Clone, Copy, PartialEq)]
+struct GridStyle {
+    text: Hsla,
+    background: Hsla,
+    selection: Hsla,
+    is_dark: bool,
+}
+
+/// One visible row: its text and styled runs, plus the shaped line and merged
+/// background quads derived from them the first time the row is painted.
+#[derive(Default)]
+struct GridRow {
+    text: String,
+    runs: Vec<TerminalRun>,
+    /// The row must be rebuilt from the terminal before it is painted again.
+    stale: bool,
+    paint: Option<RowPaint>,
+}
+
+struct RowPaint {
+    line: ShapedLine,
+    /// Merged non-default backgrounds as `(left, right, color)`, relative to
+    /// the row origin.
+    backgrounds: Vec<(Pixels, Pixels, Hsla)>,
+}
+
+/// Paint-ready rows for the visible grid, kept across frames.
+///
+/// A row is rebuilt only when alacritty's damage reports it changed, or when
+/// something damage does not cover touches it: the selection, the hovered
+/// link, the cursor style, the scroll position or the theme. Pure over the
+/// terminal state, so its cost is benchmarked without a PTY (see
+/// [`SnapshotBench`]).
+struct TerminalGrid {
+    columns: usize,
+    rows: Vec<GridRow>,
+    style: Option<GridStyle>,
+    display_offset: usize,
+    selection: Option<SelectionRange>,
+    hovered_link: Option<Match>,
+    /// Viewport row, column and drawn style of the cursor as last built.
+    cursor: Option<(i32, usize, TerminalCursorStyle)>,
+    outline_cursor: Option<(usize, usize)>,
+    /// Rows the last [`TerminalGrid::update`] rebuilt: a frame's grid cost is
+    /// proportional to this, not to the grid size.
+    rebuilt_rows: usize,
+}
+
+impl TerminalGrid {
+    fn new() -> Self {
+        Self {
+            columns: 0,
+            rows: Vec::new(),
+            style: None,
+            display_offset: 0,
+            selection: None,
+            hovered_link: None,
+            cursor: None,
+            outline_cursor: None,
+            rebuilt_rows: 0,
+        }
+    }
+
+    fn invalidate_all(&mut self) {
+        for row in &mut self.rows {
+            row.stale = true;
+        }
+    }
+
+    fn invalidate_row(&mut self, row: i32) {
+        if let Some(row) = usize::try_from(row)
+            .ok()
+            .and_then(|row| self.rows.get_mut(row))
+        {
+            row.stale = true;
+        }
+    }
+
+    /// Invalidate the viewport rows that show grid lines `start..=end`.
+    fn invalidate_lines(&mut self, start: Line, end: Line) {
+        let offset = self.display_offset as i32;
+        let last = self.rows.len() as i32 - 1;
+        for row in (start.0 + offset).max(0)..=(end.0 + offset).min(last) {
+            self.rows[row as usize].stale = true;
+        }
+    }
+
+    fn update<T: EventListener>(
+        &mut self,
+        term: &mut Term<T>,
+        (columns, rows): (usize, usize),
+        theme: Theme,
+        selection_color: Hsla,
+        cursor_style: TerminalCursorStyle,
+        hovered_link: Option<&Match>,
+    ) {
+        if self.columns != columns || self.rows.len() != rows {
+            self.columns = columns;
+            self.rows.resize_with(rows, GridRow::default);
+            self.invalidate_all();
+        }
+        // Read and reset the damage on every update, so it always covers
+        // exactly the changes since the rows were last built.
+        match term.damage() {
+            TermDamage::Full => self.invalidate_all(),
+            TermDamage::Partial(lines) => {
+                for damage in lines {
+                    if let Some(row) = self.rows.get_mut(damage.line) {
+                        row.stale = true;
+                    }
+                }
+            }
+        }
+        term.reset_damage();
+
+        let style = GridStyle {
+            text: theme.text,
+            background: theme.terminal,
+            selection: selection_color,
+            is_dark: theme.is_dark,
+        };
+        if self.style != Some(style) {
+            self.style = Some(style);
+            self.invalidate_all();
+        }
+
+        let content = term.renderable_content();
+        if self.display_offset != content.display_offset {
+            self.display_offset = content.display_offset;
+            self.invalidate_all();
+        }
+        if self.selection != content.selection {
+            for range in [self.selection, content.selection].into_iter().flatten() {
+                self.invalidate_lines(range.start.line, range.end.line);
+            }
+            self.selection = content.selection;
+        }
+        if self.hovered_link.as_ref() != hovered_link {
+            let lines = [self.hovered_link.as_ref(), hovered_link]
+                .map(|link| link.map(|bounds| (bounds.start().line, bounds.end().line)));
+            for (start, end) in lines.into_iter().flatten() {
+                self.invalidate_lines(start, end);
+            }
+            self.hovered_link = hovered_link.cloned();
+        }
+
+        let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
+        let cursor_column = content.cursor.point.column.0;
+        let cursor_style = if matches!(content.cursor.shape, CursorShape::Hidden) {
+            TerminalCursorStyle::Hidden
+        } else {
+            cursor_style
+        };
+        let cursor = (cursor_row, cursor_column, cursor_style);
+        if self.cursor != Some(cursor) {
+            if let Some((row, _, _)) = self.cursor {
+                self.invalidate_row(row);
+            }
+            self.invalidate_row(cursor_row);
+            self.cursor = Some(cursor);
+        }
+        self.outline_cursor = (cursor_style == TerminalCursorStyle::Outline
+            && (0..rows as i32).contains(&cursor_row)
+            && cursor_column < columns)
+            .then_some((cursor_row as usize, cursor_column));
+
+        let context = RowContext {
+            theme,
+            selection_color,
+            colors: content.colors,
+            selection: self.selection,
+            hovered_link: self.hovered_link.as_ref(),
+            columns,
+            term_columns: term.columns(),
+        };
+        let grid = term.grid();
+        let screen_lines = term.screen_lines() as i32;
+        let display_offset = self.display_offset as i32;
+        let mut rebuilt = 0;
+        for (index, row) in self.rows.iter_mut().enumerate() {
+            if !row.stale {
+                continue;
+            }
+            let line = Line(index as i32 - display_offset);
+            let cells = (line.0 < screen_lines).then(|| &grid[line]);
+            let solid_cursor = (cursor_style == TerminalCursorStyle::Solid
+                && index as i32 == cursor_row)
+                .then_some(cursor_column);
+            context.build(row, cells, line, solid_cursor);
+            row.stale = false;
+            row.paint = None;
+            rebuilt += 1;
+        }
+        self.rebuilt_rows = rebuilt;
+        perf_count!(terminal_grid_update(rebuilt));
+    }
+}
+
+/// Everything a row rebuild reads besides the row's own cells.
+struct RowContext<'a> {
     theme: Theme,
     selection_color: Hsla,
-    cursor_style: TerminalCursorStyle,
-    hovered_link: Option<&Match>,
-) -> TerminalSnapshot {
-    let content = term.renderable_content();
-    let selection = content.selection;
-    let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
-    let cursor_column = content.cursor.point.column.0;
-    let cursor_style = if matches!(
-        content.cursor.shape,
-        alacritty_terminal::vte::ansi::CursorShape::Hidden
+    colors: &'a Colors,
+    selection: Option<SelectionRange>,
+    hovered_link: Option<&'a Match>,
+    columns: usize,
+    term_columns: usize,
+}
+
+impl RowContext<'_> {
+    /// Rebuild `row` from the cells of grid line `line`, reusing its buffers:
+    /// each cell's character goes straight into the row string.
+    fn build(
+        &self,
+        row: &mut GridRow,
+        cells: Option<&Row<TermCell>>,
+        line: Line,
+        solid_cursor: Option<usize>,
     ) {
-        TerminalCursorStyle::Hidden
-    } else {
-        cursor_style
-    };
-    let outline_cursor = (cursor_style == TerminalCursorStyle::Outline
-        && (0..rows as i32).contains(&cursor_row)
-        && cursor_column < columns)
-        .then_some((cursor_row as usize, cursor_column));
-    let mut cells = vec![TerminalCell::blank(theme); columns * rows];
-
-    for indexed in content.display_iter {
-        let row = indexed.point.line.0 + content.display_offset as i32;
-        let column = indexed.point.column.0;
-        if row < 0 || row as usize >= rows || column >= columns {
-            continue;
-        }
-        let cell = indexed.cell;
-        let mut text = if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-            || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-            || cell.flags.contains(Flags::HIDDEN)
-        {
-            " ".to_owned()
-        } else {
-            cell.c.to_string()
+        let theme = self.theme;
+        row.text.clear();
+        row.runs.clear();
+        row.text.reserve(self.columns);
+        let selection = self
+            .selection
+            .filter(|range| range.start.line <= line && line <= range.end.line);
+        let hovered_link = self
+            .hovered_link
+            .filter(|bounds| bounds.start().line <= line && line <= bounds.end().line);
+        let blank = TerminalRunStyle {
+            foreground: theme.text,
+            background: theme.terminal,
+            bold: false,
+            italic: false,
+            underline: false,
+            strikeout: false,
         };
-        if let Some(zerowidth) = cell.zerowidth() {
-            text.extend(zerowidth);
-        }
+        // Neighbouring cells usually share colors; skip resolving them again.
+        let mut last_foreground = None;
+        let mut last_background = None;
 
-        let mut foreground = resolve_color(cell.fg, content.colors, theme, true);
-        let mut background = resolve_color(cell.bg, content.colors, theme, false);
-        if cell.flags.contains(Flags::INVERSE) {
-            std::mem::swap(&mut foreground, &mut background);
-        }
-        // `Flags::DIM_BOLD` and `Flags::BOLD_ITALIC` are unions of the
-        // individual bits, so testing them with `intersects` would also
-        // match plain bold or italic cells.
-        if cell.flags.contains(Flags::DIM) {
-            if theme.is_dark {
-                foreground.l *= 0.7;
-            } else {
-                foreground.l = 1.0 - (1.0 - foreground.l) * 0.7;
-            }
-        }
-        if selection.is_some_and(|selection| selection.contains(indexed.point)) {
-            background = selection_color;
-            foreground = theme.text;
-        }
-        if cursor_style == TerminalCursorStyle::Solid
-            && row == cursor_row
-            && column == cursor_column
-        {
-            background = theme.text;
-            foreground = theme.terminal;
-        }
-
-        cells[row as usize * columns + column] = TerminalCell {
-            text,
-            foreground,
-            background,
-            bold: cell.flags.contains(Flags::BOLD),
-            italic: cell.flags.contains(Flags::ITALIC),
-            underline: cell.flags.intersects(Flags::ALL_UNDERLINES)
-                || hovered_link.is_some_and(|bounds| bounds.contains(&indexed.point)),
-            strikeout: cell.flags.contains(Flags::STRIKEOUT),
-        };
-    }
-
-    let mut rendered_rows = Vec::with_capacity(rows);
-    for row in cells.chunks(columns) {
-        let mut text = String::new();
-        let mut runs: Vec<TerminalRun> = Vec::new();
-        for cell in row {
-            let len = cell.text.len();
-            text.push_str(&cell.text);
-            let style = TerminalRunStyle {
-                foreground: cell.foreground,
-                background: cell.background,
-                bold: cell.bold,
-                italic: cell.italic,
-                underline: cell.underline,
-                strikeout: cell.strikeout,
+        for column in 0..self.columns {
+            let Some(cell) = cells
+                .filter(|_| column < self.term_columns)
+                .map(|cells| &cells[Column(column)])
+            else {
+                row.text.push(' ');
+                push_run(&mut row.runs, 1, blank);
+                continue;
             };
-            if let Some(run) = runs.last_mut().filter(|run| run.style == style) {
-                run.len += len;
+            let start = row.text.len();
+            if cell.flags.intersects(
+                Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN,
+            ) {
+                row.text.push(' ');
             } else {
-                runs.push(TerminalRun { len, style });
+                row.text.push(cell.c);
             }
-        }
-        rendered_rows.push(TerminalRow { text, runs });
-    }
+            if let Some(zerowidth) = cell.zerowidth() {
+                row.text.extend(zerowidth);
+            }
+            let len = row.text.len() - start;
 
-    TerminalSnapshot {
-        rows: rendered_rows,
-        outline_cursor,
+            let mut foreground = resolve_cached(&mut last_foreground, cell.fg, |color| {
+                resolve_color(color, self.colors, theme, true)
+            });
+            let mut background = resolve_cached(&mut last_background, cell.bg, |color| {
+                resolve_color(color, self.colors, theme, false)
+            });
+            if cell.flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut foreground, &mut background);
+            }
+            // `Flags::DIM_BOLD` and `Flags::BOLD_ITALIC` are unions of the
+            // individual bits, so testing them with `intersects` would also
+            // match plain bold or italic cells.
+            if cell.flags.contains(Flags::DIM) {
+                if theme.is_dark {
+                    foreground.l *= 0.7;
+                } else {
+                    foreground.l = 1.0 - (1.0 - foreground.l) * 0.7;
+                }
+            }
+            let point = TerminalPoint::new(line, Column(column));
+            if selection.is_some_and(|selection| selection.contains(point)) {
+                background = self.selection_color;
+                foreground = theme.text;
+            }
+            if solid_cursor == Some(column) {
+                background = theme.text;
+                foreground = theme.terminal;
+            }
+
+            push_run(
+                &mut row.runs,
+                len,
+                TerminalRunStyle {
+                    foreground,
+                    background,
+                    bold: cell.flags.contains(Flags::BOLD),
+                    italic: cell.flags.contains(Flags::ITALIC),
+                    underline: cell.flags.intersects(Flags::ALL_UNDERLINES)
+                        || hovered_link.is_some_and(|bounds| bounds.contains(&point)),
+                    strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                },
+            );
+        }
+    }
+}
+
+fn push_run(runs: &mut Vec<TerminalRun>, len: usize, style: TerminalRunStyle) {
+    match runs.last_mut() {
+        Some(run) if run.style == style => run.len += len,
+        _ => runs.push(TerminalRun { len, style }),
+    }
+}
+
+fn resolve_cached(
+    cache: &mut Option<(Color, Hsla)>,
+    color: Color,
+    resolve: impl FnOnce(Color) -> Hsla,
+) -> Hsla {
+    match *cache {
+        Some((cached, value)) if cached == color => value,
+        _ => {
+            let value = resolve(color);
+            *cache = Some((color, value));
+            value
+        }
     }
 }
 
@@ -447,7 +707,12 @@ fn snapshot_term<T: EventListener>(
 #[doc(hidden)]
 pub struct SnapshotBench {
     term: Term<VoidListener>,
+    grid: TerminalGrid,
     grid_size: (usize, usize),
+    processor: Processor,
+    /// Rewrites one row in place; its last byte changes on every edit.
+    edit: Vec<u8>,
+    edits: u8,
 }
 
 impl SnapshotBench {
@@ -460,25 +725,50 @@ impl SnapshotBench {
         let mut term = Term::new(config, &dimensions, VoidListener);
         let mut processor: Processor = Processor::new();
         processor.advance(&mut term, output);
-        Self {
+        let mut edit = format!("\x1b[{};1H", rows / 2 + 1).into_bytes();
+        edit.extend_from_slice(b"incremental row update, frame x");
+        let mut bench = Self {
             term,
+            grid: TerminalGrid::new(),
             grid_size: (columns, rows),
-        }
+            processor,
+            edit,
+            edits: 0,
+        };
+        bench.update();
+        bench
     }
 
-    /// One frame's snapshot. Returns the styled run count so the work is
-    /// observable to the benchmark.
-    pub fn snapshot(&self) -> usize {
+    fn update(&mut self) {
         let theme = Theme::dark();
-        let snapshot = snapshot_term(
-            &self.term,
+        self.grid.update(
+            &mut self.term,
             self.grid_size,
             theme,
             theme.selection,
             TerminalCursorStyle::Solid,
             None,
         );
-        snapshot.rows.iter().map(|row| row.runs.len()).sum()
+    }
+
+    /// One full-grid rebuild, as a frame after a scroll, resize or theme
+    /// change runs. Returns the styled run count so the work is observable.
+    pub fn snapshot(&mut self) -> usize {
+        self.grid.invalidate_all();
+        self.update();
+        self.grid.rows.iter().map(|row| row.runs.len()).sum()
+    }
+
+    /// One frame after output rewrote a single row in place: parse the edit,
+    /// then update the grid. Returns the number of rows rebuilt.
+    pub fn incremental(&mut self) -> usize {
+        self.edits = (self.edits + 1) % 26;
+        if let Some(last) = self.edit.last_mut() {
+            *last = b'a' + self.edits;
+        }
+        self.processor.advance(&mut self.term, &self.edit);
+        self.update();
+        self.grid.rebuilt_rows
     }
 }
 
@@ -528,32 +818,7 @@ impl scrollbar::Scrollable for TerminalScrollbarTarget {
     }
 }
 
-#[derive(Clone)]
-struct TerminalCell {
-    text: String,
-    foreground: Hsla,
-    background: Hsla,
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    strikeout: bool,
-}
-
-impl TerminalCell {
-    fn blank(theme: Theme) -> Self {
-        Self {
-            text: " ".into(),
-            foreground: theme.text,
-            background: theme.terminal,
-            bold: false,
-            italic: false,
-            underline: false,
-            strikeout: false,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct TerminalRunStyle {
     foreground: Hsla,
     background: Hsla,
@@ -563,19 +828,33 @@ struct TerminalRunStyle {
     strikeout: bool,
 }
 
+impl TerminalRunStyle {
+    /// The shaping run for `len` bytes in this style. Backgrounds are painted
+    /// separately as merged quads, so the run carries none.
+    fn text_run(&self, len: usize) -> TextRun {
+        let font = &TERMINAL_FONTS[usize::from(self.bold) | (usize::from(self.italic) << 1)];
+        TextRun {
+            len,
+            font: font.clone(),
+            color: self.foreground,
+            background_color: None,
+            underline: self.underline.then_some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(self.foreground),
+                wavy: false,
+            }),
+            strikethrough: self.strikeout.then_some(StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(self.foreground),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct TerminalRun {
     len: usize,
     style: TerminalRunStyle,
-}
-
-struct TerminalRow {
-    text: String,
-    runs: Vec<TerminalRun>,
-}
-
-struct TerminalSnapshot {
-    rows: Vec<TerminalRow>,
-    outline_cursor: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -688,59 +967,59 @@ pub struct TerminalView {
     scroll_accumulator: f32,
     panel_width: f32,
     /// Advance width of one grid cell, measured from the terminal font on
-    /// first render so grid math matches what `StyledText` actually lays out.
+    /// first render so grid math matches what the shaped rows lay out.
     measured_cell_width: Option<f32>,
     scrollbar_state: Rc<ScrollbarState>,
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Built rows, shared with the grid element that shapes and paints them.
+    grid: Rc<RefCell<TerminalGrid>>,
     selecting: bool,
     hovered_link: Option<TerminalLink>,
     cursor_blink: gpui::Entity<TerminalCursorBlink>,
     cursor_focus_tracking_started: bool,
     context_menu: ContextMenuHandle,
+    /// Receives the PTY thread's wakeups until the first render with a window
+    /// moves it into `_wakeup_task`.
+    wakeups: Option<smol::channel::Receiver<()>>,
+    _wakeup_task: Task<()>,
+    /// A frame callback is already scheduled; later wakeups coalesce into it.
+    frame_scheduled: bool,
+    /// A UI event (title, exit) changed what the view shows.
+    ui_changed: bool,
+    /// The frame callback notified and the view has not rendered since. Frame
+    /// callbacks run right before that frame's draw, so finding this still set
+    /// in a later callback means a draw passed without rendering the terminal.
+    frame_notify_unrendered: bool,
+    /// The cursor blink notified and the view has not rendered since.
+    blink_notify_unrendered: bool,
+    /// Not on screen: PTY output only sets the dirty flag and the cursor does
+    /// not blink until the next render.
+    hidden: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 impl TerminalView {
     pub fn new(working_directory: PathBuf, cx: &mut Context<Self>) -> Self {
         let terminal_cwd = working_directory.clone();
+        let (wakeup_tx, wakeups) = smol::channel::bounded(1);
         cx.spawn(async move |this, cx| {
             let started = cx
                 .background_executor()
-                .spawn(async move { TerminalSession::new(&terminal_cwd, 52, 36) })
+                .spawn(async move { TerminalSession::new(&terminal_cwd, 52, 36, wakeup_tx) })
                 .await;
-            if this
-                .update(cx, |this, cx| {
-                    match started {
-                        Ok(session) => this.session = Some(session),
-                        Err(error) => this.error = Some(error.to_string()),
-                    }
-                    cx.notify();
-                })
-                .is_err()
-            {
-                return;
-            }
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(24))
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        if this.poll(cx) {
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
+            let _ = this.update(cx, |this, cx| {
+                match started {
+                    Ok(session) => this.session = Some(session),
+                    Err(error) => this.error = Some(error.to_string()),
                 }
-            }
+                cx.notify();
+            });
         })
         .detach();
 
         let context_menu = ContextMenuHandle::new(cx);
         let cursor_blink = cx.new(|_| TerminalCursorBlink::new());
-        let subscriptions = vec![cx.observe(&cursor_blink, |_, _, cx| cx.notify())];
+        let subscriptions = vec![cx.observe(&cursor_blink, |this, _, cx| this.on_blink(cx))];
 
         Self {
             session: None,
@@ -754,11 +1033,19 @@ impl TerminalView {
             measured_cell_width: None,
             scrollbar_state: ScrollbarState::new(),
             grid_bounds: Rc::new(Cell::new(None)),
+            grid: Rc::new(RefCell::new(TerminalGrid::new())),
             selecting: false,
             hovered_link: None,
             cursor_blink,
             cursor_focus_tracking_started: false,
             context_menu,
+            wakeups: Some(wakeups),
+            _wakeup_task: Task::ready(()),
+            frame_scheduled: false,
+            ui_changed: false,
+            frame_notify_unrendered: false,
+            blink_notify_unrendered: false,
+            hidden: false,
             _subscriptions: subscriptions,
         }
     }
@@ -778,11 +1065,100 @@ impl TerminalView {
         }
     }
 
-    fn poll(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Start the wakeup loop once a session and a window exist. The loop
+    /// sleeps on the channel, so an idle terminal costs nothing.
+    fn ensure_wakeup_loop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        let Some(wakeups) = self.wakeups.take() else {
+            return;
+        };
+        self._wakeup_task = cx.spawn_in(window, async move |this, cx| {
+            while wakeups.recv().await.is_ok() {
+                if this
+                    .update_in(cx, |this, window, cx| this.on_wakeup(window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// The PTY thread changed something. UI events are handled right away
+    /// (the shell may be waiting on a clipboard reply); redraws coalesce into
+    /// one notify per display frame.
+    fn on_wakeup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ui_changed |= self.drain_ui_events(cx);
+        if self.hidden || self.frame_scheduled {
+            return;
+        }
+        self.frame_scheduled = true;
+        cx.on_next_frame(window, |this, _, cx| this.on_frame(cx));
+    }
+
+    fn on_frame(&mut self, cx: &mut Context<Self>) {
+        self.frame_scheduled = false;
+        if self.frame_notify_unrendered {
+            self.set_hidden(cx);
+            return;
+        }
+        let dirty = self
+            .session
+            .as_ref()
+            .is_some_and(TerminalSession::take_dirty);
+        if dirty || std::mem::take(&mut self.ui_changed) {
+            self.frame_notify_unrendered = true;
+            cx.notify();
+        }
+    }
+
+    fn on_blink(&mut self, cx: &mut Context<Self>) {
+        if self.hidden {
+            return;
+        }
+        if self.blink_notify_unrendered || self.frame_notify_unrendered {
+            self.set_hidden(cx);
+            return;
+        }
+        self.blink_notify_unrendered = true;
+        cx.notify();
+    }
+
+    /// The view was notified but not drawn: it is not on screen. Stop waking
+    /// for output and stop blinking until it renders again.
+    fn set_hidden(&mut self, cx: &mut Context<Self>) {
+        self.hidden = true;
+        if let Some(session) = &self.session {
+            session.visible.store(false, Ordering::SeqCst);
+        }
+        self.cursor_blink.update(cx, |cursor, cx| cursor.stop(cx));
+    }
+
+    /// Called from render: the view is on screen.
+    fn mark_rendered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.frame_notify_unrendered = false;
+        self.blink_notify_unrendered = false;
+        self.ui_changed = false;
+        if let Some(session) = &self.session {
+            // Render reads the whole grid state, so pending changes are seen.
+            session.take_dirty();
+        }
+        if self.hidden {
+            self.hidden = false;
+            if let Some(session) = &self.session {
+                session.visible.store(true, Ordering::SeqCst);
+            }
+            self.update_cursor_blinking(window, cx);
+        }
+    }
+
+    fn drain_ui_events(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(session) = &self.session else {
             return false;
         };
-        let mut changed = session.take_dirty();
+        let mut changed = false;
         while let Ok(event) = session.ui_events.try_recv() {
             changed = true;
             match event {
@@ -835,6 +1211,7 @@ impl TerminalView {
                 let bytes = bracketed_paste(text, session.mode());
                 session.write(bytes);
                 session.dirty.store(true, Ordering::Release);
+                cx.notify();
                 window.prevent_default();
                 cx.stop_propagation();
             }
@@ -845,6 +1222,7 @@ impl TerminalView {
             session.term.lock().selection = None;
             session.write(bytes);
             session.dirty.store(true, Ordering::Release);
+            cx.notify();
             window.prevent_default();
             cx.stop_propagation();
         }
@@ -1118,18 +1496,20 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.mark_rendered(window, cx);
+        self.ensure_wakeup_loop(window, cx);
         self.ensure_cursor_focus_tracking(window, cx);
         let theme = Theme::current(cx);
         let selection_color = theme.selection;
         let viewport = window.viewport_size();
         let panel_width = self.panel_width;
         let body_height = (f32::from(viewport.height) - 48.0 - TERMINAL_TOOLBAR_HEIGHT).max(120.0);
-        // The rows are laid out by `StyledText` at the font's own advance, so
-        // the grid must be sized from that same measured advance or the text
-        // wraps short of (or past) the panel edge.
+        // The rows are shaped at the font's own advance, so the grid must be
+        // sized from that same measured advance or the text runs short of
+        // (or past) the panel edge.
         let cell_width = *self.measured_cell_width.get_or_insert_with(|| {
             let text_system = cx.text_system();
-            let font_id = text_system.resolve_font(&terminal_font());
+            let font_id = text_system.resolve_font(&TERMINAL_FONTS[0]);
             text_system
                 .advance(font_id, px(TERMINAL_FONT_SIZE), 'm')
                 .map_or(TERMINAL_CELL_WIDTH, |advance| f32::from(advance.width))
@@ -1156,10 +1536,18 @@ impl Render for TerminalView {
             );
         }
         let hovered_link = self.hovered_link.as_ref().map(|link| &link.bounds);
-        let snapshot = self
-            .session
-            .as_ref()
-            .map(|session| session.snapshot(theme, selection_color, cursor_style, hovered_link));
+        let has_session = if let Some(session) = self.session.as_ref() {
+            session.snapshot(
+                &mut self.grid.borrow_mut(),
+                theme,
+                selection_color,
+                cursor_style,
+                hovered_link,
+            );
+            true
+        } else {
+            false
+        };
         let title = if self.title.trim().is_empty() {
             tr!("right_panel.terminal")
         } else {
@@ -1192,51 +1580,15 @@ impl Render for TerminalView {
             screen = screen.cursor_pointer();
         }
 
-        if let Some(snapshot) = snapshot {
-            let TerminalSnapshot {
-                rows: snapshot_rows,
-                outline_cursor,
-            } = snapshot;
-            for row in snapshot_rows {
-                let runs = row
-                    .runs
-                    .into_iter()
-                    .map(|run| {
-                        let mut run_font = terminal_font();
-                        if run.style.bold {
-                            run_font.weight = FontWeight::BOLD;
-                        }
-                        if run.style.italic {
-                            run_font.style = FontStyle::Italic;
-                        }
-                        TextRun {
-                            len: run.len,
-                            font: run_font,
-                            color: run.style.foreground,
-                            background_color: Some(run.style.background),
-                            underline: run.style.underline.then_some(UnderlineStyle {
-                                thickness: px(1.0),
-                                color: Some(run.style.foreground),
-                                wavy: false,
-                            }),
-                            strikethrough: run.style.strikeout.then_some(StrikethroughStyle {
-                                thickness: px(1.0),
-                                color: Some(run.style.foreground),
-                            }),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                screen = screen.child(
-                    div()
-                        .h(px(TERMINAL_CELL_HEIGHT))
-                        .flex_none()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_size(px(TERMINAL_FONT_SIZE))
-                        .line_height(px(TERMINAL_CELL_HEIGHT))
-                        .child(StyledText::new(row.text).with_runs(runs)),
-                );
-            }
+        if has_session {
+            let (grid_rows, outline_cursor) = {
+                let grid = self.grid.borrow();
+                (grid.rows.len(), grid.outline_cursor)
+            };
+            screen = screen.child(TerminalGridElement {
+                grid: self.grid.clone(),
+                rows: grid_rows,
+            });
             if let Some((row, column)) = outline_cursor {
                 screen = screen.child(
                     div()
@@ -1397,6 +1749,180 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
     }
+}
+
+/// Paints the cached grid rows: merged background quads, then one shaped line
+/// per row. Only rows rebuilt since their last paint are reshaped.
+struct TerminalGridElement {
+    grid: Rc<RefCell<TerminalGrid>>,
+    rows: usize,
+}
+
+impl IntoElement for TerminalGridElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for TerminalGridElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = px(self.rows as f32 * TERMINAL_CELL_HEIGHT).into();
+        style.flex_shrink = 0.;
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        _: &mut App,
+    ) {
+        let mut grid = self.grid.borrow_mut();
+        let Some(style) = grid.style else {
+            return;
+        };
+        let text_system = window.text_system().clone();
+        let mut text_runs = Vec::new();
+        for row in &mut grid.rows {
+            if row.paint.is_some() {
+                continue;
+            }
+            text_runs.clear();
+            text_runs.extend(row.runs.iter().map(|run| run.style.text_run(run.len)));
+            let line = text_system.shape_line(
+                SharedString::from(row.text.clone()),
+                px(TERMINAL_FONT_SIZE),
+                &text_runs,
+                None,
+            );
+            let backgrounds = merged_backgrounds(&line, &row.runs, style.background);
+            row.paint = Some(RowPaint { line, backgrounds });
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let grid = self.grid.borrow();
+        let line_height = px(TERMINAL_CELL_HEIGHT);
+        let row_origin = |index: usize| {
+            point(
+                bounds.origin.x,
+                bounds.origin.y + line_height * index as f32,
+            )
+        };
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for (index, row) in grid.rows.iter().enumerate() {
+                let Some(paint) = &row.paint else {
+                    continue;
+                };
+                let origin = row_origin(index);
+                for &(left, right, color) in &paint.backgrounds {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(origin.x + left, origin.y),
+                            size(right - left, line_height),
+                        ),
+                        color,
+                    ));
+                }
+            }
+            for (index, row) in grid.rows.iter().enumerate() {
+                if let Some(paint) = &row.paint {
+                    let _ = paint.line.paint(
+                        row_origin(index),
+                        line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+            }
+        });
+    }
+}
+
+/// Background quads for a shaped row: adjacent runs sharing a background
+/// merge into one quad, and the terminal's own background (painted by the
+/// container) is skipped. Edges follow the shaped glyph positions, as a
+/// `StyledText` run background would.
+fn merged_backgrounds(
+    layout: &LineLayout,
+    runs: &[TerminalRun],
+    default_background: Hsla,
+) -> Vec<(Pixels, Pixels, Hsla)> {
+    let mut glyphs = layout
+        .runs
+        .iter()
+        .flat_map(|run| run.glyphs.iter())
+        .peekable();
+    // Byte offsets arrive in increasing order, so one forward walk over the
+    // glyphs serves every lookup.
+    let mut x_for_index = |index: usize| {
+        while let Some(glyph) = glyphs.peek() {
+            if glyph.index >= index {
+                return glyph.position.x;
+            }
+            glyphs.next();
+        }
+        layout.width
+    };
+
+    let mut spans = Vec::new();
+    let mut pending: Option<(usize, usize, Hsla)> = None;
+    let mut start = 0;
+    for run in runs {
+        let end = start + run.len;
+        let background = run.style.background;
+        match pending.as_mut() {
+            Some((_, pending_end, color)) if *color == background => *pending_end = end,
+            _ => {
+                if let Some((from, to, color)) = pending.take() {
+                    spans.push((x_for_index(from), x_for_index(to), color));
+                }
+                if background != default_background {
+                    pending = Some((start, end, background));
+                }
+            }
+        }
+        start = end;
+    }
+    if let Some((from, to, color)) = pending {
+        spans.push((x_for_index(from), x_for_index(to), color));
+    }
+    spans
 }
 
 fn terminal_cursor_style(focused: bool, blink_visible: bool) -> TerminalCursorStyle {
@@ -2049,5 +2575,273 @@ mod tests {
             ),
             Some((TerminalPoint::new(Line(-3), Column(0)), Side::Left))
         );
+    }
+
+    const GRID_COLUMNS: usize = 40;
+    const GRID_ROWS: usize = 10;
+
+    fn grid_terminal() -> Term<VoidListener> {
+        let dimensions = TerminalDimensions {
+            columns: GRID_COLUMNS,
+            rows: GRID_ROWS,
+        };
+        let config = Config {
+            scrolling_history: 100,
+            ..Default::default()
+        };
+        Term::new(config, &dimensions, VoidListener)
+    }
+
+    fn update_grid(
+        grid: &mut TerminalGrid,
+        term: &mut Term<VoidListener>,
+        theme: Theme,
+        hovered_link: Option<&Match>,
+    ) {
+        grid.update(
+            term,
+            (GRID_COLUMNS, GRID_ROWS),
+            theme,
+            theme.selection,
+            TerminalCursorStyle::Solid,
+            hovered_link,
+        );
+    }
+
+    /// The rows rebuilt since the previous call, read from which rows lost
+    /// their paint data. Marks every row painted again afterwards.
+    fn rebuilt(grid: &mut TerminalGrid) -> Vec<usize> {
+        let rows = grid
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.paint.is_none())
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), grid.rebuilt_rows);
+        for row in &mut grid.rows {
+            row.paint = Some(RowPaint {
+                line: ShapedLine::default(),
+                backgrounds: Vec::new(),
+            });
+        }
+        rows
+    }
+
+    #[test]
+    fn grid_rebuilds_only_damaged_rows() {
+        let theme = Theme::dark();
+        let mut term = grid_terminal();
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, b"first\r\nsecond");
+        let mut grid = TerminalGrid::new();
+
+        update_grid(&mut grid, &mut term, theme, None);
+        assert_eq!(rebuilt(&mut grid), (0..GRID_ROWS).collect::<Vec<_>>());
+
+        // Nothing changed: only the cursor row, which alacritty always
+        // reports damaged.
+        update_grid(&mut grid, &mut term, theme, None);
+        assert_eq!(rebuilt(&mut grid), vec![1]);
+
+        // Writing on row 5 damages it and the row the cursor left.
+        processor.advance(&mut term, b"\x1b[6;1Hhello");
+        update_grid(&mut grid, &mut term, theme, None);
+        assert_eq!(rebuilt(&mut grid), vec![1, 5]);
+        assert!(grid.rows[5].text.starts_with("hello"));
+        assert!(grid.rows[0].text.starts_with("first"));
+    }
+
+    #[test]
+    fn grid_invalidates_rows_damage_does_not_cover() {
+        let theme = Theme::dark();
+        let mut term = grid_terminal();
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, b"\x1b[6;1Hcursor here");
+        let mut grid = TerminalGrid::new();
+        update_grid(&mut grid, &mut term, theme, None);
+        rebuilt(&mut grid);
+
+        // Selection is not part of alacritty's damage: the selected rows and
+        // the always-damaged cursor row are rebuilt, nothing else.
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            TerminalPoint::new(Line(2), Column(0)),
+            Side::Left,
+        );
+        selection.update(TerminalPoint::new(Line(3), Column(5)), Side::Right);
+        term.selection = Some(selection);
+        update_grid(&mut grid, &mut term, theme, None);
+        assert_eq!(rebuilt(&mut grid), vec![2, 3, 5]);
+        assert_eq!(grid.rows[2].runs[0].style.background, theme.selection);
+
+        term.selection = None;
+        update_grid(&mut grid, &mut term, theme, None);
+        assert_eq!(rebuilt(&mut grid), vec![2, 3, 5]);
+        assert_eq!(grid.rows[2].runs[0].style.background, theme.terminal);
+
+        // A hovered link underlines its rows only.
+        let link = TerminalPoint::new(Line(7), Column(0))..=TerminalPoint::new(Line(7), Column(4));
+        update_grid(&mut grid, &mut term, theme, Some(&link));
+        assert_eq!(rebuilt(&mut grid), vec![5, 7]);
+        assert!(grid.rows[7].runs[0].style.underline);
+        update_grid(&mut grid, &mut term, theme, None);
+        assert_eq!(rebuilt(&mut grid), vec![5, 7]);
+
+        // A cursor style change touches the cursor row only.
+        grid.update(
+            &mut term,
+            (GRID_COLUMNS, GRID_ROWS),
+            theme,
+            theme.selection,
+            TerminalCursorStyle::Outline,
+            None,
+        );
+        assert_eq!(rebuilt(&mut grid), vec![5]);
+        assert_eq!(grid.outline_cursor, Some((5, 11)));
+
+        // Theme and grid size are grid-wide.
+        update_grid(&mut grid, &mut term, Theme::light(), None);
+        assert_eq!(grid.rebuilt_rows, GRID_ROWS);
+        rebuilt(&mut grid);
+        grid.update(
+            &mut term,
+            (GRID_COLUMNS, GRID_ROWS - 1),
+            Theme::light(),
+            Theme::light().selection,
+            TerminalCursorStyle::Solid,
+            None,
+        );
+        assert_eq!(grid.rebuilt_rows, GRID_ROWS - 1);
+    }
+
+    #[test]
+    fn grid_rebuilds_everything_when_the_view_scrolls() {
+        let theme = Theme::dark();
+        let mut term = grid_terminal();
+        let mut processor: Processor = Processor::new();
+        for line in 0..30 {
+            processor.advance(&mut term, format!("line {line}\r\n").as_bytes());
+        }
+        let mut grid = TerminalGrid::new();
+        update_grid(&mut grid, &mut term, theme, None);
+        rebuilt(&mut grid);
+
+        term.scroll_display(Scroll::Delta(3));
+        update_grid(&mut grid, &mut term, theme, None);
+        assert_eq!(grid.rebuilt_rows, GRID_ROWS);
+        assert!(grid.rows[0].text.starts_with("line 18"));
+    }
+
+    #[test]
+    fn incremental_rows_match_a_full_rebuild() {
+        let theme = Theme::dark();
+        let mut term = grid_terminal();
+        let mut processor: Processor = Processor::new();
+        let mut grid = TerminalGrid::new();
+        let steps: [&[u8]; 6] = [
+            b"\x1b[31mred\x1b[0m plain\r\n",
+            b"\x1b[3;5H\x1b[1;44mbold on blue\x1b[0m \x1b[7minverse\x1b[0m",
+            "e\u{301} wide \u{4e2d} end \x1b[2;3mdim italic\x1b[0m".as_bytes(),
+            b"\x1b[5;1H\x1b[2K\x1b[4munderlined\x1b[24m \x1b[9mstruck\x1b[0m",
+            b"\x1b[38;2;10;200;30mtruecolor\x1b[48;5;100m indexed\x1b[0m",
+            b"\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\nscrolled off the top",
+        ];
+        for (index, step) in steps.into_iter().enumerate() {
+            processor.advance(&mut term, step);
+            update_grid(&mut grid, &mut term, theme, None);
+            let mut fresh = TerminalGrid::new();
+            update_grid(&mut fresh, &mut term, theme, None);
+            for (row, (cached, full)) in grid.rows.iter().zip(&fresh.rows).enumerate() {
+                assert_eq!(cached.text, full.text, "row {row} text");
+                assert_eq!(cached.runs, full.runs, "row {row} runs");
+            }
+            if index == 2 {
+                // Zero-width marks stay with their base character, and a
+                // wide character's spacer cell keeps the row on the grid.
+                assert!(
+                    grid.rows[2].text.contains("e\u{301} wide \u{4e2d}  end"),
+                    "{:?}",
+                    grid.rows[2].text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn merged_backgrounds_skip_default_and_join_neighbours() {
+        let theme = Theme::dark();
+        let style = |background| TerminalRunStyle {
+            foreground: theme.text,
+            background,
+            bold: false,
+            italic: false,
+            underline: false,
+            strikeout: false,
+        };
+        let mut bold = style(theme.selection);
+        bold.bold = true;
+        let runs = [
+            TerminalRun {
+                len: 2,
+                style: style(theme.terminal),
+            },
+            TerminalRun {
+                len: 3,
+                style: style(theme.selection),
+            },
+            TerminalRun {
+                len: 1,
+                style: bold,
+            },
+            TerminalRun {
+                len: 4,
+                style: style(theme.terminal),
+            },
+        ];
+        // An unshaped layout puts every edge at its width, so check the span
+        // structure rather than positions.
+        let spans = merged_backgrounds(&LineLayout::default(), &runs, theme.terminal);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].2, theme.selection);
+    }
+
+    #[test]
+    fn hidden_terminal_output_sets_dirty_without_waking() {
+        let (wakeup, wakeups) = smol::channel::bounded(1);
+        let (ui_events, _ui_events) = unbounded();
+        let proxy = TerminalEventProxy {
+            dirty: Arc::new(AtomicBool::new(false)),
+            wakeup,
+            visible: Arc::new(AtomicBool::new(false)),
+            sender: Arc::new(OnceLock::new()),
+            ui_events,
+            window_size: Arc::new(Mutex::new(WindowSize {
+                num_lines: 10,
+                num_cols: 40,
+                cell_width: 8,
+                cell_height: 18,
+            })),
+            dark_theme: Arc::new(AtomicBool::new(true)),
+        };
+
+        for _ in 0..100 {
+            proxy.send_event(Event::Wakeup);
+        }
+        assert!(proxy.dirty.load(Ordering::Acquire));
+        assert!(wakeups.try_recv().is_err());
+
+        // Visible: a burst coalesces into one queued wakeup.
+        proxy.visible.store(true, Ordering::SeqCst);
+        for _ in 0..100 {
+            proxy.send_event(Event::Wakeup);
+        }
+        assert!(wakeups.try_recv().is_ok());
+        assert!(wakeups.try_recv().is_err());
+
+        // UI events still reach a hidden view.
+        proxy.visible.store(false, Ordering::SeqCst);
+        proxy.send_event(Event::Title("vim".into()));
+        assert!(wakeups.try_recv().is_ok());
     }
 }

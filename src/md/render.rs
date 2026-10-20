@@ -1625,7 +1625,18 @@ fn show_code_copied(feedback: CodeCopyFeedback, ordinal: usize, cx: &mut gpui::A
 }
 
 /// Decode a `data:` image URL. Shared with the transcript's tool-output images.
+///
+/// Image rows render on every frame they are visible, and a decode allocates
+/// the whole payload and re-hashes it, so results are memoized in a small
+/// bounded cache keyed by the URL's length and hash (see [`DataUrlCache`]).
 pub fn decode_data_url(url: &str) -> Option<std::sync::Arc<gpui::Image>> {
+    if !url.starts_with("data:") {
+        return None;
+    }
+    DATA_URL_IMAGES.with(|cache| cache.borrow_mut().get_or_decode(url))
+}
+
+fn decode_data_url_uncached(url: &str) -> Option<std::sync::Arc<gpui::Image>> {
     use base64::Engine as _;
 
     let (header, encoded) = url.split_once(',')?;
@@ -1635,6 +1646,51 @@ pub fn decode_data_url(url: &str) -> Option<std::sync::Arc<gpui::Image>> {
         .decode(encoded)
         .ok()?;
     (!bytes.is_empty()).then(|| std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)))
+}
+
+/// Decoded entries kept at most, and the decoded bytes they may hold.
+const DATA_URL_CACHE_ENTRIES: usize = 32;
+const DATA_URL_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+thread_local! {
+    static DATA_URL_IMAGES: RefCell<DataUrlCache> = RefCell::new(DataUrlCache::default());
+}
+
+/// Memoized `data:` URL decodes, oldest evicted first. Keys are the URL's
+/// length plus a 64-bit hash, so a hit costs one pass over the URL with no
+/// allocation, against a base64 decode plus an image hash on a miss. Failed
+/// decodes are remembered too, so a malformed URL is not retried per frame.
+#[derive(Default)]
+struct DataUrlCache {
+    entries: std::collections::VecDeque<((usize, u64), Option<std::sync::Arc<gpui::Image>>)>,
+    bytes: usize,
+}
+
+impl DataUrlCache {
+    fn get_or_decode(&mut self, url: &str) -> Option<std::sync::Arc<gpui::Image>> {
+        use std::hash::{BuildHasher, BuildHasherDefault};
+
+        let key = (
+            url.len(),
+            BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default()
+                .hash_one(url),
+        );
+        if let Some((_, image)) = self.entries.iter().find(|(entry, _)| *entry == key) {
+            return image.clone();
+        }
+        let image = decode_data_url_uncached(url);
+        self.bytes += image.as_ref().map_or(0, |image| image.bytes.len());
+        self.entries.push_back((key, image.clone()));
+        while self.entries.len() > DATA_URL_CACHE_ENTRIES
+            || (self.bytes > DATA_URL_CACHE_BYTES && self.entries.len() > 1)
+        {
+            let Some((_, evicted)) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes -= evicted.map_or(0, |image| image.bytes.len());
+        }
+        image
+    }
 }
 
 fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElement {
@@ -1989,6 +2045,32 @@ mod tests {
     use super::*;
     use crate::md::parser;
     use gpui::TestAppContext;
+
+    #[test]
+    fn data_url_images_decode_once_and_stay_bounded() {
+        // A 1x1 PNG.
+        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        let first = decode_data_url(url).expect("valid data URL");
+        let again = decode_data_url(url).expect("valid data URL");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &again),
+            "a visible image row must not re-decode its URL every frame"
+        );
+
+        assert!(decode_data_url("https://example.com/a.png").is_none());
+        assert!(decode_data_url("data:image/png;base64,***").is_none());
+
+        // Distinct URLs past the cap evict the oldest, so the cache stays
+        // bounded and the first URL decodes afresh.
+        for index in 0..DATA_URL_CACHE_ENTRIES + 4 {
+            let _ = decode_data_url(&format!("data:image/png;base64,{index}"));
+        }
+        DATA_URL_IMAGES.with(|cache| {
+            assert!(cache.borrow().entries.len() <= DATA_URL_CACHE_ENTRIES);
+        });
+        let fresh = decode_data_url(url).expect("valid data URL");
+        assert!(!std::sync::Arc::ptr_eq(&first, &fresh));
+    }
 
     fn palette() -> Palette {
         Palette::from_theme(&Theme::dark())

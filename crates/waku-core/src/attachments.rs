@@ -122,6 +122,12 @@ impl AttachmentStore {
     }
 
     pub fn read_file(&self, reference: &str, path: &Path) -> io::Result<Vec<u8>> {
+        fs::read(self.locate_file(reference, path)?)
+    }
+
+    /// Checks that `path` is a file inside the attachment `reference` names
+    /// and returns it, so a client on the daemon host can read it directly.
+    pub fn locate_file(&self, reference: &str, path: &Path) -> io::Result<PathBuf> {
         let root = self.path_for(reference).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "invalid attachment reference")
         })?;
@@ -132,7 +138,13 @@ impl AttachmentStore {
             )
         })?;
         safe_relative_path(relative)?;
-        fs::read(path)
+        if !path.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "attachment file does not exist",
+            ));
+        }
+        Ok(path.to_owned())
     }
 
     /// Removes daemon-owned attachment trees that are no longer referenced by

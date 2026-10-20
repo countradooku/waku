@@ -16,9 +16,20 @@ serde_json = "1.0"
 similar = "3"
 # ts-rs warns on every serde attribute it does not model. The ones used here,
 # such as `alias`, only widen what deserializes and leave the TypeScript shape
-# unchanged.
-ts-rs = { version = "12.0.1", features = ["chrono-impl", "no-serde-warnings", "serde-json-impl", "uuid-impl"] }
+# unchanged. Only the `ts` feature builds it; see `mod ts` in src/lib.rs.
+ts-rs = { version = "12.0.1", optional = true, features = ["chrono-impl", "no-serde-warnings", "serde-json-impl", "uuid-impl"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
+waku-ts-stub = { path = "../waku-ts-stub" }
+
+[features]
+# TypeScript bindings for the web client. Only `export_types` needs them
+# (`bun run protocol:generate` / `protocol:check`); the app and daemon build
+# without ts-rs.
+ts = ["dep:ts-rs"]
+
+[[bin]]
+name = "export_types"
+required-features = ["ts"]
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
@@ -26,6 +37,10 @@ criterion = { version = "0.8.2", default-features = false, features = ["cargo_be
 [[bench]]
 name = "wire"
 harness = false
+
+[target.'cfg(unix)'.dependencies]
+# `geteuid` for the per-user socket path fallback (identity.rs).
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", default-features = false, features = [

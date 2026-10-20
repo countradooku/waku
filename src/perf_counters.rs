@@ -16,7 +16,7 @@
 //! a field changes meaning. Added fields keep the version: readers must
 //! ignore fields they do not know.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -37,9 +37,14 @@ const BUCKET: Duration = Duration::from_secs(1);
 // ── Allocation counting ──────────────────────────────────────────────────
 
 /// Counts every allocation, process-wide and per thread, before handing it
-/// to the system allocator. `realloc` counts its full new size, as a fresh
-/// allocation would.
+/// to the backing allocator (the system's, or mimalloc with the `mimalloc`
+/// feature). `realloc` counts its full new size, as a fresh allocation would.
 struct CountingAllocator;
+
+#[cfg(feature = "mimalloc")]
+use mimalloc::MiMalloc as Backing;
+#[cfg(not(feature = "mimalloc"))]
+use std::alloc::System as Backing;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -65,11 +70,11 @@ fn thread_alloc_bytes() -> u64 {
     THREAD_ALLOC_BYTES.try_with(Cell::get).unwrap_or(0)
 }
 
-// SAFETY: every method forwards to `System` unchanged; the bookkeeping
+// SAFETY: every method forwards to `Backing` unchanged; the bookkeeping
 // touches only atomics and a const thread-local, never the heap.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
+        let pointer = unsafe { Backing.alloc(layout) };
         if !pointer.is_null() {
             record_allocation(layout.size());
         }
@@ -77,7 +82,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc_zeroed(layout) };
+        let pointer = unsafe { Backing.alloc_zeroed(layout) };
         if !pointer.is_null() {
             record_allocation(layout.size());
         }
@@ -85,11 +90,11 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) }
+        unsafe { Backing.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
+        let pointer = unsafe { Backing.realloc(pointer, layout, new_size) };
         if !pointer.is_null() {
             record_allocation(new_size);
         }
@@ -115,11 +120,16 @@ static SAVE_MAX_NS: AtomicU64 = AtomicU64::new(0);
 static UI_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 static COMMIT_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 static SESSION_VISITS: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_GRID_UPDATES: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_ROWS_REBUILT: AtomicU64 = AtomicU64::new(0);
 
 /// Nanoseconds from [`init`] to the first frame and to the first transcript
 /// row, plus one so zero can mean "not yet".
 static FIRST_FRAME_NS: AtomicU64 = AtomicU64::new(0);
 static FIRST_CONTENT_NS: AtomicU64 = AtomicU64::new(0);
+/// Same encoding: to the startup thread having the daemon connected and the
+/// task state, drafts and selected session loaded (#29).
+static DAEMON_READY_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Record "now" in `cell` the first time only. One relaxed load per call
 /// once set.
@@ -183,6 +193,20 @@ pub fn transcript_row() {
     if COMMIT_FRAME.load(Relaxed) == COMMIT_FRAME_IN_FRAME {
         TRANSCRIPT_ROWS_BUILT_IN_COMMIT_FRAMES.fetch_add(1, Relaxed);
     }
+}
+
+/// The desktop terminal's grid was brought up to date for a frame
+/// (`TerminalGrid::update`), rebuilding `rows` of its rows. Damage-only
+/// rebuilds keep `rows` at the rows that actually changed.
+pub fn terminal_grid_update(rows: usize) {
+    TERMINAL_GRID_UPDATES.fetch_add(1, Relaxed);
+    TERMINAL_ROWS_REBUILT.fetch_add(rows as u64, Relaxed);
+}
+
+/// The startup thread finished: daemon connected, initial state loaded (or
+/// the attempt failed). Runs off the UI thread.
+pub fn daemon_ready() {
+    mark_first(&DAEMON_READY_NS);
 }
 
 /// The bench harness's session visitor selected a session.
@@ -312,6 +336,8 @@ pub struct Totals {
     pub ui_alloc_bytes: u64,
     pub commit_alloc_bytes: u64,
     pub session_visits: u64,
+    pub terminal_grid_updates: u64,
+    pub terminal_rows_rebuilt: u64,
 }
 
 impl Totals {
@@ -338,6 +364,8 @@ impl Totals {
             ui_alloc_bytes: UI_ALLOC_BYTES.load(Relaxed),
             commit_alloc_bytes: COMMIT_ALLOC_BYTES.load(Relaxed),
             session_visits: SESSION_VISITS.load(Relaxed),
+            terminal_grid_updates: TERMINAL_GRID_UPDATES.load(Relaxed),
+            terminal_rows_rebuilt: TERMINAL_ROWS_REBUILT.load(Relaxed),
         }
     }
 }
@@ -356,6 +384,8 @@ pub struct Bucket {
     pub save_ui_ns: u64,
     pub alloc_bytes: u64,
     pub commit_alloc_bytes: u64,
+    pub terminal_grid_updates: u64,
+    pub terminal_rows_rebuilt: u64,
 }
 
 impl Bucket {
@@ -375,6 +405,12 @@ impl Bucket {
             commit_alloc_bytes: later
                 .commit_alloc_bytes
                 .saturating_sub(earlier.commit_alloc_bytes),
+            terminal_grid_updates: later
+                .terminal_grid_updates
+                .saturating_sub(earlier.terminal_grid_updates),
+            terminal_rows_rebuilt: later
+                .terminal_rows_rebuilt
+                .saturating_sub(earlier.terminal_rows_rebuilt),
         }
     }
 }
@@ -388,6 +424,7 @@ pub struct Peaks {
     pub transcript_rows_built: u64,
     pub save_ui_ns: u64,
     pub alloc_bytes: u64,
+    pub terminal_rows_rebuilt: u64,
 }
 
 impl Peaks {
@@ -398,6 +435,7 @@ impl Peaks {
         self.transcript_rows_built = self.transcript_rows_built.max(bucket.transcript_rows_built);
         self.save_ui_ns = self.save_ui_ns.max(bucket.save_ui_ns);
         self.alloc_bytes = self.alloc_bytes.max(bucket.alloc_bytes);
+        self.terminal_rows_rebuilt = self.terminal_rows_rebuilt.max(bucket.terminal_rows_rebuilt);
     }
 }
 
@@ -424,11 +462,15 @@ pub struct Startup {
     /// Process start to [`init`] (early in `waku::run`): dyld, static
     /// initializers and `main`. `null` with `origin: "init"`.
     pub init_ms: Option<f64>,
-    /// To the first root render: the first window frame being drawn.
+    /// To the first root render: the first window frame being drawn, which
+    /// is the launch shell when the daemon is not ready yet.
     pub first_frame_ms: Option<f64>,
     /// To the first transcript row built: the first frame with transcript
     /// content. `null` until a session with messages is on screen.
     pub first_content_ms: Option<f64>,
+    /// To the startup thread delivering the daemon and the loaded state.
+    /// Runs in parallel with GPUI start-up and the window opening.
+    pub daemon_ready_ms: Option<f64>,
 }
 
 impl Startup {
@@ -447,6 +489,7 @@ impl Startup {
             init_ms: init_offset_ns.map(|nanos| nanos as f64 / 1e6),
             first_frame_ms: since_origin(&FIRST_FRAME_NS),
             first_content_ms: since_origin(&FIRST_CONTENT_NS),
+            daemon_ready_ms: since_origin(&DAEMON_READY_NS),
         }
     }
 }
@@ -767,8 +810,41 @@ mod tests {
         assert!(json["per_commit"]["alloc_bytes"].is_null());
         assert_eq!(json["startup"]["origin"], "process");
         assert_eq!(json["startup"]["init_ms"], 5.0);
+        assert!(json["startup"]["daemon_ready_ms"].is_null());
         assert_eq!(json["totals"]["session_visits"], 0);
         assert_eq!(json["totals"]["renders"]["right_panel"], 0);
+        assert_eq!(json["totals"]["terminal_rows_rebuilt"], 0);
+        assert_eq!(json["totals"]["terminal_grid_updates"], 0);
+        assert_eq!(json["peak_per_s"]["terminal_rows_rebuilt"], 0);
+    }
+
+    #[test]
+    fn terminal_rows_rebuilt_reach_totals_and_the_series() {
+        // The terminal tests update grids in parallel threads of this
+        // process, so the global counters can only be bounded from below.
+        let before = Totals::load();
+        terminal_grid_update(24);
+        terminal_grid_update(1);
+        terminal_grid_update(0);
+        let after = Totals::load();
+        assert!(after.terminal_grid_updates - before.terminal_grid_updates >= 3);
+        assert!(after.terminal_rows_rebuilt - before.terminal_rows_rebuilt >= 25);
+
+        let mut series = Series::default();
+        series.close_bucket(
+            Totals {
+                terminal_grid_updates: 3,
+                terminal_rows_rebuilt: 25,
+                ..Totals::default()
+            },
+            1000,
+        );
+        let report = series.report(Totals::default(), 1000, false, Startup::load(None));
+        assert_eq!(report.series[0].terminal_grid_updates, 3);
+        assert_eq!(report.series[0].terminal_rows_rebuilt, 25);
+        assert_eq!(report.peak_per_s.terminal_rows_rebuilt, 25);
+        let json = serde_json::to_value(report.series[0]).unwrap();
+        assert_eq!(json["terminal_rows_rebuilt"], 25);
     }
 
     #[test]

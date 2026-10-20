@@ -77,8 +77,17 @@ impl TimedEvent {
         }
     }
 
+    /// The typed wire event. Timelines are validated on load, so a
+    /// malformed event only reaches here from a hand-built timeline; it
+    /// becomes an `error` event rather than a panic.
     pub fn to_wire(&self) -> WireDriverEvent {
-        WireDriverEvent::new(self.kind.clone(), self.payload.clone())
+        self.try_to_wire().unwrap_or_else(|error| {
+            WireDriverEvent::Error(format!("invalid {} event: {error}", self.kind))
+        })
+    }
+
+    pub fn try_to_wire(&self) -> serde_json::Result<WireDriverEvent> {
+        WireDriverEvent::from_parts(&self.kind, self.payload.clone())
     }
 }
 
@@ -184,7 +193,10 @@ impl Timeline {
                 index + 1
             );
             previous = event.at_us;
-            waku_protocol::event_from_wire(event.to_wire())
+            event
+                .try_to_wire()
+                .map_err(anyhow::Error::from)
+                .and_then(waku_protocol::event_from_wire)
                 .with_context(|| format!("line {}: not a valid driver event", index + 1))?;
             events.push(event);
         }

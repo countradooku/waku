@@ -1,6 +1,5 @@
 use super::right_panel::{DiffRowStyle, render_diff_code_row};
 use super::*;
-use base64::Engine as _;
 
 const CHANGED_FILES_PREVIEW_LIMIT: usize = 3;
 /// Keep one virtualized transcript row bounded even when a generator touches
@@ -51,6 +50,20 @@ impl Default for ConversationNavigationRailSnapshot {
     }
 }
 
+/// Most message rows whose ids [`Waku::message_row_ids`] keeps before it
+/// starts over.
+const TRANSCRIPT_ROW_IDS_CAP: usize = 4096;
+
+/// Per-message element ids for a transcript row.
+pub(super) struct MessageRowIds {
+    /// `message-{id}`: the row's context menu.
+    menu: SharedString,
+    /// The same text as the Markdown context's row key.
+    markdown_row: Rc<str>,
+    /// `message-{id}-attachment-{n}`, one per attachment chip menu.
+    attachment_menus: Vec<SharedString>,
+}
+
 pub(super) struct ConversationNavigationRail {
     waku: Option<WeakEntity<Waku>>,
     snapshot: ConversationNavigationRailSnapshot,
@@ -68,7 +81,9 @@ impl ConversationNavigationRail {
     pub(super) fn new() -> Self {
         let turn_list_state = ListState::new(0, ListAlignment::Top, px(48.0))
             .with_uniform_item_height(px(NAVIGATION_RAIL_TURN_HEIGHT));
-        turn_list_state.set_scroll_handler(|_, window, _| window.refresh());
+        // No scroll handler: `ListState::scroll` already notifies the view
+        // that painted the list (this rail), which is all a rail scroll
+        // changes. A `window.refresh()` here rebuilt every pane per tick.
         Self {
             waku: None,
             snapshot: ConversationNavigationRailSnapshot::default(),
@@ -174,6 +189,9 @@ impl Waku {
         self.prefetch_checkpoint_refs(cx);
         self.sync_transcript_rows();
         self.sync_transcript_layout_width(window);
+        // Every row this frame builds paints with the same palette.
+        self.transcript_palette
+            .set(Some(MarkdownPalette::from_theme(&Theme::current(cx))));
         self.apply_pending_transcript_search_reveal(window, cx);
         let search_bar = self.render_transcript_search_bar(chat_viewport_width, cx);
         let transcript_rows = self.active_transcript_rows().clone();
@@ -1155,7 +1173,7 @@ impl Waku {
     /// an in-progress selection survives scrolling.
     fn markdown_ctx<'a>(
         &self,
-        row: String,
+        row: impl Into<Rc<str>>,
         palette: &'a MarkdownPalette,
         metrics: MarkdownMetrics,
         animate_streaming: bool,
@@ -1207,6 +1225,32 @@ impl Waku {
         handle
     }
 
+    /// The element ids of message `id`'s row, built once instead of
+    /// `format!`ed for every visible row on every frame.
+    fn message_row_ids(&self, id: Uuid, attachments: usize) -> Rc<MessageRowIds> {
+        let mut cache = self.transcript_row_ids.borrow_mut();
+        if let Some(ids) = cache.get(&id)
+            && ids.attachment_menus.len() >= attachments
+        {
+            return ids.clone();
+        }
+        if cache.len() >= TRANSCRIPT_ROW_IDS_CAP {
+            // Ids are cheap to rebuild; a wholesale reset bounds the map
+            // without bookkeeping recency.
+            cache.clear();
+        }
+        let row: SharedString = format!("message-{id}").into();
+        let ids = Rc::new(MessageRowIds {
+            markdown_row: Rc::from(row.as_ref()),
+            attachment_menus: (0..attachments)
+                .map(|index| format!("{row}-attachment-{index}").into())
+                .collect(),
+            menu: row,
+        });
+        cache.insert(id, ids.clone());
+        ids
+    }
+
     pub(super) fn transcript_row(
         &mut self,
         index: usize,
@@ -1216,7 +1260,11 @@ impl Waku {
         profile_span!(TRACE, "transcript_row");
         perf_count!(transcript_row);
         let theme = Theme::current(cx);
-        let palette = MarkdownPalette::from_theme(&theme);
+        // Resolved once per transcript frame by `render_transcript`.
+        let palette = self
+            .transcript_palette
+            .get()
+            .unwrap_or_else(|| MarkdownPalette::from_theme(&theme));
         let composer = self.composer.clone();
         let waku = cx.entity().downgrade();
         // Both from the cache `sync_transcript_rows` refreshed at the top of
@@ -1249,9 +1297,11 @@ impl Waku {
         let inner = match kind {
             TranscriptRowKind::Message(message_index) => self
                 .selected_session()
+                // Borrowed, not cloned: a clone copied the whole body (and
+                // its attachments) for every visible row on every frame.
                 .and_then(|session| session.messages.get(message_index))
-                .cloned()
                 .map(|message| {
+                    let ids = self.message_row_ids(message.id, message.attachments.len());
                     let copied = self.copied_message_feedback.contains_key(&message.id);
                     let (assistant_footer_copy_content, assistant_footer_time) =
                         self.assistant_response_footer_cached(message_index);
@@ -1267,13 +1317,11 @@ impl Waku {
                             })
                             .map(|edit| edit.input.clone())
                     });
-                    let attachment_menus = (0..message.attachments.len())
-                        .map(|index| {
-                            self.menu_handle(
-                                format!("message-{}-attachment-{index}", message.id),
-                                cx,
-                            )
-                        })
+                    let attachment_menus = ids
+                        .attachment_menus
+                        .iter()
+                        .take(message.attachments.len())
+                        .map(|id| self.menu_handle(id.clone(), cx))
                         .collect();
                     let attachment_images = message
                         .attachments
@@ -1292,7 +1340,7 @@ impl Waku {
                         })
                         .collect();
                     let attachments_can_reveal = !self.daemon.is_remote();
-                    let menu = self.menu_handle(format!("message-{}", message.id), cx);
+                    let menu = self.menu_handle(ids.menu.clone(), cx);
                     let user_message_viewport = (message.role == MessageRole::User).then(|| {
                         self.user_message_viewports
                             .borrow_mut()
@@ -1309,7 +1357,7 @@ impl Waku {
                     let animate_streaming = message.streaming && !cx.reduce_motion();
                     let mut ctx = self
                         .markdown_ctx(
-                            format!("message-{}", message.id),
+                            ids.markdown_row.clone(),
                             &palette,
                             metrics,
                             animate_streaming,
@@ -1324,14 +1372,15 @@ impl Waku {
                     let mut markdown = self.message_markdown.borrow_mut();
                     let view = matches!(message.role, MessageRole::User | MessageRole::Assistant)
                         .then(|| {
-                            let view = markdown.entry(message.id).or_default();
+                            let view =
+                                markdown.get_or_insert_with(message.id, MarkdownView::default);
                             view.set_text(message.visible_content(), message.streaming);
                             &*view
                         });
                     let rendered = render_message(
                         MessageRender {
                             theme: &theme,
-                            message: &message,
+                            message,
                             assistant_footer_copy_content,
                             assistant_footer_time,
                             copied,
@@ -2197,7 +2246,8 @@ impl Waku {
                     .or_default()
                     .clone();
                 let mut views = self.activity_markdown.borrow_mut();
-                let view = views.entry(id).or_default();
+                let session_id = self.state.selected_session.unwrap_or_default();
+                let view = views.get_or_insert_with((session_id, id), MarkdownView::default);
                 if reasoning_live {
                     let start = self.live_reasoning_window_start(id, &reasoning.content, view);
                     view.set_text(&reasoning.content[start..], true);
@@ -2534,9 +2584,11 @@ impl Waku {
             .text_size(px(diff_mono_size))
             .line_height(px(diff_mono_line))
             .on_scroll_wheel(move |_, _, cx| contain_scroll(&wheel_scroll, cx));
+        let key_prefix = SharedString::from(format!("activity-diff-{id}"));
         for (index, line) in diff.snapshot.lines.iter().enumerate() {
             rows = rows.child(self.render_activity_diff_row(
                 id,
+                &key_prefix,
                 index,
                 line,
                 &diff.snapshot,
@@ -2586,9 +2638,11 @@ impl Waku {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_activity_diff_row(
         &self,
         id: Uuid,
+        key_prefix: &SharedString,
         index: usize,
         line: &crate::review_diff::Line,
         snapshot: &crate::review_diff::Snapshot,
@@ -2650,7 +2704,7 @@ impl Waku {
             // withheld locally, so this marks the break rather than offering
             // to expand it the way the Review panel does.
             LineKind::Gap(gap) => activity_diff_break_row(
-                Some(tr!("diff.unmodified_lines", count = gap.count())),
+                Some(tr!("diff.unmodified_lines", count = gap.count()).into()),
                 theme,
             ),
             LineKind::HunkHeader | LineKind::Meta => activity_diff_break_row(
@@ -2660,7 +2714,7 @@ impl Waku {
             LineKind::Context | LineKind::Addition | LineKind::Deletion => render_diff_code_row(
                 line,
                 index,
-                &format!("activity-diff-{id}"),
+                key_prefix,
                 &self.transcript_selection,
                 DiffRowStyle::activity(self.state.code_font_size),
                 theme,
@@ -2670,7 +2724,7 @@ impl Waku {
 }
 
 /// The separator between two hunks of the same file.
-fn activity_diff_break_row(label: Option<String>, theme: &Theme) -> AnyElement {
+fn activity_diff_break_row(label: Option<SharedString>, theme: &Theme) -> AnyElement {
     div()
         .w_full()
         .min_w_0()
@@ -2696,13 +2750,7 @@ fn activity_diff_break_row(label: Option<String>, theme: &Theme) -> AnyElement {
                 .border_color(theme.border)
                 .child("⋯"),
         )
-        .children(label.map(|label| {
-            div()
-                .min_w_0()
-                .pl(px(12.0))
-                .truncate()
-                .child(SharedString::from(label))
-        }))
+        .children(label.map(|label| div().min_w_0().pl(px(12.0)).truncate().child(label)))
         .into_any_element()
 }
 
@@ -2824,9 +2872,9 @@ fn render_activity_image(
     image_index: usize,
     theme: &Theme,
 ) -> AnyElement {
-    // Daemon blobs arrive only when a visible row requests them and GPUI keeps
-    // their decoded form in memory. Only legacy inline data URLs still pay a
-    // per-render base64 decode.
+    // Daemon blobs arrive only when a visible row requests them, and legacy
+    // inline data URLs are decoded once; both come from the bounded image
+    // cache, and GPUI keeps their decoded form until the cache evicts them.
     let id = SharedString::from(format!("activity-image-{activity_id}-{image_index}"));
     if let Some(image) = image {
         return img(image)
@@ -2857,28 +2905,17 @@ fn render_activity_image(
             .into_any_element();
     };
 
-    match decode_activity_image(image_url) {
-        Some(image) => img(image),
-        None => img(image_url.to_owned()),
-    }
-    .id(id)
-    .w(px(ACTIVITY_IMAGE_WIDTH))
-    .max_w(gpui::relative(1.0))
-    .max_h(px(ACTIVITY_IMAGE_HEIGHT))
-    .mt(px(8.0))
-    .rounded(px(4.0))
-    .object_fit(ObjectFit::Contain)
-    .into_any_element()
-}
-
-fn decode_activity_image(image_url: &str) -> Option<std::sync::Arc<gpui::Image>> {
-    let (header, encoded) = image_url.split_once(",")?;
-    let mime_type = header.strip_prefix("data:")?.split(';').next()?;
-    let format = gpui::ImageFormat::from_mime_type(mime_type)?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()?;
-    (!bytes.is_empty()).then(|| std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)))
+    // Not a daemon reference and not a decodable inline image (those arrive
+    // already decoded from the image cache): let GPUI resolve the URI.
+    img(image_url.to_owned())
+        .id(id)
+        .w(px(ACTIVITY_IMAGE_WIDTH))
+        .max_w(gpui::relative(1.0))
+        .max_h(px(ACTIVITY_IMAGE_HEIGHT))
+        .mt(px(8.0))
+        .rounded(px(4.0))
+        .object_fit(ObjectFit::Contain)
+        .into_any_element()
 }
 
 #[cfg(test)]

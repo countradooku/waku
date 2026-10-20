@@ -14,7 +14,13 @@ nucleo-matcher = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smol = "2"
-tungstenite = { version = "0.30", default-features = false, features = [
+# The connection thread runs a current-thread tokio runtime (#18) so reads,
+# writes and keepalive are evented instead of polled. The public API stays
+# synchronous and runtime-agnostic: callers block on crossbeam channels.
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros", "io-util"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = [
+    "connect",
     "handshake",
     "rustls-tls-native-roots",
 ] }

@@ -3,6 +3,11 @@ _version: 2
 diff.ignore_whitespace:
   en: Ignore whitespace
 
+startup.daemon_failed:
+  en: Waku could not start its daemon
+startup.daemon_failed_hint:
+  en: Quit and reopen Waku to try again.
+
 menu.about:
   en: About %{app}
 menu.check_for_updates:
@@ -325,6 +330,10 @@ settings.render_math:
   en: Render math expressions
 settings.render_math_description:
   en: Show formatted math in Markdown. Turn off to show LaTeX source.
+settings.animate_panels:
+  en: Animate panels
+settings.animate_panels_description:
+  en: Slide the sidebar and side panel open and closed. Off shows them instantly.
 settings.theme_system:
   en: System
 settings.theme_light:

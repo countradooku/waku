@@ -23,7 +23,7 @@ price:
 | --- | --- | --- |
 | `cx.notify(view)` | Re-renders that view and its ancestors; **cached sibling panes replay** | The stream pump (per commit), the pulse clock, user-event handlers |
 | `window.refresh()` | Re-renders everything and **bypasses every cached pane** | Genuine whole-window invalidation only: hover transitions, drags, theme |
-| `request_animation_frame` | Display-rate (120 Hz) re-render of the current view for as long as it re-arms | Nothing during streaming. One mounted repeating `with_animation` pinned the window at 120 Hz for a whole turn (~36% CPU by itself). The one sanctioned transient: the 200 ms panel show/hide slide ([src/app/render.rs](../src/app/render.rs)), which re-arms only while an edge is moving and gates the pane fan-out (below) |
+| `request_animation_frame` | Display-rate (120 Hz) re-render of the current view for as long as it re-arms | Nothing during streaming. One mounted repeating `with_animation` pinned the window at 120 Hz for a whole turn (~36% CPU by itself). The one sanctioned transient: the 200 ms panel show/hide slide ([src/app/render.rs](../src/app/render.rs)), which is off by default (**Animate panels** in settings), re-arms only while an edge is moving and gates the pane fan-out (below) |
 
 The root `Waku` view re-renders on every frame regardless of what is dirty, so
 it must stay thin: the sidebar, transcript, and right panel are `WakuPane`
@@ -33,12 +33,43 @@ re-renders every island, so caching can never show stale state — while a
 notify targeted at one pane (the pulse clock leases `window.current_view()`)
 rebuilds only that island and replays the rest.
 
-The one exception to that fan-out is the 200 ms panel slide: its display-rate
-root notifies would price every tick at a three-island rebuild, so while
-`panels_sliding()` the observer skips the fan-out and the cached-view keys
-decide instead — the sliding panel (its clip moves) and the transcript (its
-bounds move) miss their caches and rebuild with fresh state anyway, while the
-island nothing is moving replays. Updates born inside an island still land
+Producers that know what they changed notify islands directly instead of the
+root ([src/app/dirty.rs](../src/app/dirty.rs)). The event pump builds a
+`DirtySet { root, sidebar, transcript, right_panel }` per drain:
+
+- text and reasoning deltas of the selected session dirty the transcript;
+- tool activity and background work also dirty the right panel;
+- a background session's deltas dirty nothing;
+- the sidebar is dirty only when a drained session's sidebar fingerprint
+  (`sidebar_session_fingerprint`: status, title, recency, branch, last turn)
+  moved;
+- everything else (turn boundaries, permissions, errors, usage, session
+  added or removed, the other result queues) is `DirtySet::ALL`, a plain root
+  notify.
+
+`Waku::notify_dirty` notifies the named panes, or uses a plain root notify
+when all three are dirty. The root renders on every draw anyway, so root
+state rides along with any pane notify. When only the root is dirty, it
+notifies `RootFrame`, a zero-size child of the root: gpui marks it and its
+ancestors dirty, so the root repaints and every island replays. Pulse ticks
+and overlay-scrollbar wakes aimed at the root go to the same stand-in
+(`motion::redirect_notifications`), so a spinner in the header or composer
+no longer rebuilds all three islands at pulse rate. The time-label wake
+dirties the root, sidebar and transcript, not the right panel.
+
+The one exception to that fan-out is the 200 ms panel slide. Panels toggle
+instantly unless the user turns on **Animate panels**; with it on, the slide's
+display-rate root notifies would price every tick at a three-island rebuild,
+so while `panels_sliding()` the observer skips the fan-out and the cached-view
+keys decide instead. The sliding panel (its clip moves) misses its cache and
+rebuilds with fresh state; the island nothing is moving replays. The
+transcript keeps its *settled* width for the whole slide
+(`transcript_slide_width`): animating the column's width used to change the
+`list()` width every frame, which drops every cached row height and re-wraps
+every visible paragraph at display rate. Held at the settled width, a right
+panel slide leaves the transcript's bounds alone (it replays), and a sidebar
+slide only moves its origin (it rebuilds rows, but heights and the line-layout
+cache stay warm). Updates born inside an island still land
 mid-slide because a child notify dirties its ancestor pane without the
 observer, and the slide's retirement schedules one ungated notify so any
 root-state drift in a reused pane converges the frame after the slide ends. Two traps to know: gpui's
@@ -94,6 +125,13 @@ the whole turn — and the hold is constant-opacity, needing zero repaints.
 one-shot wake for hold expiry and rides the pulse clock only through the
 350 ms fade. Driving frames through the hold pinned the pane at pulse rate the
 moment any scrollbar became visible.
+
+Scrolling is island-local too. `ListState::scroll` notifies the view that
+painted the list, so the transcript's scroll handlers only record intent, and
+the scrollbar's hover, click and drag listeners notify the view captured at
+paint (`window.current_view()`). Neither calls `window.refresh()`, which used
+to rebuild the sidebar and the right panel (terminal, diff, editor) on every
+scroll tick.
 
 ## Bounding what is visible
 
@@ -208,7 +246,7 @@ Definitions:
 
 | Counter | Counted where |
 | --- | --- |
-| frame | Each `Waku::render`. The root re-renders on every window draw, so this is the frame count, and `renders.root` equals it. |
+| frame | Each `Waku::render`, plus each render of the launch shell that stands in for it while the daemon starts (`src/startup.rs`). The root re-renders on every window draw, so this is the frame count, and `renders.root` equals it. |
 | `renders.sidebar` / `transcript` / `right_panel` | The `WakuPane` delegates. A cached pane replaying its subtree is not a render. |
 | `renders.composer` | `ComposerInput::render`. |
 | stream commit | A pump drain (`drain_event_pump`) that applied at least one text or reasoning delta, however many sessions streamed in it. |
@@ -216,13 +254,16 @@ Definitions:
 | transcript row built | Each `transcript_row` call (the `list()` row builder). |
 | save | Each `Waku::save`, timed on the UI thread. |
 | allocation | Each `alloc`, `alloc_zeroed` or `realloc` (counted at its full new size). |
+| terminal grid update | Each `TerminalGrid::update` ([src/terminal.rs](../src/terminal.rs)): the desktop terminal bringing its row cache up to date for a frame. |
+| terminal row rebuilt | Each row that update rebuilt (its `rebuilt_rows`). Rows are rebuilt only when Alacritty reports them damaged, or when the style, scroll offset, selection, hovered link or cursor touches them. |
 
 Report schema (`"schema": "waku.perf-counters/1"`). Counts are integers;
 `_ns` fields are nanoseconds, `_ms` milliseconds, `_bytes` bytes. Ratios are
 `null` when their denominator is zero. Fields are only ever added within a
 schema version (readers ignore what they do not know); a field that changes
 meaning bumps it. `startup` and `totals.session_visits` were added for the
-baseline harness (#9).
+baseline harness (#9), `startup.daemon_ready_ms` for the parallel launch (#29),
+the `terminal_*` fields for damage-only terminal budgets (#178).
 
 | Field | Meaning |
 | --- | --- |
@@ -230,8 +271,9 @@ baseline harness (#9).
 | `elapsed_ms` | Time since the counters started (early in `waku::run`). |
 | `startup.origin` | `"process"` when the times below run from the moment the OS created the process (macOS, from `proc_pidinfo`); `"init"` when the process start is unknown and they run from counter start. |
 | `startup.init_ms` | Process start to counter start: exec, dyld, static initializers and `main` up to `waku::run`. `null` with `origin: "init"`. |
-| `startup.first_frame_ms` | To the first root render, the first window frame being drawn (not yet presented). |
+| `startup.first_frame_ms` | To the first root render, the first window frame being drawn (not yet presented). This is the launch shell's frame when the daemon was not ready yet as the window opened. |
 | `startup.first_content_ms` | To the first transcript row built, i.e. the first frame drawing transcript content. `null` until a session with messages is on screen. |
+| `startup.daemon_ready_ms` | To the `waku-startup` thread delivering the connected daemon with task state, drafts and the selected session loaded (or failing to). It runs in parallel with GPUI start-up and the window opening, so `first_frame_ms` < `daemon_ready_ms` means the launch shell was on screen. |
 | `totals.frames` | Frames since start. |
 | `totals.renders.{root,sidebar,transcript,right_panel,composer}` | Renders since start. |
 | `totals.stream_commits` | Stream commits since start. |
@@ -242,13 +284,14 @@ baseline harness (#9).
 | `totals.alloc_bytes`, `totals.alloc_count` | Bytes and allocations, all threads. |
 | `totals.ui_alloc_bytes` | Bytes allocated on the UI thread, as of the last frame. |
 | `totals.session_visits` | Sessions selected by the bench visitor (`WAKU_PERF_VISIT_SESSIONS_MS`, below). |
+| `totals.terminal_grid_updates`, `totals.terminal_rows_rebuilt` | Terminal grid updates, and the rows they rebuilt, since start. `terminal_rows_rebuilt / terminal_grid_updates` is rows per terminal frame: a damage-only rebuild keeps it near the rows that changed (one for a typed character), not the grid height. |
 | `totals.commit_alloc_bytes` | UI-thread bytes allocated inside the pump drains that were stream commits. |
 | `mean_per_s.{frames,stream_commits}`, `mean_per_s.renders.*` | Totals divided by `elapsed_ms / 1000`. |
-| `peak_per_s.{frames,stream_commits,transcript_rows_built,save_ui_ns,alloc_bytes}`, `peak_per_s.renders.*` | The highest value in any one complete one-second bucket. |
+| `peak_per_s.{frames,stream_commits,transcript_rows_built,save_ui_ns,alloc_bytes,terminal_rows_rebuilt}`, `peak_per_s.renders.*` | The highest value in any one complete one-second bucket. |
 | `per_commit.transcript_rows_built` | `transcript_rows_built_in_commit_frames / commit_frames`: rows rebuilt to present one commit. |
 | `per_commit.alloc_bytes` | `commit_alloc_bytes / stream_commits`: UI-thread bytes to apply one commit (not to render it). |
 | `per_commit.renders.*` | Total renders divided by `stream_commits`. This is meaningful only for a run that does nothing but stream, which is what the budget harness drives. |
-| `series[]` | One-second buckets, oldest first, at most 3600 (`series_dropped` counts the evicted ones). Each has `t_ms` (bucket end, since start), `dur_ms`, and the per-bucket deltas `frames`, `renders.*`, `stream_commits`, `transcript_rows_built`, `save_calls`, `save_ui_ns`, `alloc_bytes` and `commit_alloc_bytes`. |
+| `series[]` | One-second buckets, oldest first, at most 3600 (`series_dropped` counts the evicted ones). Each has `t_ms` (bucket end, since start), `dur_ms`, and the per-bucket deltas `frames`, `renders.*`, `stream_commits`, `transcript_rows_built`, `save_calls`, `save_ui_ns`, `alloc_bytes`, `commit_alloc_bytes`, `terminal_grid_updates` and `terminal_rows_rebuilt`. |
 
 With `WAKU_PERF_VISIT_SESSIONS_MS=<ms>` set, a `perf-counters` build also
 selects every started session once, in catalog order, one per interval,
@@ -260,7 +303,36 @@ Budget checks map onto it directly. For example, "commits/s ≤ budget" is
 `peak_per_s.stream_commits`, "transcript renders per commit ≤ 1" is
 `per_commit.renders.transcript`, "sidebar and right panel do not render while
 streaming" is `totals.renders.sidebar` and `right_panel` over a streaming-only
-run, and "no UI time in save" is `totals.save_ui_ns`.
+run, "no UI time in save" is `totals.save_ui_ns`, and "terminal output
+rebuilds only damaged rows" is `totals.terminal_rows_rebuilt` over
+`totals.terminal_grid_updates` for a run that types into an open terminal.
+
+### Idle wakeups
+
+An idle app with its daemon must stay below 5 wakeups/s in total
+(`harness.py measure --pid <app>,<daemon>`), so nothing on either side may
+poll while nothing happens:
+
+- The daemon connection (`crates/waku-client/src/client.rs`) and the
+  daemon's sockets are evented (#18); an idle connection costs one
+  keepalive ping every few seconds.
+- The desktop's daemon supervisor (`monitor_daemon`,
+  `crates/waku-client/src/process.rs`) sleeps on a channel (#178). It is
+  woken by the managed child's exit (a thread blocked in
+  `waitid(WNOWAIT)`, which leaves reaping to the owner of the `Child`), by
+  the connection closing (`DaemonClient::on_disconnect`, which also drives
+  the remote reconnect-with-resume), and by a failed `reconfigure`. Timers
+  run only while the daemon is unreachable (restart and reconnect retry
+  with a 100 ms to 2 s backoff) and in debug builds of the app, which pass
+  `watch_for_rebuilds` and keep the 500 ms poll of the daemon binary that
+  hot-swaps a rebuilt daemon. Windows has no exit thread: the daemon's exit
+  closes its pipe, and the supervisor re-checks with the retry backoff until
+  the process is gone.
+- A daemon terminal's output thread (`crates/waku-core/src/terminal.rs`)
+  blocks on the PTY's readiness (`polling`: kqueue on macOS, epoll on Linux)
+  instead of sleeping 4 ms between non-blocking reads (#178). Each wake reads
+  everything already buffered, up to 64 KiB, into one ephemeral
+  `TerminalOutput` event; closing the terminal wakes it through the poller.
 
 ### Tracing spans and Tracy (`profiling` feature)
 
@@ -339,6 +411,28 @@ per-round Criterion medians. A benchmark fails the job only when both hold:
 - the slowdown is larger than the spread between that runner's own rounds.
 
 The report is written to the job summary.
+
+### Release build settings (#30)
+
+Measured on the M5 Pro with `scripts/bench/compare.py` over alternating
+rounds of release-profile Criterion benches, plus daemon replays through
+`replay-client` (numbers in the #30 commit):
+
+- **LTO stays thin.** Fat LTO made the app 6% and the daemon 8% smaller, but
+  no benchmark got faster (5 rounds: -2% to +5%, all within noise), and it
+  costs +33% on a full release build and +82% on a relink.
+- **The daemon uses mimalloc** (`crates/waku-daemon/src/main.rs`, and the
+  bench daemon so measurements match). The app has it behind the `mimalloc`
+  feature, off by default until its RSS has been measured in the GUI
+  harness's memory scenarios; with `perf-counters` the counting allocator
+  forwards to it.
+- **ts-rs is behind `waku-protocol`'s `ts` feature**, which only
+  `export_types` needs (`bun run protocol:generate` / `protocol:check` pass
+  it). Without it `#[derive(TS)]` is a no-op stub (`crates/waku-ts-stub`).
+- **PGO** is a script, not the default build: `scripts/bench/pgo.sh` builds
+  instrumented binaries, trains them on the benches, headless timeline
+  replays and `rpc-latency` (and on the GUI harness with `PGO_GUI=1`),
+  merges the profiles and writes PGO binaries to `$PGO_DIR/release`.
 
 ## Known floor and next levers
 

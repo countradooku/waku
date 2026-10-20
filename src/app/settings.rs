@@ -540,6 +540,50 @@ impl Waku {
                         },
                     )),
             )
+            .child(
+                div()
+                    .mt(px(15.0))
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(sp(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("settings.animate_panels")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(sp(12.5))
+                                    .line_height(sp(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("settings.animate_panels_description")),
+                            ),
+                    )
+                    .child(toggle_switch(
+                        "animate-panels-toggle",
+                        self.state.animate_panels,
+                        false,
+                        theme,
+                        cx,
+                        {
+                            let enabled = self.state.animate_panels;
+                            move |this, _, cx| this.set_animate_panels(!enabled, cx)
+                        },
+                    )),
+            )
             .when(updater_available, |column| {
                 let enabled = self.automatic_updates_enabled;
                 let toggle = toggle_switch(
@@ -1539,6 +1583,15 @@ impl Waku {
                     .child(code_font_size_selector),
             )
             .into_any_element()
+    }
+
+    fn set_animate_panels(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.state.animate_panels == enabled {
+            return;
+        }
+        self.state.animate_panels = enabled;
+        self.save();
+        cx.notify();
     }
 
     fn set_render_math(&mut self, enabled: bool, cx: &mut Context<Self>) {

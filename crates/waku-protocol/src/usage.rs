@@ -1,6 +1,6 @@
+use crate::ts::TS;
 use chrono::Datelike as _;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]

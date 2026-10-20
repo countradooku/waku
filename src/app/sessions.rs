@@ -214,6 +214,10 @@ impl Waku {
         if session_changed {
             self.capture_and_save_current_composer_draft(cx);
             self.store_selected_right_panel_state();
+            if let Some(previous) = self.state.selected_session {
+                self.session_left_at.insert(previous, Instant::now());
+                self.schedule_dehydration_sweep(cx);
+            }
         }
         self.state.selected_session = Some(session_id);
         self.task_switcher.record_access(session_id);
@@ -274,6 +278,119 @@ impl Waku {
             self.start_runtime_attachment(session_id, cx);
         }
         cx.notify();
+    }
+
+    /// Runs [`Self::dehydrate_idle_sessions`] once the session just left is
+    /// past [`memory::DEHYDRATE_GRACE`], unless a sweep is already due.
+    fn schedule_dehydration_sweep(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.dehydration_sweep_scheduled, true) {
+            return;
+        }
+        cx.spawn(async move |waku, cx| {
+            cx.background_executor()
+                .timer(memory::DEHYDRATE_GRACE + Duration::from_millis(100))
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                waku.dehydration_sweep_scheduled = false;
+                if waku.dehydrate_idle_sessions() {
+                    waku.schedule_dehydration_sweep(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Whether a session's transcript can be released now and reloaded later
+    /// through the hydration path without losing anything: it is loaded,
+    /// started, not selected, has no live or pending runtime, no running turn
+    /// or queued prompt, no change the daemon has not been sent, and nothing
+    /// in flight that writes back into its transcript.
+    pub(super) fn session_is_releasable(&self, session: &AgentSession) -> bool {
+        let id = session.id;
+        memory::transcript_is_releasable(session)
+            && self.state.selected_session != Some(id)
+            && !self.state.is_session_dirty(id)
+            && !self.runtimes.contains_key(&id)
+            && !self.runtime_attach_pending.contains(&id)
+            && !self.session_hydrations.contains(&id)
+            && self
+                .pending_session_activation
+                .is_none_or(|pending| pending.session_id != id)
+            && !self.submission_preparations.contains(&id)
+            && !self.pending_queue_drains.contains(&id)
+            && !self.session_has_live_background_work(id)
+            && !self
+                .pending_checkpoint_captures
+                .iter()
+                .any(|capture| capture.session_id == id)
+            && !self
+                .checkpoint_captures_in_flight
+                .iter()
+                .any(|(capture_session, _)| *capture_session == id)
+            && self
+                .message_edit
+                .as_ref()
+                .is_none_or(|edit| edit.session_id != id)
+    }
+
+    /// Releases the transcripts of idle sessions (see
+    /// [`memory::dehydration_candidates`]) together with their parsed
+    /// Markdown. Selecting one again reloads it through
+    /// [`Self::ensure_session_loaded`], exactly like a session that startup
+    /// left as a skeleton. Returns whether a releasable session is still
+    /// inside its grace period, so the caller can sweep again.
+    pub(super) fn dehydrate_idle_sessions(&mut self) -> bool {
+        let now = Instant::now();
+        let candidates = self
+            .state
+            .sessions
+            .iter()
+            .filter(|session| session.detail_loaded)
+            .map(|session| memory::DehydrationCandidate {
+                id: session.id,
+                left_at: self.session_left_at.get(&session.id).copied(),
+                releasable: self.session_is_releasable(session),
+            })
+            .collect::<Vec<_>>();
+        let released = memory::dehydration_candidates(&candidates, now);
+        let sweep_again = candidates.iter().any(|candidate| {
+            candidate.releasable
+                && !released.contains(&candidate.id)
+                && candidate.left_at.is_some_and(|left_at| {
+                    now.saturating_duration_since(left_at) < memory::DEHYDRATE_GRACE
+                })
+        });
+        for session_id in released {
+            let Some(session) = self
+                .state
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+            else {
+                continue;
+            };
+            let message_ids = session
+                .messages
+                .iter()
+                .map(|message| message.id)
+                .collect::<HashSet<_>>();
+            session.release_transcript();
+            self.message_markdown
+                .borrow_mut()
+                .retain(|message_id, _| !message_ids.contains(message_id));
+            self.activity_markdown
+                .borrow_mut()
+                .retain(|(owner, _), _| *owner != session_id);
+        }
+        let hydrated = self
+            .state
+            .sessions
+            .iter()
+            .filter(|session| session.detail_loaded)
+            .map(|session| session.id)
+            .collect::<HashSet<_>>();
+        self.session_left_at.retain(|id, _| hydrated.contains(id));
+        sweep_again
     }
 
     /// Drops cached answers about the workspace on disk.
@@ -542,10 +659,11 @@ impl Waku {
 
     /// A toggle's slide, starting from the width the panel currently occupies
     /// so an interrupted one reverses from where its edge actually is.
-    /// Reduce-motion gets `None`: the panel simply appears at its new width,
-    /// and no frames are scheduled for it.
+    /// Panels are instant unless the user turned on **Animate panels**, and
+    /// reduce-motion overrides that: `None` means the panel simply appears at
+    /// its new width and no frames are scheduled for it.
     fn begin_panel_slide(&self, from: f32, cx: &App) -> Option<motion::WidthTween> {
-        (!cx.reduce_motion()).then(|| motion::WidthTween::new(from))
+        (self.state.animate_panels && !cx.reduce_motion()).then(|| motion::WidthTween::new(from))
     }
 
     pub(super) fn set_right_panel_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
@@ -885,29 +1003,26 @@ impl Waku {
         );
         // Parsed messages are keyed by message id, which is unique across
         // sessions, so they stay cached — switching back to a recent session
-        // then costs no re-parse. Bounded so a long-running window cannot grow
-        // without limit.
+        // then costs no re-parse. The LRU evicts what was drawn longest ago
+        // once the cache passes its byte budget, rather than dropping
+        // everything.
         let mut message_markdown = self.message_markdown.borrow_mut();
-        let cached_bytes: usize = message_markdown
-            .values()
-            .map(md::render::MarkdownView::source_len)
-            .sum();
-        if cached_bytes > MAX_CACHED_MESSAGE_SOURCE_BYTES {
-            message_markdown.clear();
-        }
+        message_markdown.trim();
         for id in streaming_messages {
             message_markdown
-                .entry(id)
-                .or_default()
+                .get_or_insert_with(id, MarkdownView::default)
                 .seed_streaming_baseline();
         }
         drop(message_markdown);
-        // Block parses are keyed by position within the session, so they would
-        // be read as another session's blocks.
+        // Reasoning parses are keyed by (session, activity), so they survive a
+        // switch too. A live block restarts from a seeded view, because its
+        // byte window (`reasoning_window_starts`) is reset below.
         let mut activity_markdown = self.activity_markdown.borrow_mut();
-        activity_markdown.clear();
-        for id in live_reasoning {
-            activity_markdown.insert(id, MarkdownView::seeded());
+        activity_markdown.trim();
+        if let Some(session_id) = self.state.selected_session {
+            for id in live_reasoning {
+                activity_markdown.insert((session_id, id), MarkdownView::seeded());
+            }
         }
         drop(activity_markdown);
         self.reasoning_window_starts.borrow_mut().clear();

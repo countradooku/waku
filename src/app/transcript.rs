@@ -326,12 +326,10 @@ impl Waku {
     }
 
     pub(super) fn sync_transcript_layout_width(&self, window: &Window) -> bool {
-        let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
-        let sidebar_width = px(sidebar_width);
-        let right_panel_width = px(right_panel_width);
+        // Settled panel widths: a slide holds the transcript at the width it
+        // will have once the edge stops, so the one reflow happens up front.
         let content_width =
-            (window.viewport_size().width - sidebar_width - right_panel_width - px(40.0))
-                .clamp(px(1.0), px(CONTENT_MAX_WIDTH));
+            (px(self.chat_viewport_width(window)) - px(40.0)).clamp(px(1.0), px(CONTENT_MAX_WIDTH));
         let previous = self.transcript_layout_width.replace(content_width);
         if previous > Pixels::ZERO && (previous - content_width).abs() < px(1.0) {
             return false;
@@ -1251,7 +1249,7 @@ pub(super) fn format_working_elapsed(seconds: u64) -> String {
 /// checkpoints and provider rollback are per turn, not per message. Messages
 /// of a turn are contiguous, so this walks back only while the turn id holds
 /// rather than scanning the session, which a per-frame row builder must avoid.
-pub(super) fn message_opens_turn(messages: &[Message], message_index: usize) -> bool {
+pub(super) fn message_opens_turn(messages: &[Arc<Message>], message_index: usize) -> bool {
     let Some(turn_id) = messages
         .get(message_index)
         .filter(|message| message.role == MessageRole::User)
@@ -1266,7 +1264,10 @@ pub(super) fn message_opens_turn(messages: &[Message], message_index: usize) -> 
         .any(|earlier| earlier.role == MessageRole::User)
 }
 
-pub(super) fn message_starts_followup_turn(messages: &[Message], message_index: usize) -> bool {
+pub(super) fn message_starts_followup_turn(
+    messages: &[Arc<Message>],
+    message_index: usize,
+) -> bool {
     messages
         .get(message_index)
         .is_some_and(|message| message.role == MessageRole::User)
