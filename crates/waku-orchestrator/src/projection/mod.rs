@@ -6,6 +6,9 @@
 //! from SQLite ([`sql::load_thread`]) and applying the same events live must
 //! give equal values; the property test in `tests::rebuild` checks that.
 
+pub mod maintenance;
+pub mod sql;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use waku_protocol::orchestration::*;
