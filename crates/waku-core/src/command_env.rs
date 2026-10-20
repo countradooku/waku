@@ -365,10 +365,10 @@ fn resolve_windows_profile_environment(timeout: Duration) -> Option<ShellEnviron
         if remaining.is_zero() {
             return None;
         }
-        if let Some(environment) = capture_windows_environment(&shell, true, remaining) {
-            if let Some(environment) = merge_windows_environment(environment) {
-                return Some(environment);
-            }
+        if let Some(environment) = capture_windows_environment(&shell, true, remaining)
+            && let Some(environment) = merge_windows_environment(environment)
+        {
+            return Some(environment);
         }
     }
     // A hanging or exiting profile loses the whole run. Retry without it on a
@@ -376,10 +376,9 @@ fn resolve_windows_profile_environment(timeout: Duration) -> Option<ShellEnviron
     for shell in windows_powershell_candidates() {
         if let Some(environment) =
             capture_windows_environment(&shell, false, WINDOWS_NO_PROFILE_ENV_TIMEOUT)
+            && let Some(environment) = merge_windows_environment(environment)
         {
-            if let Some(environment) = merge_windows_environment(environment) {
-                return Some(environment);
-            }
+            return Some(environment);
         }
     }
     None
