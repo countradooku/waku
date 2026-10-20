@@ -7,6 +7,14 @@
 //! never wall time. A `runtime_exit` with status `error` ends the channel's
 //! output at once (a crash); `success` and `cancelled` wait until the driver
 //! closes the channel's stdin (a graceful shutdown), then end it.
+//!
+//! An HTTP channel is a base URL: every request is an outbound
+//! `http.request` matched against the cursor and answered by the next
+//! `http.response`. Opening a downlink is an outbound `stream.open` (SSE) or
+//! `websocket.open` record naming its path; `stream.event` frames feed the
+//! open downlink with the same path (or wait for it to open), and
+//! `stream.closed` ends it, after which the driver may open it again. Dropping
+//! the transport counts as closing the channel's stdin.
 
 use std::collections::HashMap;
 use std::io;
@@ -14,7 +22,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::stream::BoxStream;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -25,7 +32,7 @@ use super::matcher::{Placeholders, frame_diff, matches, prepare};
 use super::{ExitStatusKind, ReplayEntry, ReplayError, ReplayProfile, ReplayTranscript};
 use crate::driver::v2::InstanceConfig;
 use crate::driver::v2::transport::{
-    HttpMethod, HttpResponse, HttpTransport, ProcessExit, ProcessSpec, StdioTransport,
+    Downlink, HttpMethod, HttpResponse, HttpTransport, ProcessExit, ProcessSpec, StdioTransport,
     TransportFactory,
 };
 
@@ -55,6 +62,75 @@ struct Channel {
     stdin_closed: bool,
     /// HTTP responses waiting for the next request on this channel.
     responses: Option<mpsc::UnboundedSender<Value>>,
+    /// Open HTTP downlinks by path; dropping a sender ends that downlink.
+    streams: HashMap<String, mpsc::UnboundedSender<Value>>,
+    /// `stream.event` data for a path whose downlink is not open (yet).
+    buffered: HashMap<String, Vec<Value>>,
+}
+
+impl Channel {
+    fn stdio(stdout: mpsc::UnboundedSender<String>, exit: oneshot::Sender<ProcessExit>) -> Self {
+        Self {
+            stdout: Some(stdout),
+            exit: Some(exit),
+            stdin_closed: false,
+            responses: None,
+            streams: HashMap::new(),
+            buffered: HashMap::new(),
+        }
+    }
+
+    fn http(responses: mpsc::UnboundedSender<Value>) -> Self {
+        Self {
+            stdout: None,
+            exit: None,
+            stdin_closed: false,
+            responses: Some(responses),
+            streams: HashMap::new(),
+            buffered: HashMap::new(),
+        }
+    }
+
+    fn is_http(&self) -> bool {
+        self.responses.is_some() || !self.streams.is_empty()
+    }
+
+    /// Ends every output of the channel.
+    fn end(&mut self) {
+        self.stdout.take();
+        self.responses.take();
+        self.streams.clear();
+        self.buffered.clear();
+    }
+
+    /// Routes one inbound HTTP frame.
+    fn deliver_http(&mut self, frame: Value) {
+        let path = frame
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        match frame.get("type").and_then(Value::as_str) {
+            Some("http.response") => {
+                if let Some(responses) = &self.responses {
+                    let _ = responses.send(frame);
+                }
+            }
+            Some("stream.event") => {
+                let data = frame.get("data").cloned().unwrap_or(Value::Null);
+                match self.streams.get(&path) {
+                    Some(stream) => {
+                        let _ = stream.send(data);
+                    }
+                    None => self.buffered.entry(path).or_default().push(data),
+                }
+            }
+            Some("stream.closed") => {
+                self.streams.remove(&path);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The transcript name of a spawn: the driver's channel name for the first
@@ -190,10 +266,8 @@ impl ReplayTransportFactory {
                     }
                     let frame = self.placeholders.materialize(&frame);
                     let channel = state.channels.get_mut(&channel).expect("checked above");
-                    if let Some(responses) = &channel.responses
-                        && frame.get("type").and_then(Value::as_str) == Some("http.response")
-                    {
-                        let _ = responses.send(frame);
+                    if channel.is_http() {
+                        channel.deliver_http(frame);
                     } else if let Some(stdout) = &channel.stdout {
                         let _ = stdout.send(frame.to_string());
                     }
@@ -212,8 +286,7 @@ impl ReplayTransportFactory {
                     if status != ExitStatusKind::Error && !state_channel.stdin_closed {
                         return;
                     }
-                    state_channel.stdout.take();
-                    state_channel.responses.take();
+                    state_channel.end();
                     if let Some(exit) = state_channel.exit.take() {
                         let _ = exit.send(exit_of(status, exit_code, signal));
                     }
@@ -231,8 +304,7 @@ impl ReplayTransportFactory {
         // Stop the session: every channel ends, so the driver sees the
         // provider exit and the scenario settles quickly.
         for channel in state.channels.values_mut() {
-            channel.stdout.take();
-            channel.responses.take();
+            channel.end();
             if let Some(exit) = channel.exit.take() {
                 let _ = exit.send(ProcessExit {
                     success: false,
@@ -323,6 +395,20 @@ impl ReplayTransportFactory {
         }
         self.advance(&mut state);
     }
+
+    /// Opens the downlink for `path` on an HTTP channel, handing it what
+    /// arrived before it opened.
+    fn open_stream(&self, channel: &str, path: &str, sender: mpsc::UnboundedSender<Value>) {
+        let mut state = self.state.lock();
+        if let Some(channel) = state.channels.get_mut(channel)
+            && channel.responses.is_some()
+        {
+            for data in channel.buffered.remove(path).unwrap_or_default() {
+                let _ = sender.send(data);
+            }
+            channel.streams.insert(path.to_owned(), sender);
+        }
+    }
 }
 
 #[async_trait]
@@ -335,15 +421,9 @@ impl TransportFactory for Arc<ReplayTransportFactory> {
         let channel = {
             let mut state = self.state.lock();
             let channel = spawn_channel(&mut state.spawns, channel);
-            state.channels.insert(
-                channel.clone(),
-                Channel {
-                    stdout: Some(stdout_lines),
-                    exit: Some(exit_sender),
-                    stdin_closed: false,
-                    responses: None,
-                },
-            );
+            state
+                .channels
+                .insert(channel.clone(), Channel::stdio(stdout_lines, exit_sender));
             channel
         };
         // The spawn itself is the channel's first outbound frame.
@@ -388,25 +468,21 @@ impl TransportFactory for Arc<ReplayTransportFactory> {
 
     async fn http(&self, channel: &str, _base: Url) -> io::Result<Arc<dyn HttpTransport>> {
         let (responses, receiver) = mpsc::unbounded_channel();
-        let (stream_lines, stream_receiver) = mpsc::unbounded_channel();
-        {
+        let channel = {
             let mut state = self.state.lock();
-            state.channels.insert(
-                channel.to_owned(),
-                Channel {
-                    stdout: Some(stream_lines),
-                    exit: None,
-                    stdin_closed: false,
-                    responses: Some(responses),
-                },
-            );
+            // The n-th transport opened under one name is `<name>#<n>`, as
+            // for spawns: a reopened session, another thread's session.
+            let channel = spawn_channel(&mut state.spawns, channel);
+            state
+                .channels
+                .insert(channel.clone(), Channel::http(responses));
             self.advance(&mut state);
-        }
+            channel
+        };
         Ok(Arc::new(ReplayHttp {
             factory: self.clone(),
-            channel: channel.to_owned(),
+            channel,
             responses: tokio::sync::Mutex::new(receiver),
-            stream: Mutex::new(Some(stream_receiver)),
         }))
     }
 
@@ -416,13 +492,37 @@ impl TransportFactory for Arc<ReplayTransportFactory> {
 }
 
 /// HTTP over a transcript: a request is an outbound `http.request` frame and
-/// its response the next `http.response`; `stream.event` frames feed the one
-/// streaming downlink of the channel.
+/// its response the next `http.response`; a downlink is an outbound
+/// `stream.open` / `websocket.open` record, fed by the `stream.event` frames
+/// for its path until a `stream.closed` for that path.
 struct ReplayHttp {
     factory: Arc<ReplayTransportFactory>,
     channel: String,
     responses: tokio::sync::Mutex<mpsc::UnboundedReceiver<Value>>,
-    stream: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
+}
+
+impl ReplayHttp {
+    fn downlink(&self, kind: &str, path: &str) -> Downlink {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.factory.open_stream(&self.channel, path, sender);
+        self.factory
+            .outbound(&self.channel, json!({ "type": kind, "path": path }));
+        Box::pin(futures_util::stream::unfold(
+            receiver,
+            |mut receiver| async move {
+                let data = receiver.recv().await?;
+                Some((Ok(data), receiver))
+            },
+        ))
+    }
+}
+
+impl Drop for ReplayHttp {
+    /// The driver let go of the service: a graceful `runtime_exit` on this
+    /// channel may now complete.
+    fn drop(&mut self) {
+        self.factory.stdin_closed(&self.channel);
+    }
 }
 
 #[async_trait]
@@ -452,27 +552,12 @@ impl HttpTransport for ReplayHttp {
         })
     }
 
-    async fn stream(&self, _path: &str) -> io::Result<BoxStream<'static, io::Result<Value>>> {
-        let receiver = self
-            .stream
-            .lock()
-            .take()
-            .ok_or_else(|| io::Error::other("the replay channel has one stream"))?;
-        let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
-            loop {
-                let line = receiver.recv().await?;
-                let frame: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
-                match frame.get("type").and_then(Value::as_str) {
-                    Some("stream.event") => {
-                        let data = frame.get("data").cloned().unwrap_or(Value::Null);
-                        return Some((Ok(data), receiver));
-                    }
-                    Some("stream.closed") => return None,
-                    _ => continue,
-                }
-            }
-        });
-        Ok(Box::pin(stream))
+    async fn stream(&self, path: &str) -> io::Result<Downlink> {
+        Ok(self.downlink("stream.open", path))
+    }
+
+    async fn websocket(&self, path: &str) -> io::Result<Downlink> {
+        Ok(self.downlink("websocket.open", path))
     }
 }
 
@@ -497,4 +582,75 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::StreamExt as _;
+
+    use super::*;
+
+    const HTTP_TRANSCRIPT: &str = r#"{"type":"transcript_start","provider":"opencode","protocol":"opencode.http-sse","version":"2.0.0","scenario":"http"}
+{"type":"expect_outbound","frame":{"type":"stream.open","path":"/api/event"}}
+{"type":"emit_inbound","frame":{"type":"stream.event","path":"/api/event","data":{"type":"server.connected"}}}
+{"type":"expect_outbound","frame":{"type":"http.request","method":"POST","path":"/api/session","body":{"location":{"directory":"<workspace>"}}}}
+{"type":"emit_inbound","frame":{"type":"stream.event","path":"/api/event","data":{"type":"session.created"}}}
+{"type":"emit_inbound","frame":{"type":"http.response","status":200,"body":{"data":{"id":"ses_1"}}}}
+{"type":"emit_inbound","frame":{"type":"stream.closed","path":"/api/event"}}
+{"type":"expect_outbound","frame":{"type":"stream.open","path":"/api/event"}}
+{"type":"emit_inbound","frame":{"type":"stream.event","path":"/api/event","data":{"type":"server.connected","again":true}}}
+{"type":"expect_outbound","channel":"main#2","frame":{"type":"websocket.open","path":"/api/events.mux"}}
+{"type":"emit_inbound","channel":"main#2","frame":{"type":"stream.event","path":"/api/events.mux","data":{"seq":1}}}
+{"type":"runtime_exit","channel":"main#2","status":"success"}
+"#;
+
+    #[test]
+    fn http_channels_replay_requests_and_reopenable_downlinks() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let transcript = ReplayTranscript::parse(HTTP_TRANSCRIPT).unwrap();
+            let factory = ReplayTransportFactory::new(
+                transcript,
+                PathBuf::from("/work"),
+                PathBuf::from("/home"),
+                ReplayProfile::new("opencode.http-sse"),
+            );
+            let base = Url::parse("http://127.0.0.1:4096").unwrap();
+            let http = factory.http("main", base.clone()).await.unwrap();
+            let mut events = http.stream("/api/event").await.unwrap();
+            assert_eq!(
+                events.next().await.unwrap().unwrap(),
+                json!({"type": "server.connected"})
+            );
+            let created = http
+                .request(
+                    HttpMethod::Post,
+                    "/api/session",
+                    Some(json!({"location": {"directory": "/work"}})),
+                )
+                .await
+                .unwrap();
+            assert_eq!(created.body["data"]["id"], "ses_1");
+            // The event recorded before the response still reaches the stream,
+            // and the close ends it.
+            assert_eq!(
+                events.next().await.unwrap().unwrap()["type"],
+                "session.created"
+            );
+            assert!(events.next().await.is_none());
+            let mut again = http.stream("/api/event").await.unwrap();
+            assert_eq!(again.next().await.unwrap().unwrap()["again"], true);
+            // A second transport under the same name is `main#2`.
+            let second = factory.http("main", base).await.unwrap();
+            let mut mux = second.websocket("/api/events.mux").await.unwrap();
+            assert_eq!(mux.next().await.unwrap().unwrap(), json!({"seq": 1}));
+            drop(mux);
+            drop(second);
+            assert!(factory.error().is_none(), "{:?}", factory.error());
+            factory.assert_exhausted().unwrap();
+        });
+    }
 }
