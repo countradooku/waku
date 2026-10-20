@@ -95,6 +95,13 @@ one-shot wake for hold expiry and rides the pulse clock only through the
 350 ms fade. Driving frames through the hold pinned the pane at pulse rate the
 moment any scrollbar became visible.
 
+Scrolling is island-local too. `ListState::scroll` notifies the view that
+painted the list, so the transcript's scroll handlers only record intent, and
+the scrollbar's hover, click and drag listeners notify the view captured at
+paint (`window.current_view()`). Neither calls `window.refresh()`, which used
+to rebuild the sidebar and the right panel (terminal, diff, editor) on every
+scroll tick.
+
 ## Bounding what is visible
 
 - The transcript is virtualized with `list()`; per-commit invalidation is the

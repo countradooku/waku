@@ -2273,26 +2273,31 @@ impl Waku {
         // when a bottom-aligned list reaches the end — it represents that end as
         // no logical offset — but a turn renders through the top-aligned
         // anchored list, whose end is an ordinary offset, so only this can.
+        //
+        // Everything these handlers record is read by the transcript island
+        // alone (tail recheck, scroll-to-bottom affordance, rail emphasis), and
+        // `ListState::scroll` notifies the view that painted the list — that
+        // island — right after the handler returns. A `window.refresh()` here
+        // used to rebuild the sidebar and right panel (terminal, diff, editor)
+        // on every scroll tick for nothing.
         transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
             let transcript_tail_recheck = transcript_tail_recheck.clone();
-            move |event, window, _| {
+            move |event, _, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
                 transcript_tail_recheck.set(true);
-                window.refresh();
             }
         });
         anchored_transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
             let transcript_tail_recheck = transcript_tail_recheck.clone();
-            move |event, window, _| {
+            move |event, _, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
                 transcript_tail_recheck.set(true);
-                window.refresh();
             }
         });
         // Enable GPUI's experimental overlay plane so deferred draws (menus,

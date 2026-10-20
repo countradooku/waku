@@ -68,7 +68,9 @@ impl ConversationNavigationRail {
     pub(super) fn new() -> Self {
         let turn_list_state = ListState::new(0, ListAlignment::Top, px(48.0))
             .with_uniform_item_height(px(NAVIGATION_RAIL_TURN_HEIGHT));
-        turn_list_state.set_scroll_handler(|_, window, _| window.refresh());
+        // No scroll handler: `ListState::scroll` already notifies the view
+        // that painted the list (this rail), which is all a rail scroll
+        // changes. A `window.refresh()` here rebuilt every pane per tick.
         Self {
             waku: None,
             snapshot: ConversationNavigationRailSnapshot::default(),
