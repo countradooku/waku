@@ -3,11 +3,10 @@ use super::*;
 impl Waku {
     pub(super) fn finish_streaming_assistant(&mut self, session_id: Uuid) {
         if let Some(session) = self.state.session_mut(session_id) {
-            for message in &mut session.messages {
-                if message.role == MessageRole::Assistant && message.streaming {
-                    message.streaming = false;
-                }
-            }
+            session.messages.update_where(
+                |message| message.role == MessageRole::Assistant && message.streaming,
+                |message| message.streaming = false,
+            );
         }
     }
 
@@ -31,12 +30,18 @@ impl Waku {
         let Some(session) = self.state.session_mut(session_id) else {
             return;
         };
+        let open_reasoning =
+            |activity: &ActivityItem| activity.reasoning.is_some() && !activity.complete;
         let reasoning = session
             .transcript_blocks
-            .iter_mut()
-            .rev()
-            .flat_map(|block| block.activities.iter_mut().rev())
-            .find(|activity| activity.reasoning.is_some() && !activity.complete);
+            .rfind_mut(|block| block.activities.iter().any(open_reasoning))
+            .and_then(|block| {
+                block
+                    .activities
+                    .iter_mut()
+                    .rev()
+                    .find(|a| open_reasoning(a))
+            });
         if let Some(reasoning) = reasoning {
             reasoning.complete = true;
             session.updated_at = unix_time();
@@ -109,15 +114,24 @@ impl Waku {
             Some(StreamPhase::Reasoning | StreamPhase::Activity)
         );
         if let Some(session) = self.state.session_mut(session_id) {
-            for block in session.transcript_blocks.iter_mut().rev() {
-                let matching = block.activities.iter_mut().rev().find(|activity| {
-                    item.source_id
-                        .as_ref()
-                        .is_some_and(|id| activity.source_id.as_ref() == Some(id))
-                        || (item.source_id.is_none()
-                            && activity.title == item.title
-                            && !activity.complete)
-                });
+            // Locate before writing, so only the block that changes is
+            // unshared from a save snapshot still in flight.
+            for block_index in (0..session.transcript_blocks.len()).rev() {
+                let matching = session.transcript_blocks[block_index]
+                    .activities
+                    .iter()
+                    .rposition(|activity| {
+                        item.source_id
+                            .as_ref()
+                            .is_some_and(|id| activity.source_id.as_ref() == Some(id))
+                            || (item.source_id.is_none()
+                                && activity.title == item.title
+                                && !activity.complete)
+                    })
+                    .map(|activity_index| {
+                        &mut session.transcript_blocks.make_mut(block_index).activities
+                            [activity_index]
+                    });
                 if let Some(activity) = matching {
                     let has_arguments = item.arguments.is_some();
                     let replaces_changes = !item.file_changes.is_empty();
@@ -179,11 +193,14 @@ impl Waku {
 
     pub(super) fn complete_turn_blocks(&mut self, session_id: Uuid) {
         if let Some(session) = self.state.session_mut(session_id) {
-            for block in &mut session.transcript_blocks {
-                for activity in &mut block.activities {
-                    activity.complete = true;
-                }
-            }
+            session.transcript_blocks.update_where(
+                |block| block.activities.iter().any(|activity| !activity.complete),
+                |block| {
+                    for activity in &mut block.activities {
+                        activity.complete = true;
+                    }
+                },
+            );
         }
     }
 
@@ -1013,20 +1030,14 @@ pub(super) fn append_text_delta_to_session(
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         return;
     };
+    let streaming_assistant =
+        |message: &Message| message.role == MessageRole::Assistant && message.streaming;
     if !continuing {
-        for message in &mut session.messages {
-            if message.role == MessageRole::Assistant && message.streaming {
-                message.streaming = false;
-            }
-        }
-    }
-    let existing = continuing.then(|| {
         session
             .messages
-            .iter_mut()
-            .rev()
-            .find(|message| message.role == MessageRole::Assistant && message.streaming)
-    });
+            .update_where(streaming_assistant, |message| message.streaming = false);
+    }
+    let existing = continuing.then(|| session.messages.rfind_mut(streaming_assistant));
     if let Some(Some(message)) = existing {
         message.content.push_str(&delta);
     } else {

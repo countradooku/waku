@@ -145,13 +145,6 @@ fn signal_event_pump(wake: &smol::channel::Sender<()>) {
     let _ = wake.try_send(());
 }
 
-/// Source bytes of parsed messages kept across session switches.
-///
-/// Measured at ~17x expansion into parsed structures, plus flattened text and
-/// shaped runs on top, so this is bounded by source size rather than entry
-/// count — one long message costs far more than several short ones. 512 KB
-/// holds several sessions' transcripts for a few MB of structures.
-const MAX_CACHED_MESSAGE_SOURCE_BYTES: usize = 512 * 1024;
 /// Projects whose workspace lookups are remembered — branch, diff listing,
 /// working tree. A window rarely has more than a handful open, and the diff
 /// and tree caches are invalidated on every refresh, so they hold one entry in
@@ -313,12 +306,7 @@ struct ComposerAttachment {
     blob_reference: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-enum RemoteImageState {
-    Loading,
-    Ready(Arc<gpui::Image>),
-    Unavailable,
-}
+use memory::RemoteImageState;
 
 /// One accepted composer submission. `prompt` preserves the composer and
 /// transcript syntax; provider-specific command syntax resolves only at the
@@ -1277,8 +1265,14 @@ pub struct Waku {
     image_preview_generation: u64,
     /// In-memory GPUI images for daemon-owned bytes. A missing entry schedules
     /// one background fetch only when a visible row asks to render it; the
-    /// desktop never creates another attachment file.
-    remote_images: RefCell<HashMap<String, RemoteImageState>>,
+    /// desktop never creates another attachment file. Legacy inline `data:`
+    /// images are decoded once into the same cache. Bounded by decoded bytes;
+    /// see `memory::ImageCache`.
+    remote_images: RefCell<memory::ImageCache>,
+    /// When the user last left each session, for dehydrating idle ones.
+    session_left_at: HashMap<Uuid, Instant>,
+    /// A delayed dehydration sweep is already scheduled.
+    dehydration_sweep_scheduled: bool,
     /// Coalesced edge trigger for provider and background result queues. The
     /// payloads stay in their typed channels; this channel only wakes the UI.
     event_wake_tx: smol::channel::Sender<()>,
@@ -1564,12 +1558,16 @@ pub struct Waku {
     transcript_scrollbar_dragging: Cell<bool>,
     transcript_layout_width: Cell<Pixels>,
     /// Parsed markdown per assistant message, keeping each response's
-    /// incremental parse and flattened blocks alive across frames.
-    message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// incremental parse and flattened blocks alive across frames. Keyed by
+    /// message id (unique across sessions), so switching back to a recent
+    /// session costs no re-parse; a byte-budgeted LRU bounds it.
+    message_markdown: RefCell<memory::ByteBudgetLru<Uuid, MarkdownView>>,
     /// Stable offsets for capped user bubbles, including across virtualized row rebuilds.
     user_message_viewports: RefCell<HashMap<Uuid, UserMessageScrollViewport>>,
-    /// Parsed markdown for reasoning activities, keyed by stable activity id.
-    activity_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// Parsed markdown for reasoning activities, keyed by (session id,
+    /// activity id) so a session switch keeps it and a dehydration can drop
+    /// one session's entries. A byte-budgeted LRU bounds it.
+    activity_markdown: RefCell<memory::ByteBudgetLru<(Uuid, Uuid), MarkdownView>>,
     /// Byte offsets live reasoning peeks render from, slid forward as the
     /// thought grows; see `live_reasoning_window_start`.
     reasoning_window_starts: RefCell<HashMap<Uuid, usize>>,
@@ -1633,6 +1631,7 @@ mod drafts;
 mod file_search;
 mod goal_dialog;
 mod image_preview;
+mod memory;
 mod project_picker;
 mod render;
 mod right_panel;
@@ -2503,13 +2502,21 @@ impl Waku {
             .detach();
 
             // Window-frame changes are only mirrored in memory; the quit save
-            // is what lands the final position and size on disk.
-            cx.on_app_quit(|this, _| {
+            // is what lands the final position and size on disk. Saves are
+            // debounced on a background writer, so quit flushes it with a full
+            // sync off the UI thread; GPUI waits briefly for the future.
+            cx.on_app_quit(|this, cx| {
                 this.save();
                 // After the save, so the final report counts it.
                 #[cfg(feature = "perf-counters")]
                 crate::perf_counters::write_final();
-                async {}
+                let flush = this
+                    .store
+                    .app_files_flush(waku_client::persistence::Durability::Full);
+                let flush = cx.background_executor().spawn(async move { flush() });
+                async move {
+                    let _ = flush.await;
+                }
             })
             .detach();
 
@@ -2882,7 +2889,9 @@ impl Waku {
                 composer_attachments,
                 image_preview: None,
                 image_preview_generation: 0,
-                remote_images: RefCell::new(HashMap::new()),
+                remote_images: RefCell::new(memory::ImageCache::default()),
+                session_left_at: HashMap::new(),
+                dehydration_sweep_scheduled: false,
                 event_wake_tx,
                 task_state_sync_tx,
                 task_state_sync_events,
@@ -3035,9 +3044,17 @@ impl Waku {
                 transcript_scroll_to_bottom_visible: Cell::new(false),
                 transcript_scrollbar_dragging: Cell::new(false),
                 transcript_layout_width: Cell::new(Pixels::ZERO),
-                message_markdown: RefCell::new(HashMap::new()),
+                message_markdown: RefCell::new(memory::ByteBudgetLru::new(
+                    memory::MESSAGE_MARKDOWN_BUDGET,
+                    memory::MARKDOWN_MIN_ENTRIES,
+                    MarkdownView::source_len,
+                )),
                 user_message_viewports: RefCell::new(HashMap::new()),
-                activity_markdown: RefCell::new(HashMap::new()),
+                activity_markdown: RefCell::new(memory::ByteBudgetLru::new(
+                    memory::ACTIVITY_MARKDOWN_BUDGET,
+                    memory::MARKDOWN_MIN_ENTRIES,
+                    MarkdownView::source_len,
+                )),
                 reasoning_window_starts: RefCell::new(HashMap::new()),
                 activity_scroll_viewports: RefCell::new(HashMap::new()),
                 activity_diffs: RefCell::new(HashMap::new()),

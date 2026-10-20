@@ -1594,9 +1594,9 @@ impl Waku {
             .or_else(|| self.model_for_session(session))
     }
 
-    pub(super) fn selected_transcript_blocks(&self) -> &[TranscriptBlock] {
+    pub(super) fn selected_transcript_blocks(&self) -> &[Arc<TranscriptBlock>] {
         self.selected_session()
-            .map(|session| session.transcript_blocks.as_slice())
+            .map(|session| &session.transcript_blocks[..])
             .unwrap_or(&[])
     }
 
@@ -2661,6 +2661,9 @@ impl Waku {
                 runtime.driver.close();
             }
         }
+        // Sessions whose runtime just went, or that were left long ago, can
+        // now give back their transcripts.
+        self.dehydrate_idle_sessions();
     }
 
     /// Applies a changed model, effort, tier, or mode to a session. Transports

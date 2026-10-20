@@ -1251,7 +1251,7 @@ pub(super) fn format_working_elapsed(seconds: u64) -> String {
 /// checkpoints and provider rollback are per turn, not per message. Messages
 /// of a turn are contiguous, so this walks back only while the turn id holds
 /// rather than scanning the session, which a per-frame row builder must avoid.
-pub(super) fn message_opens_turn(messages: &[Message], message_index: usize) -> bool {
+pub(super) fn message_opens_turn(messages: &[Arc<Message>], message_index: usize) -> bool {
     let Some(turn_id) = messages
         .get(message_index)
         .filter(|message| message.role == MessageRole::User)
@@ -1266,7 +1266,10 @@ pub(super) fn message_opens_turn(messages: &[Message], message_index: usize) -> 
         .any(|earlier| earlier.role == MessageRole::User)
 }
 
-pub(super) fn message_starts_followup_turn(messages: &[Message], message_index: usize) -> bool {
+pub(super) fn message_starts_followup_turn(
+    messages: &[Arc<Message>],
+    message_index: usize,
+) -> bool {
     messages
         .get(message_index)
         .is_some_and(|message| message.role == MessageRole::User)

@@ -1,10 +1,13 @@
 //! Provider-neutral projects, sessions, transcript items, and driver events.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+
+pub use crate::shared::SharedVec;
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
@@ -997,10 +1000,15 @@ pub struct AgentSession {
     pub provider_session_id: Option<String>,
     /// Not stored in the session JSON — these are rows in the `messages`
     /// table, reattached when the session is hydrated.
+    // Each message is reference counted so a session snapshot (a save, a
+    // row builder) shares message bodies instead of copying them; write
+    // through `SharedVec`'s copy-on-write methods.
     #[serde(default)]
-    pub messages: Vec<Message>,
+    #[ts(as = "Vec<Message>")]
+    pub messages: SharedVec<Message>,
     #[serde(default)]
-    pub transcript_blocks: Vec<TranscriptBlock>,
+    #[ts(as = "Vec<TranscriptBlock>")]
+    pub transcript_blocks: SharedVec<TranscriptBlock>,
     #[serde(default)]
     pub turns: Vec<AgentTurn>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1050,8 +1058,8 @@ impl AgentSession {
             context_usage: None,
             runtime_event_cursor: None,
             provider_session_id: None,
-            messages: Vec::new(),
-            transcript_blocks: Vec::new(),
+            messages: SharedVec::new(),
+            transcript_blocks: SharedVec::new(),
             turns: Vec::new(),
             queued_messages: Vec::new(),
         }
@@ -1086,8 +1094,8 @@ impl AgentSession {
             context_usage: None,
             runtime_event_cursor: None,
             provider_session_id: None,
-            messages: Vec::new(),
-            transcript_blocks: Vec::new(),
+            messages: SharedVec::new(),
+            transcript_blocks: SharedVec::new(),
             turns: Vec::new(),
             queued_messages: Vec::new(),
             detail_loaded: false,
@@ -1130,8 +1138,8 @@ impl AgentSession {
     /// its list columns and cursors, and a later save of the skeleton only
     /// touches those columns, never the untouched detail row.
     pub fn release_transcript(&mut self) {
-        self.messages = Vec::new();
-        self.transcript_blocks = Vec::new();
+        self.messages = SharedVec::new();
+        self.transcript_blocks = SharedVec::new();
         self.turns = Vec::new();
         self.queued_messages = Vec::new();
         self.detail_loaded = false;
@@ -1214,15 +1222,18 @@ impl AgentSession {
             self.provider_cursor = Some(ProviderResumeCursor::from_session_id(self.provider, id));
         }
         if self.provider == ProviderKind::Codex {
-            for message in &mut self.messages {
+            for index in 0..self.messages.len() {
+                let message = &self.messages[index];
                 if message.role == MessageRole::Assistant && message.content.contains('\u{e200}') {
-                    message.content = strip_legacy_codex_citations(&message.content);
+                    let content = strip_legacy_codex_citations(&message.content);
+                    self.messages.make_mut(index).content = content;
                 }
             }
         }
-        let mut merged_blocks: Vec<TranscriptBlock> =
-            Vec::with_capacity(self.transcript_blocks.len());
-        for mut block in std::mem::take(&mut self.transcript_blocks) {
+        let mut merged_blocks: SharedVec<TranscriptBlock> =
+            SharedVec::with_capacity(self.transcript_blocks.len());
+        for block in std::mem::take(&mut self.transcript_blocks) {
+            let mut block = Arc::unwrap_or_clone(block);
             if let Some(previous) = merged_blocks.last_mut()
                 && previous.after_message == block.after_message
                 && previous.turn_id == block.turn_id
@@ -1300,7 +1311,7 @@ impl AgentSession {
                 .map(|message| message.created_at)
                 .max()
                 .unwrap_or(started_at);
-            for message in &mut self.messages[start..end] {
+            for message in self.messages.range_mut(start..end) {
                 message.turn_id = Some(id);
             }
             for block in &mut self.transcript_blocks {

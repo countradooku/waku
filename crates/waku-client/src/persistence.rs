@@ -5,11 +5,14 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -427,6 +430,25 @@ impl PersistedState {
         self.dirty_sessions.insert(id);
     }
 
+    /// Whether `id` has changes the next save has yet to send the daemon.
+    pub fn is_session_dirty(&self, id: Uuid) -> bool {
+        self.dirty_sessions.contains(&id)
+    }
+
+    /// Snapshots of the dirty sessions for `SaveTaskState`. Cheap: their
+    /// transcripts are shared, not copied.
+    ///
+    /// A skeleton (`detail_loaded == false`: never hydrated, or released by
+    /// dehydration) is left out. The wire cannot say "not loaded", so the
+    /// daemon would take its empty transcript as the real one.
+    fn dirty_session_snapshots(&self) -> Vec<AgentSession> {
+        self.sessions
+            .iter()
+            .filter(|session| session.detail_loaded && self.dirty_sessions.contains(&session.id))
+            .cloned()
+            .collect()
+    }
+
     pub fn push_session(&mut self, session: AgentSession) {
         self.dirty_sessions.insert(session.id);
         self.sessions.push(session);
@@ -822,6 +844,8 @@ pub struct StateStore {
     /// after a transient RPC failure must never turn the next ordinary save
     /// into a destructive replacement of the daemon database.
     task_state_loaded: AtomicBool,
+    /// Writes `app.json` and `state.json` off the UI thread.
+    app_files: AppFileWriter,
 }
 
 impl StateStore {
@@ -842,9 +866,16 @@ impl StateStore {
     }
 
     pub fn remote(daemon: DaemonSupervisor) -> Self {
+        let app_state_path = default_app_state_path();
+        let app_settings_path = default_app_settings_path();
         Self {
-            app_state_path: default_app_state_path(),
-            app_settings_path: default_app_settings_path(),
+            app_files: AppFileWriter::spawn(
+                app_settings_path.clone(),
+                app_state_path.clone(),
+                APP_FILE_WRITE_DEBOUNCE,
+            ),
+            app_state_path,
+            app_settings_path,
             legacy_settings_paths: default_legacy_settings_paths(),
             path: Self::default_path(),
             daemon,
@@ -1013,22 +1044,30 @@ impl StateStore {
         }
     }
 
+    /// Persists the desktop's state without file I/O or serialization on the
+    /// calling (UI) thread.
+    ///
+    /// - The app files go to the background [`AppFileWriter`], which
+    ///   coalesces saves into one write per [`APP_FILE_WRITE_DEBOUNCE`] and
+    ///   skips files whose bytes did not change. A failed write surfaces from
+    ///   the next call.
+    /// - Dirty sessions are snapshotted for the daemon. Their transcripts are
+    ///   [`waku_protocol::shared::SharedVec`]s, so the snapshot shares message
+    ///   and block bodies instead of copying them, and the socket thread
+    ///   serializes the command.
     pub fn save(&self, state: &mut PersistedState) -> io::Result<()> {
-        self.write_app_settings(&state.app_settings())?;
-        self.write_app_state(&state.app_state())?;
+        self.app_files.submit(AppFiles {
+            settings: state.app_settings(),
+            state: state.app_state(),
+        });
+        let write_error = self.app_files.take_error();
         if !self.task_state_loaded.load(Ordering::Acquire) {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
                 "task state was not loaded; refusing to overwrite daemon data",
             ));
         }
-        let dirty_ids = state.dirty_sessions.clone();
-        let sessions = state
-            .sessions
-            .iter()
-            .filter(|session| dirty_ids.contains(&session.id))
-            .cloned()
-            .collect();
+        let sessions = state.dirty_session_snapshots();
         let live_session_ids = state.sessions.iter().map(|session| session.id).collect();
         self.daemon
             .client()
@@ -1043,7 +1082,17 @@ impl StateStore {
             )
             .map_err(to_io_error)?;
         state.dirty_sessions.clear();
-        Ok(())
+        write_error.map_or(Ok(()), Err)
+    }
+
+    /// A blocking flush of the app files, for the background executor: it
+    /// writes whatever is still inside the debounce window now, with
+    /// `durability`. Quit uses [`Durability::Full`].
+    pub fn app_files_flush(
+        &self,
+        durability: Durability,
+    ) -> impl FnOnce() -> io::Result<()> + Send + 'static {
+        self.app_files.flush_handle(durability)
     }
 
     pub fn remove_session(&self, session_id: Uuid) -> io::Result<()> {
@@ -1107,22 +1156,264 @@ pub fn hydrate_session(
 }
 
 fn write_json_atomically(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    let data = serde_json::to_vec(value).map_err(to_io_error)?;
+    write_bytes_atomically(path, &data, Durability::Full)
+}
+
+/// How far a write must reach before it counts as done.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Durability {
+    /// Plain `fsync(2)`: the bytes reach the drive, which may still hold them
+    /// in its cache. Enough for the debounced writes: tmp+rename already
+    /// means a crash leaves the previous file or the new one, never a torn
+    /// one.
+    Fsync,
+    /// `File::sync_all`, which on macOS is `F_FULLFSYNC` and also flushes the
+    /// drive's cache (several ms). Reserved for startup and quit.
+    Full,
+}
+
+fn sync_file(file: &fs::File, durability: Durability) -> io::Result<()> {
+    match durability {
+        Durability::Full => file.sync_all(),
+        #[cfg(unix)]
+        Durability::Fsync => {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: `fsync` only reads the descriptor, which `file` keeps
+            // open for the duration of the call.
+            if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        #[cfg(not(unix))]
+        Durability::Fsync => file.sync_data(),
+    }
+}
+
+/// Crash-safe replacement: write a sibling temporary file, sync it, then
+/// rename it over `path`, so a crash leaves either the old or the new file.
+fn write_bytes_atomically(path: &Path, data: &[u8], durability: Durability) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let data = serde_json::to_vec_pretty(value).map_err(to_io_error)?;
     let temporary = path.with_extension("json.tmp");
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     options.mode(0o600);
     let mut file = options.open(&temporary)?;
-    file.write_all(&data)?;
-    file.sync_all()?;
+    file.write_all(data)?;
+    sync_file(&file, durability)?;
     fs::rename(&temporary, path)?;
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
+}
+
+/// Saves of the app files closer together than this coalesce into one write
+/// of the newest content.
+pub const APP_FILE_WRITE_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// One save's worth of desktop-owned files.
+struct AppFiles {
+    settings: AppSettings,
+    state: AppState,
+}
+
+enum AppFileCommand {
+    Write(Box<AppFiles>),
+    Flush(Durability, Sender<()>),
+    Shutdown,
+}
+
+#[derive(Default)]
+struct AppFileWriterShared {
+    /// The newest failed write, reported by the next `StateStore::save`.
+    error: Mutex<Option<io::Error>>,
+    /// Debounce windows (and flushes) that had content to write.
+    windows: AtomicU64,
+    /// Files actually rewritten.
+    file_writes: AtomicU64,
+    /// Files skipped because their bytes matched the previous write.
+    file_skips: AtomicU64,
+}
+
+/// Background writer for `app.json` and `state.json`.
+///
+/// The UI thread only moves two small structs into a channel. The writer
+/// thread serializes them as compact JSON, skips a file whose bytes match
+/// what it last wrote, and otherwise replaces it with tmp+rename and a plain
+/// `fsync`. Writes are trailing-edge debounced: the first save after a quiet
+/// period opens a window of `debounce`, later saves inside it replace its
+/// content, and the end of the window writes the newest content once. The
+/// window does not restart on every save, so a steady stream of saves still
+/// lands within `debounce` of the first one, which bounds what a `kill -9`
+/// can lose.
+struct AppFileWriter {
+    commands: Sender<AppFileCommand>,
+    shared: Arc<AppFileWriterShared>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl AppFileWriter {
+    fn spawn(settings_path: PathBuf, state_path: PathBuf, debounce: Duration) -> Self {
+        let (commands, receiver) = crossbeam_channel::unbounded();
+        let shared = Arc::new(AppFileWriterShared::default());
+        let thread = std::thread::Builder::new()
+            .name("waku-app-files".to_owned())
+            .spawn({
+                let shared = shared.clone();
+                move || {
+                    AppFileWriterThread {
+                        paths: [settings_path, state_path],
+                        fingerprints: [None, None],
+                        needs_full_sync: [false, false],
+                        shared,
+                    }
+                    .run(&receiver, debounce);
+                }
+            })
+            .ok();
+        Self {
+            commands,
+            shared,
+            thread,
+        }
+    }
+
+    fn submit(&self, files: AppFiles) {
+        let _ = self.commands.send(AppFileCommand::Write(Box::new(files)));
+    }
+
+    fn take_error(&self) -> Option<io::Error> {
+        self.shared.error.lock().take()
+    }
+
+    fn flush_handle(
+        &self,
+        durability: Durability,
+    ) -> impl FnOnce() -> io::Result<()> + Send + 'static {
+        let commands = self.commands.clone();
+        let shared = self.shared.clone();
+        move || {
+            let (done, finished) = crossbeam_channel::bounded(1);
+            commands
+                .send(AppFileCommand::Flush(durability, done))
+                .map_err(|_| io::Error::other("the app file writer has stopped"))?;
+            let _ = finished.recv();
+            shared.error.lock().take().map_or(Ok(()), Err)
+        }
+    }
+}
+
+impl Drop for AppFileWriter {
+    fn drop(&mut self) {
+        let _ = self.commands.send(AppFileCommand::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct AppFileWriterThread {
+    paths: [PathBuf; 2],
+    /// FNV-1a of the bytes last written to each path, so an unchanged file
+    /// costs one hash instead of a write and an fsync.
+    fingerprints: [Option<u64>; 2],
+    /// Paths whose newest write only had a plain `fsync`.
+    needs_full_sync: [bool; 2],
+    shared: Arc<AppFileWriterShared>,
+}
+
+impl AppFileWriterThread {
+    fn run(mut self, commands: &Receiver<AppFileCommand>, debounce: Duration) {
+        let mut pending: Option<Box<AppFiles>> = None;
+        let mut deadline: Option<Instant> = None;
+        loop {
+            let command = match deadline {
+                Some(deadline) => match commands.recv_deadline(deadline) {
+                    Ok(command) => Some(command),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => Some(AppFileCommand::Shutdown),
+                },
+                None => Some(commands.recv().unwrap_or(AppFileCommand::Shutdown)),
+            };
+            match command {
+                None => {
+                    deadline = None;
+                    self.write(pending.take(), Durability::Fsync);
+                }
+                Some(AppFileCommand::Write(files)) => {
+                    pending = Some(files);
+                    deadline.get_or_insert_with(|| Instant::now() + debounce);
+                }
+                Some(AppFileCommand::Flush(durability, done)) => {
+                    deadline = None;
+                    self.write(pending.take(), durability);
+                    let _ = done.send(());
+                }
+                Some(AppFileCommand::Shutdown) => {
+                    self.write(pending.take(), Durability::Full);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn write(&mut self, files: Option<Box<AppFiles>>, durability: Durability) {
+        let mut result = Ok(());
+        if let Some(files) = files {
+            self.shared.windows.fetch_add(1, Ordering::Relaxed);
+            let encoded = [
+                serde_json::to_vec(&files.settings),
+                serde_json::to_vec(&files.state),
+            ];
+            for (index, bytes) in encoded.into_iter().enumerate() {
+                let written = bytes
+                    .map_err(to_io_error)
+                    .and_then(|bytes| self.write_file(index, &bytes, durability));
+                result = result.and(written);
+            }
+        }
+        if durability == Durability::Full {
+            // Content an earlier window wrote with a plain fsync gets the full
+            // sync it skipped, so quit leaves everything past the drive cache.
+            for index in 0..self.paths.len() {
+                if std::mem::take(&mut self.needs_full_sync[index]) {
+                    let synced =
+                        fs::File::open(&self.paths[index]).and_then(|file| file.sync_all());
+                    result = result.and(synced);
+                }
+            }
+        }
+        if let Err(error) = result {
+            *self.shared.error.lock() = Some(error);
+        }
+    }
+
+    fn write_file(&mut self, index: usize, bytes: &[u8], durability: Durability) -> io::Result<()> {
+        let fingerprint = fnv1a(bytes);
+        if self.fingerprints[index] == Some(fingerprint) {
+            self.shared.file_skips.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+        // Forget the old fingerprint first: if this write fails, the next
+        // window must retry even when its content is unchanged.
+        self.fingerprints[index] = None;
+        write_bytes_atomically(&self.paths[index], bytes, durability)?;
+        self.fingerprints[index] = Some(fingerprint);
+        self.needs_full_sync[index] = durability == Durability::Fsync;
+        self.shared.file_writes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 fn restore_task_state_skeletons(sessions: &mut [AgentSession]) {
@@ -1192,6 +1483,169 @@ mod tests {
         let mut restored = PersistedState::empty();
         restored.apply_app_settings(serde_json::from_value(settings).unwrap());
         assert!(!restored.render_math);
+    }
+
+    fn temporary_directory(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "waku-app-files-{name}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn app_files(state: &PersistedState) -> AppFiles {
+        AppFiles {
+            settings: state.app_settings(),
+            state: state.app_state(),
+        }
+    }
+
+    fn writer_in(directory: &Path, debounce: Duration) -> AppFileWriter {
+        AppFileWriter::spawn(
+            directory.join("app.json"),
+            directory.join("state.json"),
+            debounce,
+        )
+    }
+
+    fn counts(writer: &AppFileWriter) -> (u64, u64, u64) {
+        (
+            writer.shared.windows.load(Ordering::Relaxed),
+            writer.shared.file_writes.load(Ordering::Relaxed),
+            writer.shared.file_skips.load(Ordering::Relaxed),
+        )
+    }
+
+    #[test]
+    fn a_burst_of_saves_is_one_write_per_debounce_window() {
+        let directory = temporary_directory("burst");
+        let debounce = Duration::from_millis(150);
+        let writer = writer_in(&directory, debounce);
+        let mut state = PersistedState::empty();
+
+        for width in 0..50 {
+            state.sidebar_width = 200.0 + width as f32;
+            writer.submit(app_files(&state));
+        }
+        assert_eq!(counts(&writer).0, 0, "nothing is written inside the window");
+        std::thread::sleep(debounce * 4);
+
+        let (windows, file_writes, _) = counts(&writer);
+        assert_eq!(windows, 1, "fifty saves inside one window coalesce");
+        assert_eq!(file_writes, 2, "one write each for app.json and state.json");
+        let stored: AppState =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+        assert_eq!(
+            stored.sidebar_width, 249.0,
+            "the window writes the newest save"
+        );
+        assert!(
+            !directory.join("state.json.tmp").exists(),
+            "the temporary file is renamed into place"
+        );
+
+        // A save stream that outlasts several windows still writes at most
+        // once per window.
+        let started = Instant::now();
+        let mut saves = 0;
+        while started.elapsed() < debounce * 4 {
+            state.sidebar_width += 1.0;
+            writer.submit(app_files(&state));
+            saves += 1;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        writer.flush_handle(Durability::Fsync)().unwrap();
+        let windows = counts(&writer).0 - 1;
+        assert!(
+            windows <= 6,
+            "{saves} saves over four windows wrote {windows} times"
+        );
+        let stored: AppState =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+        assert_eq!(stored.sidebar_width, state.sidebar_width);
+        drop(writer);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn unchanged_app_files_are_not_rewritten() {
+        let directory = temporary_directory("unchanged");
+        let writer = writer_in(&directory, Duration::from_secs(60));
+        let mut state = PersistedState::empty();
+
+        writer.submit(app_files(&state));
+        writer.flush_handle(Durability::Fsync)().unwrap();
+        assert_eq!(counts(&writer), (1, 2, 0));
+
+        writer.submit(app_files(&state));
+        writer.flush_handle(Durability::Fsync)().unwrap();
+        assert_eq!(counts(&writer), (2, 2, 2), "identical content is skipped");
+
+        // Only the file whose bytes changed is written.
+        state.right_panel_visible = !state.right_panel_visible;
+        writer.submit(app_files(&state));
+        writer.flush_handle(Durability::Full)().unwrap();
+        assert_eq!(counts(&writer), (3, 3, 3));
+        let stored: AppState =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+        assert_eq!(stored.right_panel_visible, state.right_panel_visible);
+
+        // Shutdown writes what is still pending.
+        state.sidebar_visible = !state.sidebar_visible;
+        writer.submit(app_files(&state));
+        drop(writer);
+        let stored: AppState =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+        assert_eq!(stored.sidebar_visible, state.sidebar_visible);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_failed_write_is_reported_and_retried() {
+        let directory = temporary_directory("failed");
+        // A directory where the file should be makes the rename fail.
+        fs::create_dir_all(directory.join("state.json")).unwrap();
+        let writer = writer_in(&directory, Duration::from_secs(60));
+        let state = PersistedState::empty();
+
+        writer.submit(app_files(&state));
+        assert!(writer.flush_handle(Durability::Fsync)().is_err());
+        assert!(
+            writer.take_error().is_none(),
+            "the flush consumed the error"
+        );
+
+        fs::remove_dir_all(directory.join("state.json")).unwrap();
+        writer.submit(app_files(&state));
+        writer.flush_handle(Durability::Fsync)().unwrap();
+        assert!(
+            directory.join("state.json").is_file(),
+            "unchanged content is retried"
+        );
+        drop(writer);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn save_snapshots_share_transcripts_and_never_send_skeletons() {
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        state.sessions[0].begin_turn("a prompt");
+        state.mark_session_dirty(id);
+        let mut skeleton = AgentSession::new(state.projects[0].id, ProviderKind::Codex);
+        skeleton.release_transcript();
+        state.push_session(skeleton);
+
+        let snapshots = state.dirty_session_snapshots();
+
+        assert_eq!(snapshots.len(), 1, "the skeleton is not sent");
+        assert_eq!(snapshots[0].id, id);
+        assert!(
+            snapshots[0].messages.ptr_eq(&state.sessions[0].messages),
+            "a snapshot shares message bodies instead of copying them"
+        );
     }
 
     #[test]

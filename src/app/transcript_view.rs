@@ -1,6 +1,5 @@
 use super::right_panel::{DiffRowStyle, render_diff_code_row};
 use super::*;
-use base64::Engine as _;
 
 const CHANGED_FILES_PREVIEW_LIMIT: usize = 3;
 /// Keep one virtualized transcript row bounded even when a generator touches
@@ -1324,7 +1323,8 @@ impl Waku {
                     let mut markdown = self.message_markdown.borrow_mut();
                     let view = matches!(message.role, MessageRole::User | MessageRole::Assistant)
                         .then(|| {
-                            let view = markdown.entry(message.id).or_default();
+                            let view =
+                                markdown.get_or_insert_with(message.id, MarkdownView::default);
                             view.set_text(message.visible_content(), message.streaming);
                             &*view
                         });
@@ -2197,7 +2197,8 @@ impl Waku {
                     .or_default()
                     .clone();
                 let mut views = self.activity_markdown.borrow_mut();
-                let view = views.entry(id).or_default();
+                let session_id = self.state.selected_session.unwrap_or_default();
+                let view = views.get_or_insert_with((session_id, id), MarkdownView::default);
                 if reasoning_live {
                     let start = self.live_reasoning_window_start(id, &reasoning.content, view);
                     view.set_text(&reasoning.content[start..], true);
@@ -2824,9 +2825,9 @@ fn render_activity_image(
     image_index: usize,
     theme: &Theme,
 ) -> AnyElement {
-    // Daemon blobs arrive only when a visible row requests them and GPUI keeps
-    // their decoded form in memory. Only legacy inline data URLs still pay a
-    // per-render base64 decode.
+    // Daemon blobs arrive only when a visible row requests them, and legacy
+    // inline data URLs are decoded once; both come from the bounded image
+    // cache, and GPUI keeps their decoded form until the cache evicts them.
     let id = SharedString::from(format!("activity-image-{activity_id}-{image_index}"));
     if let Some(image) = image {
         return img(image)
@@ -2857,28 +2858,17 @@ fn render_activity_image(
             .into_any_element();
     };
 
-    match decode_activity_image(image_url) {
-        Some(image) => img(image),
-        None => img(image_url.to_owned()),
-    }
-    .id(id)
-    .w(px(ACTIVITY_IMAGE_WIDTH))
-    .max_w(gpui::relative(1.0))
-    .max_h(px(ACTIVITY_IMAGE_HEIGHT))
-    .mt(px(8.0))
-    .rounded(px(4.0))
-    .object_fit(ObjectFit::Contain)
-    .into_any_element()
-}
-
-fn decode_activity_image(image_url: &str) -> Option<std::sync::Arc<gpui::Image>> {
-    let (header, encoded) = image_url.split_once(",")?;
-    let mime_type = header.strip_prefix("data:")?.split(';').next()?;
-    let format = gpui::ImageFormat::from_mime_type(mime_type)?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()?;
-    (!bytes.is_empty()).then(|| std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)))
+    // Not a daemon reference and not a decodable inline image (those arrive
+    // already decoded from the image cache): let GPUI resolve the URI.
+    img(image_url.to_owned())
+        .id(id)
+        .w(px(ACTIVITY_IMAGE_WIDTH))
+        .max_w(gpui::relative(1.0))
+        .max_h(px(ACTIVITY_IMAGE_HEIGHT))
+        .mt(px(8.0))
+        .rounded(px(4.0))
+        .object_fit(ObjectFit::Contain)
+        .into_any_element()
 }
 
 #[cfg(test)]
