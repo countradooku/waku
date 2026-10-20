@@ -9,6 +9,7 @@ mod effects;
 mod feed;
 mod forward_compat;
 mod idempotency;
+mod lifecycle;
 mod migrations;
 mod rebuild;
 mod search;

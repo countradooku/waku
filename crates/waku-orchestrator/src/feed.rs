@@ -118,6 +118,12 @@ impl CommittedFeed {
         self.receiver.try_iter().collect()
     }
 
+    /// The underlying channel, for `crossbeam_channel::select!` with other
+    /// sources. A disconnect means the feed ended; see [`Self::overflowed`].
+    pub fn receiver(&self) -> &Receiver<Arc<StoredEvent>> {
+        &self.receiver
+    }
+
     pub fn overflowed(&self) -> bool {
         self.overflowed.load(Ordering::Acquire)
     }

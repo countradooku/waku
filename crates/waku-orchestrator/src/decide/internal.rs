@@ -200,14 +200,31 @@ pub(super) fn decide(
             }
         }
         InternalCommand::AutoSettle { snapshot_at, .. } => {
+            // The auto-settle service decided on a snapshot of the thread;
+            // anything that changed since (`updated_at`), or any state the
+            // policy refuses (`lifecycle::policy::is_candidate`), makes this
+            // a no-op.
             let thread = &draft.thread;
+            let pending_request = draft
+                .all_requests()
+                .iter()
+                .any(|request| request.status == RequestStatus::Pending);
+            let background_work = draft
+                .base
+                .provider_threads
+                .values()
+                .any(|provider_thread| !provider_thread.pending_background_tasks.is_empty());
             let eligible = thread.auto_settle_disabled_at.is_none()
                 && thread.settled_at.is_none()
+                && thread.settled_override.is_none()
+                && thread.archived_at.is_none()
+                && thread.pinned_at.is_none()
                 && thread.deleted_at.is_none()
-                && thread.settled_override != Some(SettledOverride::Active)
                 && thread.updated_at <= *snapshot_at
                 && draft.active_run().is_none()
-                && draft.queue_head().is_none();
+                && draft.queue_head().is_none()
+                && !pending_request
+                && !background_work;
             if eligible {
                 draft.touch_thread(ThreadChange::AutoSettled).settled_at = Some(now);
                 draft.effect(Effect::TerminalCleanup);
