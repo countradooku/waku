@@ -8718,6 +8718,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "waku-bench-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "crossbeam-channel",
+ "flate2",
+ "libc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "uuid",
+ "waku-client",
+ "waku-core",
+ "waku-protocol",
+]
+
+[[package]]
 name = "waku-client"
 version = "0.1.0"
 dependencies = [
