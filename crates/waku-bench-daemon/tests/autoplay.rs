@@ -97,7 +97,7 @@ fn autoplay_waits_for_an_attach_then_streams_the_timeline_to_it() {
         let event = events
             .recv_timeout(Duration::from_secs(10))
             .expect("timed out waiting for the autoplayed turn");
-        let finished = event.event.kind == "turnFinished";
+        let finished = event.event.kind() == "turnFinished";
         received.push(event);
         if finished {
             break;
@@ -107,10 +107,13 @@ fn autoplay_waits_for_an_attach_then_streams_the_timeline_to_it() {
         attached_at.elapsed() >= delay,
         "the prompt must wait for the configured delay"
     );
-    let kinds = received
+    let mut kinds = received
         .iter()
-        .map(|event| event.event.kind.as_str())
+        .map(|event| event.event.kind())
         .collect::<Vec<_>>();
+    // The daemon may merge the two adjacent text deltas into one event,
+    // depending on how far apart they arrive.
+    kinds.dedup();
     // `connected` was journaled before this client existed and is replayed
     // to it on subscribe; the prompt and the replay follow.
     assert_eq!(
@@ -119,7 +122,6 @@ fn autoplay_waits_for_an_attach_then_streams_the_timeline_to_it() {
             "connected",
             "promptSubmitted",
             "turnStarted",
-            "textDelta",
             "textDelta",
             "turnFinished"
         ]

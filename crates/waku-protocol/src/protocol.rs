@@ -17,6 +17,7 @@ use crate::settings::DaemonSettings;
 use crate::skills::SkillsCatalog;
 use crate::usage::PlanUsage;
 use crate::usage_history::{UsageHistory, UsageWindow};
+use crate::wire_event::WireDriverEvent;
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
 pub const PROTOCOL_VERSION: u32 = 8;
@@ -317,23 +318,6 @@ pub struct WireComputerToolRequest {
     pub call_id: String,
     pub tool: String,
     pub arguments: Value,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct WireDriverEvent {
-    pub kind: String,
-    #[serde(default)]
-    pub payload: Value,
-}
-
-impl WireDriverEvent {
-    pub fn new(kind: impl Into<String>, payload: Value) -> Self {
-        Self {
-            kind: kind.into(),
-            payload,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]

@@ -127,8 +127,15 @@ fn connect_remote(
                                 )),
                             };
                             let process_exited = matches!(&event, DriverEvent::ProcessExited);
-                            if forwarding_events.send(event).is_err()
-                                || forwarding_events
+                            if forwarding_events.send(event).is_err() {
+                                return;
+                            }
+                            // One cursor per burst rather than per event: it
+                            // only says every event up to it is in the
+                            // channel, so the last one of a batch is enough
+                            // and the UI drains half as many messages (#21).
+                            if (process_exited || remote_events.is_empty())
+                                && forwarding_events
                                     .send(DriverEvent::RuntimeEventCursorAdvanced(cursor))
                                     .is_err()
                             {

@@ -1435,7 +1435,7 @@ function syntheticEvent(
     runtimeId,
     epoch: 'local',
     sequence: 0,
-    event: { kind, payload: payload as never },
+    event: { kind, payload } as SequencedEvent['event'],
   }
 }
 

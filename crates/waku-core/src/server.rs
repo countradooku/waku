@@ -30,7 +30,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 };
 use tokio_tungstenite::tungstenite::http::{StatusCode, header::ORIGIN};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::tungstenite::{self, Message};
+use tokio_tungstenite::tungstenite::{self, Message, Utf8Bytes};
 use uuid::Uuid;
 
 use crate::local_socket::LocalListener;
@@ -54,6 +54,15 @@ const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_PRE_AUTH_BYTES: usize = MAX_HANDSHAKE_MESSAGE_BYTES + 16 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const MAX_REPLAY_EVENTS_PER_SESSION: usize = 2048;
+/// A runtime's replay journal also stops at this many serialized bytes, so a
+/// burst of large tool outputs cannot pin hundreds of megabytes (#21).
+const MAX_REPLAY_BYTES_PER_RUNTIME: usize = 8 * 1024 * 1024;
+/// Text and reasoning deltas of one runtime that arrive within this window
+/// are sent as one event. Providers emit hundreds of small chunks a second,
+/// and each event pays an envelope of ~150 bytes plus a frame and a wakeup.
+const DELTA_COALESCE_WINDOW: Duration = Duration::from_millis(12);
+/// A pending delta this large is sent at once rather than at its deadline.
+const MAX_COALESCED_DELTA_BYTES: usize = 64 * 1024;
 /// Per-subscriber cap on queued daemon messages. A subscriber that falls this
 /// far behind live events is dropped instead of buffered for, so a stalled
 /// client cannot make the daemon's heap grow at the stream rate forever.
@@ -219,9 +228,97 @@ impl EventSink {
     }
 }
 
+/// A daemon message serialized once (#21). Cloning it bumps a reference
+/// count, so the journal and every subscriber queue share one buffer.
+type Frame = Utf8Bytes;
+
+/// One item of a connection's outgoing queue.
+enum Outbound {
+    /// A JSON text message.
+    Text(Frame),
+    /// The connection's last message: written and flushed, then the writer
+    /// stops.
+    Final(Frame),
+}
+
 /// A connection's outgoing queue. Hub fan-out and request workers push into
 /// it; the connection's writer task drains it.
-type Outgoing = mpsc::Sender<ServerMessage>;
+type Outgoing = mpsc::Sender<Outbound>;
+
+/// Serialize a message for the wire, once.
+fn encode<T: serde::Serialize>(message: &T) -> Option<Frame> {
+    match serde_json::to_string(message) {
+        Ok(text) => Some(Frame::from(text)),
+        Err(error) => {
+            eprintln!("waku-daemon could not encode a message: {error}");
+            None
+        }
+    }
+}
+
+/// `ServerMessage::Response` serialized from a borrowed outcome, so a large
+/// outcome (a hydrated session) is not cloned just to be written.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename = "response", rename_all = "camelCase")]
+struct ResponseFrame<'a> {
+    request_id: Uuid,
+    outcome: &'a ResponseOutcome,
+}
+
+/// One retained, already serialized runtime event.
+struct JournalEntry {
+    sequence: u64,
+    frame: Frame,
+}
+
+/// A runtime's replay journal, bounded by count and by bytes.
+#[derive(Default)]
+struct Journal {
+    entries: VecDeque<JournalEntry>,
+    bytes: usize,
+}
+
+impl Journal {
+    fn push(&mut self, sequence: u64, frame: Frame) {
+        self.bytes = self.bytes.saturating_add(frame.len());
+        self.entries.push_back(JournalEntry { sequence, frame });
+        while self.entries.len() > MAX_REPLAY_EVENTS_PER_SESSION
+            || (self.bytes > MAX_REPLAY_BYTES_PER_RUNTIME && self.entries.len() > 1)
+        {
+            if let Some(evicted) = self.entries.pop_front() {
+                self.bytes = self.bytes.saturating_sub(evicted.frame.len());
+            }
+        }
+    }
+}
+
+/// Streamed text held back for up to [`DELTA_COALESCE_WINDOW`] so that a
+/// provider's many small chunks become one event.
+struct PendingDelta {
+    event: WireDriverEvent,
+    deadline: Instant,
+}
+
+impl PendingDelta {
+    /// Append `next` if it is the same kind of delta. Returns it otherwise.
+    fn absorb(&mut self, next: WireDriverEvent) -> Option<WireDriverEvent> {
+        match (&mut self.event, next) {
+            (WireDriverEvent::TextDelta(text), WireDriverEvent::TextDelta(more))
+            | (WireDriverEvent::ReasoningDelta(text), WireDriverEvent::ReasoningDelta(more)) => {
+                text.push_str(&more);
+                None
+            }
+            (_, next) => Some(next),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.event {
+            WireDriverEvent::TextDelta(text) | WireDriverEvent::ReasoningDelta(text) => text.len(),
+            _ => 0,
+        }
+    }
+}
 
 /// One connected client's delivery state.
 struct Subscriber {
@@ -252,8 +349,10 @@ struct HubState {
     subscribers: HashMap<u64, Subscriber>,
     active_runtimes: HashMap<Uuid, Uuid>,
     next_sequences: HashMap<(Uuid, Uuid), u64>,
-    journal: HashMap<(Uuid, Uuid), VecDeque<SequencedEvent>>,
-    responses: VecDeque<(Uuid, ResponseOutcome, usize)>,
+    journal: HashMap<(Uuid, Uuid), Journal>,
+    pending_deltas: HashMap<(Uuid, Uuid), PendingDelta>,
+    /// Serialized responses by request id; their length is their cost.
+    responses: VecDeque<(Uuid, Frame)>,
     cached_response_bytes: usize,
     catalog_projects: HashMap<Uuid, ProjectCatalogEntry>,
     catalog_sessions: HashMap<Uuid, SessionCatalogEntry>,
@@ -306,6 +405,8 @@ impl From<&AgentSession> for SessionCatalogEntry {
 struct Hub {
     epoch: Uuid,
     state: Mutex<HubState>,
+    /// Wakes the delta-coalescing thread; started on the first delta.
+    coalescer: Mutex<Option<crossbeam_channel::Sender<Instant>>>,
 }
 
 impl Default for Hub {
@@ -313,6 +414,7 @@ impl Default for Hub {
         Self {
             epoch: Uuid::new_v4(),
             state: Mutex::new(HubState::default()),
+            coalescer: Mutex::new(None),
         }
     }
 }
@@ -357,14 +459,23 @@ impl Hub {
         state
             .journal
             .retain(|(candidate, _), _| *candidate != session_id);
+        state
+            .pending_deltas
+            .retain(|(candidate, _), _| *candidate != session_id);
     }
 
     fn end_runtime(&self, session_id: Uuid, runtime_id: Option<Uuid>) {
         let mut state = self.state.lock();
-        let matches_active = runtime_id
-            .is_none_or(|runtime_id| state.active_runtimes.get(&session_id) == Some(&runtime_id));
-        if !matches_active {
+        let Some(&active) = state.active_runtimes.get(&session_id) else {
             return;
+        };
+        if runtime_id.is_some_and(|runtime_id| runtime_id != active) {
+            return;
+        }
+        // Text the provider streamed just before closing still goes out.
+        let key = (session_id, active);
+        if let Some(pending) = state.pending_deltas.remove(&key) {
+            self.publish(&mut state, key, pending.event, true);
         }
         state.active_runtimes.remove(&session_id);
         state
@@ -373,34 +484,141 @@ impl Hub {
         state
             .journal
             .retain(|(candidate, _), _| *candidate != session_id);
+        state
+            .pending_deltas
+            .retain(|(candidate, _), _| *candidate != session_id);
     }
 
-    fn emit(&self, session_id: Uuid, runtime_id: Uuid, event: WireDriverEvent, replayable: bool) {
+    /// Accept one runtime event. Text and reasoning deltas are merged with
+    /// the runtime's next deltas of the same kind for up to
+    /// [`DELTA_COALESCE_WINDOW`]; any other event first flushes the pending
+    /// delta, so order is preserved exactly.
+    fn emit(
+        self: &Arc<Self>,
+        session_id: Uuid,
+        runtime_id: Uuid,
+        event: WireDriverEvent,
+        replayable: bool,
+    ) {
         profile_span!(TRACE, "Hub::emit");
         let mut state = self.state.lock();
         if state.active_runtimes.get(&session_id) != Some(&runtime_id) {
             return;
         }
+        let key = (session_id, runtime_id);
+        if replayable && event.is_delta() {
+            let event = match state.pending_deltas.get_mut(&key) {
+                Some(pending) => match pending.absorb(event) {
+                    None if pending.len() < MAX_COALESCED_DELTA_BYTES => return,
+                    None => {
+                        let full = state
+                            .pending_deltas
+                            .remove(&key)
+                            .expect("the pending delta was just extended");
+                        self.publish(&mut state, key, full.event, true);
+                        return;
+                    }
+                    Some(other_kind) => {
+                        let previous = state
+                            .pending_deltas
+                            .remove(&key)
+                            .expect("the pending delta was just inspected");
+                        self.publish(&mut state, key, previous.event, true);
+                        other_kind
+                    }
+                },
+                None => event,
+            };
+            let deadline = Instant::now() + DELTA_COALESCE_WINDOW;
+            state
+                .pending_deltas
+                .insert(key, PendingDelta { event, deadline });
+            drop(state);
+            self.arm_coalescer(deadline);
+            return;
+        }
+        if let Some(pending) = state.pending_deltas.remove(&key) {
+            self.publish(&mut state, key, pending.event, true);
+        }
+        self.publish(&mut state, key, event, replayable);
+    }
+
+    /// Sequence, serialize once, journal and broadcast one event.
+    fn publish(
+        &self,
+        state: &mut HubState,
+        (session_id, runtime_id): (Uuid, Uuid),
+        event: WireDriverEvent,
+        replayable: bool,
+    ) {
         let sequence = state
             .next_sequences
             .entry((session_id, runtime_id))
             .or_default();
         *sequence = sequence.saturating_add(1);
-        let event = SequencedEvent {
+        let sequence = *sequence;
+        let Some(frame) = encode(&ServerMessage::Event(SequencedEvent {
             session_id,
             runtime_id,
             epoch: self.epoch,
-            sequence: *sequence,
+            sequence,
             event,
+        })) else {
+            return;
         };
         if replayable {
-            let journal = state.journal.entry((session_id, runtime_id)).or_default();
-            journal.push_back(event.clone());
-            while journal.len() > MAX_REPLAY_EVENTS_PER_SESSION {
-                journal.pop_front();
+            state
+                .journal
+                .entry((session_id, runtime_id))
+                .or_default()
+                .push(sequence, frame.clone());
+        }
+        Self::broadcast(state, &frame, None);
+    }
+
+    /// Wake the coalescing thread for `deadline`, starting it on first use.
+    /// The thread sleeps on its channel and wakes only while deltas wait.
+    fn arm_coalescer(self: &Arc<Self>, deadline: Instant) {
+        let mut wake = self.coalescer.lock();
+        if wake.is_none() {
+            let (sender, deadlines) = crossbeam_channel::unbounded();
+            let hub = Arc::downgrade(self);
+            let started = std::thread::Builder::new()
+                .name("waku-daemon-coalesce".into())
+                .spawn(move || run_coalescer(hub, deadlines));
+            if started.is_err() {
+                drop(wake);
+                // Without the thread nothing would flush; send at once.
+                self.flush_due_deltas(Instant::now() + DELTA_COALESCE_WINDOW);
+                return;
+            }
+            *wake = Some(sender);
+        }
+        if let Some(wake) = wake.as_ref() {
+            let _ = wake.send(deadline);
+        }
+    }
+
+    /// Publish every pending delta whose window has closed by `now`, and
+    /// return the earliest deadline still waiting.
+    fn flush_due_deltas(&self, now: Instant) -> Option<Instant> {
+        let mut state = self.state.lock();
+        let due = state
+            .pending_deltas
+            .iter()
+            .filter(|(_, pending)| pending.deadline <= now)
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>();
+        for key in due {
+            if let Some(pending) = state.pending_deltas.remove(&key) {
+                self.publish(&mut state, key, pending.event, true);
             }
         }
-        Self::broadcast(&mut state, &ServerMessage::Event(event), None);
+        state
+            .pending_deltas
+            .values()
+            .map(|pending| pending.deadline)
+            .min()
     }
 
     fn subscribe(&self, resume_from: &[ReplayCursor], subscriber: Subscriber) -> u64 {
@@ -416,7 +634,7 @@ impl Hub {
         // from session state.
         let messages = subscriber.messages.clone();
         state.subscribers.insert(id, subscriber);
-        for (&(session_id, runtime_id), events) in &state.journal {
+        for (&(session_id, runtime_id), journal) in &state.journal {
             let sequence = resume_from
                 .iter()
                 .find(|cursor| {
@@ -426,9 +644,13 @@ impl Hub {
                 })
                 .map(|cursor| cursor.sequence)
                 .unwrap_or_default();
-            for event in events.iter().filter(|event| event.sequence > sequence) {
+            for entry in journal
+                .entries
+                .iter()
+                .filter(|entry| entry.sequence > sequence)
+            {
                 if messages
-                    .try_send(ServerMessage::Event(event.clone()))
+                    .try_send(Outbound::Text(entry.frame.clone()))
                     .is_err()
                 {
                     return id;
@@ -442,18 +664,22 @@ impl Hub {
         self.state.lock().subscribers.remove(&subscriber_id);
     }
 
-    /// Sends `message` to every subscriber except `skip`, dropping any whose
+    /// Sends `frame` to every subscriber except `skip`, dropping any whose
     /// bounded queue is full. Buffering a stalled client at the daemon's
     /// event rate is how resident memory grew without bound; a dropped
     /// subscriber's connection observes the kick, closes, and reconnects with
     /// replay cursors, so no event stream is lost permanently.
-    fn broadcast(state: &mut HubState, message: &ServerMessage, skip: Option<u64>) {
+    fn broadcast(state: &mut HubState, frame: &Frame, skip: Option<u64>) {
         let mut overwhelmed = Vec::new();
         for (&subscriber_id, subscriber) in &state.subscribers {
             if Some(subscriber_id) == skip {
                 continue;
             }
-            if subscriber.messages.try_send(message.clone()).is_err() {
+            if subscriber
+                .messages
+                .try_send(Outbound::Text(frame.clone()))
+                .is_err()
+            {
                 overwhelmed.push(subscriber_id);
             }
         }
@@ -514,48 +740,65 @@ impl Hub {
 
     fn broadcast_task_state_changed(state: &mut HubState, source_subscriber_id: u64) {
         state.task_state_revision = state.task_state_revision.saturating_add(1);
-        let message = ServerMessage::TaskStateChanged {
+        if let Some(frame) = encode(&ServerMessage::TaskStateChanged {
             revision: state.task_state_revision,
-        };
-        Self::broadcast(state, &message, Some(source_subscriber_id));
+        }) {
+            Self::broadcast(state, &frame, Some(source_subscriber_id));
+        }
     }
 
-    fn cached_response(&self, request_id: Uuid) -> Option<ResponseOutcome> {
+    fn cached_response(&self, request_id: Uuid) -> Option<Frame> {
         self.state
             .lock()
             .responses
             .iter()
             .rev()
-            .find_map(|(cached_id, outcome, _)| (*cached_id == request_id).then(|| outcome.clone()))
+            .find_map(|(cached_id, frame)| (*cached_id == request_id).then(|| frame.clone()))
     }
 
-    fn cache_response(&self, request_id: Uuid, outcome: ResponseOutcome) {
-        // File bytes are bulk data that clients read once; caching a copy per
-        // request would duplicate every open file in daemon memory, and the
-        // request is cheap to re-run if it is ever retried.
-        if matches!(
-            &outcome,
-            ResponseOutcome::Ok {
-                payload: ResponsePayload::BlobData { .. }
-            }
-        ) {
-            return;
-        }
-        // Outcomes carry serde payloads whose in-memory size tracks their
-        // serialized form closely enough for a cache budget.
-        let bytes = serde_json::to_string(&outcome)
-            .map(|serialized| serialized.len())
-            .unwrap_or(0);
+    /// Keep a response's serialized frame so a client that missed it can
+    /// fetch it again. The frame is the one the connection writes, so its
+    /// length is exactly what it costs.
+    fn cache_response(&self, request_id: Uuid, frame: Frame) {
+        let bytes = frame.len();
         let mut state = self.state.lock();
         state.cached_response_bytes = state.cached_response_bytes.saturating_add(bytes);
-        state.responses.push_back((request_id, outcome, bytes));
+        state.responses.push_back((request_id, frame));
         while state.responses.len() > MAX_CACHED_RESPONSES
             || state.cached_response_bytes > MAX_CACHED_RESPONSE_BYTES
         {
-            if let Some((_, _, evicted_bytes)) = state.responses.pop_front() {
+            if let Some((_, evicted)) = state.responses.pop_front() {
                 state.cached_response_bytes =
-                    state.cached_response_bytes.saturating_sub(evicted_bytes);
+                    state.cached_response_bytes.saturating_sub(evicted.len());
             }
+        }
+    }
+}
+
+/// Flushes pending deltas when their window closes. It blocks on its channel
+/// with no timeout while nothing is pending, and exits when the hub is gone.
+fn run_coalescer(hub: Weak<Hub>, deadlines: crossbeam_channel::Receiver<Instant>) {
+    let mut next: Option<Instant> = None;
+    loop {
+        let received = match next {
+            Some(at) => deadlines.recv_deadline(at),
+            None => deadlines
+                .recv()
+                .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected),
+        };
+        match received {
+            Ok(deadline) => {
+                next = Some(next.map_or(deadline, |next| next.min(deadline)));
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        }
+        let now = Instant::now();
+        if next.is_some_and(|next| next <= now) {
+            let Some(hub) = hub.upgrade() else {
+                return;
+            };
+            next = hub.flush_due_deltas(now);
         }
     }
 }
@@ -926,7 +1169,7 @@ type ServerStream<S> = SplitStream<WebSocketStream<PreAuthLimit<S>>>;
 /// fed.
 async fn write_outgoing<S>(
     mut sink: ServerSink<S>,
-    mut outgoing: mpsc::Receiver<ServerMessage>,
+    mut outgoing: mpsc::Receiver<Outbound>,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -940,21 +1183,27 @@ where
                 continue;
             }
         };
-        let mut shutting_down = matches!(message, ServerMessage::ShuttingDown);
-        within_stall(sink.feed(text_message(&message)?)).await?;
+        let mut shutting_down = matches!(message, Outbound::Final(_));
+        within_stall(sink.feed(outbound_message(message))).await?;
         let mut batched = 1;
         while !shutting_down && batched < MAX_MESSAGES_PER_FLUSH {
             let Ok(message) = outgoing.try_recv() else {
                 break;
             };
-            shutting_down = matches!(message, ServerMessage::ShuttingDown);
-            within_stall(sink.feed(text_message(&message)?)).await?;
+            shutting_down = matches!(message, Outbound::Final(_));
+            within_stall(sink.feed(outbound_message(message))).await?;
             batched += 1;
         }
         within_stall(sink.flush()).await?;
         if shutting_down {
             return Ok(());
         }
+    }
+}
+
+fn outbound_message(outbound: Outbound) -> Message {
+    match outbound {
+        Outbound::Text(frame) | Outbound::Final(frame) => Message::Text(frame),
     }
 }
 
@@ -1004,14 +1253,16 @@ where
             }
             Ok(ClientMessage::Shutdown) => {
                 if context.options.allow_shutdown {
-                    let _ = outgoing.send(ServerMessage::ShuttingDown).await;
+                    if let Some(frame) = encode(&ServerMessage::ShuttingDown) {
+                        let _ = outgoing.send(Outbound::Final(frame)).await;
+                    }
                     return Ok(ReaderExit::Shutdown);
                 }
-                let _ = outgoing
-                    .send(ServerMessage::Rejected {
-                        message: "daemon shutdown is managed by its service owner".into(),
-                    })
-                    .await;
+                if let Some(frame) = encode(&ServerMessage::Rejected {
+                    message: "daemon shutdown is managed by its service owner".into(),
+                }) {
+                    let _ = outgoing.send(Outbound::Text(frame)).await;
+                }
             }
             Ok(ClientMessage::Hello { .. }) => {}
             Err(error) => {
@@ -1217,36 +1468,36 @@ async fn run_runtime_mailbox(
             return;
         };
 
-        if handled.executed {
+        if let Some(outcome) = &handled.outcome {
             if starts_runtime {
                 active_runtime_id =
-                    matches!(&handled.outcome, ResponseOutcome::Ok { .. }).then_some(runtime_id);
+                    matches!(outcome, ResponseOutcome::Ok { .. }).then_some(runtime_id);
             } else if let ResponseOutcome::Ok {
                 payload:
                     ResponsePayload::SessionRuntime {
                         runtime_id: Some(attached_runtime_id),
                         ..
                     },
-            } = &handled.outcome
+            } = outcome
             {
                 // A replacement mailbox can rediscover a provider runtime
                 // that survived its previous actor worker.
                 active_runtime_id = Some(*attached_runtime_id);
             } else if closes_runtime {
                 if (removes_session || active_runtime_id == Some(runtime_id))
-                    && matches!(&handled.outcome, ResponseOutcome::Ok { .. })
+                    && matches!(outcome, ResponseOutcome::Ok { .. })
                 {
                     hub.end_runtime(session_id, (!removes_session).then_some(runtime_id));
                     active_runtime_id = None;
                 }
             } else if active_runtime_id.is_none()
                 && !matches!(
-                    &handled.outcome,
+                    outcome,
                     ResponseOutcome::Ok {
                         payload: ResponsePayload::SessionRuntime { .. }
                     }
                 )
-                && matches!(&handled.outcome, ResponseOutcome::Ok { .. })
+                && matches!(outcome, ResponseOutcome::Ok { .. })
             {
                 // Recover the supervisor state if a previous mailbox worker
                 // exited unexpectedly while the backend runtime stayed alive.
@@ -1297,8 +1548,9 @@ fn take_queued_request_or_retire(
 }
 
 struct HandledRequest {
-    outcome: ResponseOutcome,
-    executed: bool,
+    /// The backend's outcome; `None` when a cached response was resent
+    /// instead of running the request again.
+    outcome: Option<ResponseOutcome>,
 }
 
 enum TaskCatalogAction {
@@ -1327,59 +1579,68 @@ fn handle_request(
         &request.command,
         Command::Start { .. } | Command::OpenTerminal { .. }
     );
-    let (outcome, executed) = if !notification && let Some(cached) = hub.cached_response(request_id)
-    {
-        (cached, false)
-    } else {
-        if starts_runtime {
-            hub.begin_runtime(session_id, runtime_id);
-        }
-        let outcome = match backend.handle(request, hub.event_sink(session_id, runtime_id)) {
-            Ok(payload) => ResponseOutcome::Ok { payload },
-            Err(error) => ResponseOutcome::Error {
-                error: RpcError::from(error),
-            },
-        };
-        if !notification {
-            hub.cache_response(request_id, outcome.clone());
-        }
-        (outcome, true)
+    if !notification && let Some(cached) = hub.cached_response(request_id) {
+        let _ = outgoing.blocking_send(Outbound::Text(cached));
+        return HandledRequest { outcome: None };
+    }
+    if starts_runtime {
+        hub.begin_runtime(session_id, runtime_id);
+    }
+    let outcome = match backend.handle(request, hub.event_sink(session_id, runtime_id)) {
+        Ok(payload) => ResponseOutcome::Ok { payload },
+        Err(error) => ResponseOutcome::Error {
+            error: RpcError::from(error),
+        },
     };
-    if executed && starts_runtime && matches!(&outcome, ResponseOutcome::Error { .. }) {
+    if starts_runtime && matches!(&outcome, ResponseOutcome::Error { .. }) {
         hub.end_runtime(session_id, Some(runtime_id));
     }
-    if executed {
-        match (&task_catalog_action, &outcome) {
-            (
-                TaskCatalogAction::Load,
-                ResponseOutcome::Ok {
-                    payload:
-                        ResponsePayload::TaskState {
-                            projects, sessions, ..
-                        },
-                },
-            ) => hub.replace_task_catalog(projects, sessions),
-            (
-                TaskCatalogAction::Save { projects },
-                ResponseOutcome::Ok {
-                    payload: ResponsePayload::TaskStateSaved { sessions },
-                },
-            ) => hub.task_state_saved(source_subscriber_id, projects, sessions),
-            (TaskCatalogAction::Changed, ResponseOutcome::Ok { .. }) => {
-                hub.task_state_changed(source_subscriber_id);
-            }
-            _ => {}
+    match (&task_catalog_action, &outcome) {
+        (
+            TaskCatalogAction::Load,
+            ResponseOutcome::Ok {
+                payload:
+                    ResponsePayload::TaskState {
+                        projects, sessions, ..
+                    },
+            },
+        ) => hub.replace_task_catalog(projects, sessions),
+        (
+            TaskCatalogAction::Save { projects },
+            ResponseOutcome::Ok {
+                payload: ResponsePayload::TaskStateSaved { sessions },
+            },
+        ) => hub.task_state_saved(source_subscriber_id, projects, sessions),
+        (TaskCatalogAction::Changed, ResponseOutcome::Ok { .. }) => {
+            hub.task_state_changed(source_subscriber_id);
         }
+        _ => {}
     }
-    if !notification {
+    if !notification
+        && let Some(frame) = encode(&ResponseFrame {
+            request_id,
+            outcome: &outcome,
+        })
+    {
+        // File bytes are bulk data that clients read once; caching a copy
+        // per request would duplicate every open file in daemon memory, and
+        // the request is cheap to re-run if it is ever retried.
+        let bulk = matches!(
+            &outcome,
+            ResponseOutcome::Ok {
+                payload: ResponsePayload::BlobData { .. }
+            }
+        );
+        if !bulk {
+            hub.cache_response(request_id, frame.clone());
+        }
         // A full queue means the connection is being kicked for falling
         // behind; waiting here is bounded by its writer draining or closing.
-        let _ = outgoing.blocking_send(ServerMessage::Response {
-            request_id,
-            outcome: outcome.clone(),
-        });
+        let _ = outgoing.blocking_send(Outbound::Text(frame));
     }
-    HandledRequest { outcome, executed }
+    HandledRequest {
+        outcome: Some(outcome),
+    }
 }
 
 fn task_catalog_action(command: &Command) -> TaskCatalogAction {
@@ -1443,18 +1704,38 @@ mod tests {
 
     /// The receiving end of a connection queue, for driving the hub and the
     /// dispatcher without a socket.
-    struct TestQueue(mpsc::Receiver<ServerMessage>);
+    struct TestQueue(mpsc::Receiver<Outbound>);
+
+    fn decode(outbound: Outbound) -> ServerMessage {
+        match outbound {
+            Outbound::Text(frame) | Outbound::Final(frame) => {
+                serde_json::from_str(frame.as_str()).unwrap()
+            }
+        }
+    }
+
+    /// A non-delta event that carries `text`, so it is never coalesced.
+    fn marker(text: &str) -> WireDriverEvent {
+        WireDriverEvent::Error(text.into())
+    }
+
+    fn marker_text(event: &SequencedEvent) -> &str {
+        match &event.event {
+            WireDriverEvent::Error(text) => text,
+            other => panic!("expected a marker event, got {}", other.kind()),
+        }
+    }
 
     impl TestQueue {
         fn try_recv(&mut self) -> Result<ServerMessage, mpsc::error::TryRecvError> {
-            self.0.try_recv()
+            self.0.try_recv().map(decode)
         }
 
         fn recv_timeout(&mut self, timeout: Duration) -> Result<ServerMessage, ()> {
             let deadline = Instant::now() + timeout;
             loop {
                 match self.0.try_recv() {
-                    Ok(message) => return Ok(message),
+                    Ok(message) => return Ok(decode(message)),
                     Err(mpsc::error::TryRecvError::Disconnected) => return Err(()),
                     Err(mpsc::error::TryRecvError::Empty) if Instant::now() >= deadline => {
                         return Err(());
@@ -1500,7 +1781,7 @@ mod tests {
             match request.command {
                 Command::Start { .. } => {
                     self.runtimes.lock().insert(session_id, runtime_id);
-                    events.send(WireDriverEvent::new("connected", json!({})))?;
+                    events.send(WireDriverEvent::Connected(None))?;
                     Ok(ResponsePayload::Started {
                         supports_steer: true,
                     })
@@ -1513,7 +1794,7 @@ mod tests {
                     settings: DaemonSettings::default(),
                 }),
                 Command::Prompt { prompt, .. } => {
-                    events.send(WireDriverEvent::new("textDelta", json!(prompt)))?;
+                    events.send(WireDriverEvent::TextDelta(prompt))?;
                     Ok(ResponsePayload::Ack)
                 }
                 Command::CloseSession => {
@@ -1827,7 +2108,7 @@ mod tests {
         let event = events.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(event.runtime_id, runtime_id);
         assert_eq!(event.sequence, 1);
-        assert_eq!(event.event.kind, "connected");
+        assert_eq!(event.event.kind(), "connected");
 
         client.shutdown();
         assert!(matches!(
@@ -1887,7 +2168,7 @@ mod tests {
                 .recv_timeout(Duration::from_secs(1))
                 .unwrap()
                 .event
-                .kind,
+                .kind(),
             "connected"
         );
 
@@ -1903,7 +2184,7 @@ mod tests {
         let late_events = late.subscribe(session_id, runtime_id);
         let replayed = late_events.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(replayed.sequence, 1);
-        assert_eq!(replayed.event.kind, "connected");
+        assert_eq!(replayed.event.kind(), "connected");
 
         source
             .request(
@@ -1919,8 +2200,11 @@ mod tests {
         for events in [&source_events, &late_events] {
             let live = events.recv_timeout(Duration::from_secs(1)).unwrap();
             assert_eq!(live.sequence, 2);
-            assert_eq!(live.event.kind, "textDelta");
-            assert_eq!(live.event.payload, json!("streamed from the first client"));
+            assert_eq!(live.event.kind(), "textDelta");
+            assert_eq!(
+                live.event.payload(),
+                json!("streamed from the first client")
+            );
         }
 
         source
@@ -2191,11 +2475,11 @@ mod tests {
             let Ok(event) = events.recv_timeout(remaining) else {
                 break;
             };
-            seen_events.push(event.event.kind.clone());
-            if event.event.kind != "terminalOutput" {
+            seen_events.push(event.event.kind());
+            let WireDriverEvent::TerminalOutput(chunk) = &event.event else {
                 continue;
-            }
-            let data = event.event.payload["data"].as_str().unwrap();
+            };
+            let data = &chunk.data;
             output.extend(
                 base64::engine::general_purpose::STANDARD
                     .decode(data)
@@ -2227,8 +2511,7 @@ mod tests {
             hub.clone(),
         );
 
-        assert!(handled.executed);
-        assert!(matches!(handled.outcome, ResponseOutcome::Ok { .. }));
+        assert!(matches!(handled.outcome, Some(ResponseOutcome::Ok { .. })));
         assert!(responses.try_recv().is_err());
         assert!(hub.cached_response(Uuid::nil()).is_none());
     }
@@ -2375,6 +2658,88 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    fn next_event(queue: &mut TestQueue) -> SequencedEvent {
+        match queue.recv().expect("an event") {
+            ServerMessage::Event(event) => event,
+            other => panic!("expected an event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn streamed_deltas_are_coalesced_in_order() {
+        let hub = Arc::new(Hub::default());
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let (outgoing, mut events) = test_queue();
+        hub.subscribe(&[], Subscriber::new(outgoing).0);
+        hub.begin_runtime(session_id, runtime_id);
+        let sink = hub.event_sink(session_id, runtime_id);
+
+        for chunk in ["Hel", "lo", ", world"] {
+            sink.send(WireDriverEvent::TextDelta(chunk.into())).unwrap();
+        }
+        // Nothing is sent before the window closes...
+        assert!(events.try_recv().is_err());
+        // ...and then the chunks arrive as one event.
+        let merged = next_event(&mut events);
+        assert!(
+            matches!(&merged.event, WireDriverEvent::TextDelta(text) if text == "Hello, world")
+        );
+        assert_eq!(merged.sequence, 1);
+
+        // A different kind, or any other event, flushes what is pending
+        // first, so the stream keeps its order.
+        sink.send(WireDriverEvent::TextDelta("a".into())).unwrap();
+        sink.send(WireDriverEvent::ReasoningDelta("b".into()))
+            .unwrap();
+        sink.send(marker("done")).unwrap();
+        let text = next_event(&mut events);
+        let reasoning = next_event(&mut events);
+        let done = next_event(&mut events);
+        assert!(matches!(&text.event, WireDriverEvent::TextDelta(text) if text == "a"));
+        assert!(matches!(&reasoning.event, WireDriverEvent::ReasoningDelta(text) if text == "b"));
+        assert_eq!(marker_text(&done), "done");
+        assert_eq!(
+            [text.sequence, reasoning.sequence, done.sequence],
+            [2, 3, 4]
+        );
+
+        // Closing the runtime sends text still inside its window.
+        sink.send(WireDriverEvent::TextDelta("tail".into()))
+            .unwrap();
+        hub.end_runtime(session_id, Some(runtime_id));
+        let tail = next_event(&mut events);
+        assert!(matches!(&tail.event, WireDriverEvent::TextDelta(text) if text == "tail"));
+    }
+
+    #[test]
+    fn replay_journal_is_bounded_by_bytes() {
+        let hub = Arc::new(Hub::default());
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        hub.begin_runtime(session_id, runtime_id);
+        let sink = hub.event_sink(session_id, runtime_id);
+        let large = "x".repeat(1024 * 1024);
+        for index in 0..20 {
+            sink.send(marker(&format!("{index}:{large}"))).unwrap();
+        }
+
+        let (outgoing, mut events) = test_queue();
+        hub.subscribe(&[], Subscriber::new(outgoing).0);
+        let mut replayed = Vec::new();
+        while let Ok(ServerMessage::Event(event)) = events.try_recv() {
+            replayed.push(event);
+        }
+        // About 8 MiB of 1 MiB events survive, newest last.
+        assert!((6..=8).contains(&replayed.len()), "{}", replayed.len());
+        assert!(marker_text(replayed.last().unwrap()).starts_with("19:"));
+        assert!(
+            replayed
+                .windows(2)
+                .all(|pair| pair[1].sequence == pair[0].sequence + 1)
+        );
+    }
+
     #[test]
     fn daemon_tokens_require_an_exact_match() {
         assert!(token_matches("secret", "secret"));
@@ -2393,20 +2758,16 @@ mod tests {
 
         hub.begin_runtime(session_id, old_runtime_id);
         let old_sink = hub.event_sink(session_id, old_runtime_id);
-        old_sink
-            .send(WireDriverEvent::new("old", serde_json::Value::Null))
-            .unwrap();
+        old_sink.send(marker("old")).unwrap();
         assert!(matches!(
             events.recv().unwrap(),
             ServerMessage::Event(event) if event.runtime_id == old_runtime_id
         ));
 
         hub.begin_runtime(session_id, new_runtime_id);
-        old_sink
-            .send(WireDriverEvent::new("stale", serde_json::Value::Null))
-            .unwrap();
+        old_sink.send(marker("stale")).unwrap();
         hub.event_sink(session_id, new_runtime_id)
-            .send(WireDriverEvent::new("new", serde_json::Value::Null))
+            .send(marker("new"))
             .unwrap();
 
         let ServerMessage::Event(event) = events.recv().unwrap() else {
@@ -2414,7 +2775,7 @@ mod tests {
         };
         assert_eq!(event.runtime_id, new_runtime_id);
         assert_eq!(event.sequence, 1);
-        assert_eq!(event.event.kind, "new");
+        assert_eq!(marker_text(&event), "new");
         assert!(events.try_recv().is_err());
     }
 
@@ -2425,7 +2786,7 @@ mod tests {
         let runtime_id = Uuid::new_v4();
         hub.begin_runtime(session_id, runtime_id);
         hub.event_sink(session_id, runtime_id)
-            .send(WireDriverEvent::new("new-daemon", serde_json::Value::Null))
+            .send(marker("new-daemon"))
             .unwrap();
 
         let (outgoing, mut events) = test_queue();
@@ -2458,21 +2819,18 @@ mod tests {
         hub.begin_runtime(session_id, runtime_id);
         let sink = hub.event_sink(session_id, runtime_id);
 
-        sink.send(WireDriverEvent::new("one", serde_json::Value::Null))
-            .unwrap();
+        sink.send(marker("one")).unwrap();
         // Nobody drains, so a second queued message overflows: the subscriber
         // is dropped from the hub and its connection is told to close.
-        sink.send(WireDriverEvent::new("two", serde_json::Value::Null))
-            .unwrap();
+        sink.send(marker("two")).unwrap();
         assert!(kicked.try_recv().is_ok());
 
         assert!(matches!(
             events.try_recv(),
-            Ok(ServerMessage::Event(event)) if event.event.kind == "one"
+            Ok(ServerMessage::Event(event)) if marker_text(&event) == "one"
         ));
         assert!(events.try_recv().is_err());
-        sink.send(WireDriverEvent::new("three", serde_json::Value::Null))
-            .unwrap();
+        sink.send(marker("three")).unwrap();
         assert!(events.try_recv().is_err());
     }
 
@@ -2487,19 +2845,38 @@ mod tests {
                 )),
             },
         };
-        hub.cache_response(oversized_id, oversized);
+        hub.cache_response(
+            oversized_id,
+            encode(&ResponseFrame {
+                request_id: oversized_id,
+                outcome: &oversized,
+            })
+            .unwrap(),
+        );
         // A single outcome larger than the whole byte budget is never
         // retained; retrying the request runs it again instead of pinning a
         // >64 MB payload in daemon memory.
         assert!(hub.cached_response(oversized_id).is_none());
 
         let kept_id = Uuid::new_v4();
-        hub.cache_response(
-            kept_id,
-            ResponseOutcome::Ok {
-                payload: ResponsePayload::Ack,
-            },
+        let kept = ResponseOutcome::Ok {
+            payload: ResponsePayload::Ack,
+        };
+        let frame = encode(&ResponseFrame {
+            request_id: kept_id,
+            outcome: &kept,
+        })
+        .unwrap();
+        // The borrowed frame is exactly what `ServerMessage::Response` writes.
+        assert_eq!(
+            frame.as_str(),
+            serde_json::to_string(&ServerMessage::Response {
+                request_id: kept_id,
+                outcome: kept,
+            })
+            .unwrap()
         );
+        hub.cache_response(kept_id, frame);
         assert!(hub.cached_response(kept_id).is_some());
         assert!(hub.cached_response(oversized_id).is_none());
     }

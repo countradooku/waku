@@ -45,6 +45,7 @@ pub mod skills;
 pub mod theme;
 pub mod usage;
 pub mod usage_history;
+pub mod wire_event;
 pub mod workspace;
 
 mod protocol;
@@ -54,8 +55,9 @@ pub use protocol::{
     APP_EXECUTABLE_ENV, ClientMessage, Command, DAEMON_ADDRESS_ENV, DAEMON_SOCKET_ENV,
     DAEMON_TOKEN_ENV, DaemonReady, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, MAX_WIRE_MESSAGE_BYTES,
     PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome, ResponsePayload, RpcError,
-    SequencedEvent, ServerMessage, WireComputerToolRequest, WireDriverEvent,
-    WireDriverStartOptions, WireSessionOptions,
+    SequencedEvent, ServerMessage, WireComputerToolRequest, WireDriverStartOptions,
+    WireSessionOptions,
 };
 pub use settings::DaemonSettings;
+pub use wire_event::WireDriverEvent;
 pub use workspace::{WorkspaceOperation, WorkspaceResult};
