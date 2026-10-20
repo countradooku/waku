@@ -74,6 +74,7 @@ mod fs_ext;
 mod local_socket;
 mod protocol;
 mod server;
+mod v8;
 
 pub use local_socket::LocalListener;
 pub use protocol::{

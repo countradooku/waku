@@ -23,9 +23,29 @@ pub fn schema_document() -> Value {
     waku_protocol::v8::schema::document()
 }
 
-/// `schema/v8.json` as written to disk.
+/// `schema/v8.json` as written to disk, with object keys sorted.
 pub fn schema_text(document: &Value) -> String {
-    serde_json::to_string_pretty(document).expect("a JSON value serializes") + "\n"
+    serde_json::to_string_pretty(&canonical(document)).expect("a JSON value serializes") + "\n"
+}
+
+/// `value` with every object's keys in sorted order. `serde_json` keeps
+/// insertion order when another crate in the build enables its
+/// `preserve_order` feature (the workspace does), so the output must not
+/// depend on how a map was built.
+pub fn canonical(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|key| (key.clone(), canonical(&map[key])))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
 }
 
 fn workspace() -> PathBuf {

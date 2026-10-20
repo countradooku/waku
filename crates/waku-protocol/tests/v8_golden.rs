@@ -389,20 +389,22 @@ fn index() -> String {
                 Sample::Client(_) => "client",
                 Sample::Server(_) => "server",
             };
-            serde_json::json!({ "name": name, "direction": direction })
+            serde_json::json!({ "direction": direction, "name": name })
         })
         .collect::<Vec<_>>();
     let frames = frame_samples()
         .iter()
         .map(|(name, _)| *name)
         .collect::<Vec<_>>();
+    // Keys in sorted order, so the file is the same whether or not another
+    // crate in the build turns on serde_json's `preserve_order`.
     let document = serde_json::json!({
+        "frames": frames,
+        "messages": fixtures,
         "routes": {
             "calls": routes.calls.iter().map(|(id, method)| (id.to_string(), *method)).collect::<BTreeMap<_, _>>(),
             "channels": routes.channels.iter().map(|(channel, stream)| (channel.to_string(), *stream)).collect::<BTreeMap<_, _>>(),
         },
-        "messages": fixtures,
-        "frames": frames,
     });
     serde_json::to_string_pretty(&document).unwrap() + "\n"
 }

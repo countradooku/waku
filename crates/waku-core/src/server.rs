@@ -22,13 +22,14 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt as _, StreamExt as _};
 use parking_lot::{Condvar, Mutex};
 use subtle::ConstantTimeEq as _;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, ReadBuf};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
 };
-use tokio_tungstenite::tungstenite::http::{StatusCode, header::ORIGIN};
+use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::tungstenite::http::header::{HeaderValue, ORIGIN, SEC_WEBSOCKET_PROTOCOL};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message, Utf8Bytes};
 use uuid::Uuid;
@@ -410,6 +411,9 @@ impl From<&AgentSession> for SessionCatalogEntry {
 struct Hub {
     epoch: Uuid,
     state: Mutex<HubState>,
+    /// The latest settings for v8 `settings` subscribers; legacy
+    /// `UpdateSettings` publishes here too.
+    v8_settings: crate::v8::SettingsBus,
     /// Wakes the delta-coalescing thread; started on the first delta.
     coalescer: Mutex<Option<crossbeam_channel::Sender<Instant>>>,
 }
@@ -419,6 +423,7 @@ impl Default for Hub {
         Self {
             epoch: Uuid::new_v4(),
             state: Mutex::new(HubState::default()),
+            v8_settings: crate::v8::SettingsBus::default(),
             coalescer: Mutex::new(None),
         }
     }
@@ -886,6 +891,13 @@ impl RequestDispatcher {
     }
 }
 
+/// An event sink on a hub of its own, for v8 tests that build a context
+/// without a server.
+#[cfg(test)]
+pub(crate) fn test_event_sink() -> EventSink {
+    Arc::new(Hub::default()).event_sink(Uuid::nil(), Uuid::nil())
+}
+
 /// Everything a connection task needs from the server.
 pub(crate) struct ServerContext {
     token: String,
@@ -894,6 +906,8 @@ pub(crate) struct ServerContext {
     pub(crate) shutdown: ShutdownSignal,
     options: ServerOptions,
     active_connections: Arc<AtomicUsize>,
+    /// Protocol v8 (RFC 0003), served on `/v8` and behind the local preface.
+    v8: Arc<crate::v8::V8Context>,
 }
 
 impl ServerContext {
@@ -911,6 +925,85 @@ impl ServerContext {
                 eprintln!("waku-daemon connection ended: {error:#}");
             }
         });
+    }
+
+    /// A connection on the local socket: a v8 client opens with the `WAKU`
+    /// preface, a legacy client with an HTTP upgrade.
+    pub(crate) fn spawn_local_connection<S>(self: &Arc<Self>, mut stream: S)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let Some(permit) = ConnectionPermit::acquire(&self.active_connections) else {
+            return;
+        };
+        let context = self.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let mut magic = [0; 4];
+            let read = tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut magic)).await;
+            if !matches!(read, Ok(Ok(_))) {
+                return;
+            }
+            if magic[..] == waku_protocol::v8::PREFACE[..4] {
+                crate::v8::serve_local(stream, magic, context.v8.clone()).await;
+            } else if let Err(error) =
+                handle_connection(Prefixed::new(magic, stream), &context).await
+            {
+                eprintln!("waku-daemon connection ended: {error:#}");
+            }
+        });
+    }
+}
+
+/// A stream whose first bytes were already read, put back in front.
+struct Prefixed<S> {
+    prefix: [u8; 4],
+    consumed: usize,
+    inner: S,
+}
+
+impl<S> Prefixed<S> {
+    fn new(prefix: [u8; 4], inner: S) -> Self {
+        Self {
+            prefix,
+            consumed: 0,
+            inner,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.consumed < self.prefix.len() {
+            let start = self.consumed;
+            let count = (self.prefix.len() - start).min(buf.remaining());
+            buf.put_slice(&self.prefix[start..start + count]);
+            self.consumed += count;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -969,6 +1062,12 @@ pub fn serve_listeners(
         .build()
         .context("could not start the Waku daemon runtime")?;
     let hub = Arc::new(Hub::default());
+    let v8 = Arc::new(crate::v8::V8Context::new(
+        token.clone(),
+        crate::v8::BackendHandle::new(backend.clone(), hub.event_sink(Uuid::nil(), Uuid::nil())),
+        hub.v8_settings.clone(),
+        shutdown.clone(),
+    ));
     let dispatcher = Arc::new(RequestDispatcher::new(
         backend.clone(),
         hub.clone(),
@@ -981,6 +1080,7 @@ pub fn serve_listeners(
         shutdown,
         options,
         active_connections: Arc::new(AtomicUsize::new(0)),
+        v8,
     });
     let result = runtime.block_on(async move {
         let mut accepting = Vec::new();
@@ -1078,20 +1178,36 @@ where
         .max_message_size(Some(MAX_WIRE_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_WIRE_MESSAGE_BYTES));
     let allowed_origins = context.options.allowed_origins.clone();
-    let handshake = async {
-        let mut socket = tokio_tungstenite::accept_hdr_async_with_config(
+    let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+    let v8_route = Arc::new(AtomicBool::new(false));
+    let route = v8_route.clone();
+    let mut socket = tokio::time::timeout_at(
+        deadline,
+        tokio_tungstenite::accept_hdr_async_with_config(
             stream,
             move |request: &HandshakeRequest, response: HandshakeResponse| {
-                validate_handshake(request, response, &allowed_origins)
+                let accepted = validate_handshake(request, response, &allowed_origins);
+                if accepted.is_ok() && request.uri().path() == waku_protocol::v8::WEBSOCKET_PATH {
+                    route.store(true, Ordering::Release);
+                }
+                accepted
             },
             Some(config),
-        )
-        .await
-        .context("WebSocket handshake failed")?;
-        let hello = read_client_message(&mut socket).await?;
-        anyhow::Ok((socket, hello))
-    };
-    let (mut socket, hello) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+        ),
+    )
+    .await
+    .context("daemon handshake timed out")?
+    .context("WebSocket handshake failed")?;
+    if v8_route.load(Ordering::Acquire) {
+        // v8 runs its own handshake; the pre-auth cap lifts once its hello
+        // checks out.
+        crate::v8::serve_websocket(socket, context.v8.clone(), move || {
+            budget.store(usize::MAX, Ordering::Release);
+        })
+        .await;
+        return Ok(());
+    }
+    let hello = tokio::time::timeout_at(deadline, read_client_message(&mut socket))
         .await
         .context("daemon handshake timed out")??;
     let (resume_from, binary_frames) = match hello {
@@ -1377,10 +1493,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PreAuthLimit<S> {
 
 fn validate_handshake(
     request: &HandshakeRequest,
-    response: HandshakeResponse,
+    mut response: HandshakeResponse,
     allowed_origins: &HashSet<String>,
 ) -> Result<HandshakeResponse, ErrorResponse> {
-    if request.uri().path() != "/v1" {
+    let v8 = request.uri().path() == waku_protocol::v8::WEBSOCKET_PATH;
+    if request.uri().path() != "/v1" && !v8 {
         return Err(handshake_error(
             StatusCode::NOT_FOUND,
             "unknown daemon endpoint",
@@ -1402,6 +1519,26 @@ fn validate_handshake(
                 "WebSocket origin is not allowed",
             ));
         }
+    }
+    if v8 {
+        // RFC 0003 §1.4: a v8 upgrade must offer the `waku.v8` subprotocol.
+        let offered = request
+            .headers()
+            .get_all(SEC_WEBSOCKET_PROTOCOL)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|protocol| protocol.trim() == waku_protocol::v8::WEBSOCKET_SUBPROTOCOL);
+        if !offered {
+            return Err(handshake_error(
+                StatusCode::UPGRADE_REQUIRED,
+                "the waku.v8 subprotocol is required",
+            ));
+        }
+        response.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(waku_protocol::v8::WEBSOCKET_SUBPROTOCOL),
+        );
     }
     Ok(response)
 }
@@ -1606,6 +1743,7 @@ fn handle_request(
         &request.command,
         Command::Start { .. } | Command::OpenTerminal { .. }
     );
+    let updates_settings = matches!(&request.command, Command::UpdateSettings { .. });
     if !notification && let Some(cached) = hub.cached_response(request_id) {
         let _ = outgoing.blocking_send(Outbound::Text(cached));
         return HandledRequest { outcome: None };
@@ -1621,6 +1759,15 @@ fn handle_request(
     };
     if starts_runtime && matches!(&outcome, ResponseOutcome::Error { .. }) {
         hub.end_runtime(session_id, Some(runtime_id));
+    }
+    if updates_settings && matches!(&outcome, ResponseOutcome::Ok { .. }) {
+        crate::v8::settings_changed(
+            &crate::v8::BackendHandle::new(
+                backend.clone(),
+                hub.event_sink(Uuid::nil(), Uuid::nil()),
+            ),
+            &hub.v8_settings,
+        );
     }
     match (&task_catalog_action, &outcome) {
         (

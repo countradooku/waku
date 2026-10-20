@@ -24,6 +24,7 @@ const HEADER: &str =
 
 /// File name → contents.
 pub fn generate(document: &Value) -> BTreeMap<String, String> {
+    let document = &crate::canonical(document);
     let definitions = document
         .get("$defs")
         .and_then(Value::as_object)

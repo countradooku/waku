@@ -65,7 +65,7 @@ MessagePack with named fields costs more bytes than postcard. Field names add ro
 - **No `serde_json::Value`, no `untagged`, no `flatten`.** Opaque provider JSON (computer-use arguments, native metadata) travels as `JsonText(String)`.
 - **No `HashMap`.** Maps use `BTreeMap<String, T>` so encoding is deterministic.
 - **Integers.** `u64` values on the wire stay at or below 2^53 − 1, so JavaScript numbers can hold them. This includes sequences, sizes and offsets.
-- **Ids** are canonical lowercase hyphenated UUID strings.
+- **Ids** are canonical lowercase hyphenated UUID strings. (Implemented by running `rmp-serde` in human-readable mode, so `Uuid` serializes as a string in both encodings; see `waku_protocol::v8::codec`.)
 - **Timestamps** are `i64` milliseconds since the Unix epoch (UTC).
 - **Paths** are UTF-8 strings. Non-UTF-8 paths are reported as errors, not converted lossily.
 - **Bytes:** MessagePack `bin` via `serde_bytes`, and standard padded base64 in JSON. Byte fields are reserved for small values (under 64 KiB). Bulk bytes use DATA frames ([§5.6](#56-blob-transfer)).
@@ -149,6 +149,8 @@ Mixing message encodings on one connection is a protocol error.
 - Local sockets never select compression. JSON text frames cannot carry it.
 - DATA is never compressed by the protocol.
 - permessage-deflate is rejected for three reasons: it keeps per-connection inflate state, compresses tiny delta frames for nothing, and mixes secrets with attacker-influenced text in one compression context.
+
+> **Changed in #53.** Two receiver rules are stricter than the table above: a frame whose reserved bytes (6–7) are not zero is a protocol error, like an unknown flag, because both could change how the body is read; and a frame of an unknown `kind` is still skipped by length, but only up to `maxMessageBytes` (otherwise `frameTooLarge`), so a peer cannot make the receiver read gigabytes it throws away. A `ZSTD` MSG frame is a protocol error until compression is implemented; `welcome.compression` is always absent for now.
 
 **Writer priority:**
 - each connection's writer drains three queues in order: control (`pong`, `goodbye`), messages (replies and stream items, kept in their own order), then DATA;
@@ -241,6 +243,8 @@ enum Notice { updateAvailable { version: String }, credentialExpiring { at: i64 
 {"type":"items","channel":3,"items":[{"type":"event","seq":1042,"event":{…}}]}
 ```
 
+- `notice` nests its open union under a `notice` key (`{"type":"notice","notice":{"type":"updateAvailable",…}}`), because both levels are tagged by `type`.
+- `reply.ok` may be `null` for a method whose result is an `Option`. A reply whose `id` is not pending decodes with its `ok` skipped.
 - `reply.ok` is the method's result value as-is, with no extra wrapper. The receiver decodes it according to the method of the pending call with that `id`.
 - The `methods!` macro generates `Method`, `MethodResult` and their serde impls:
   - the daemon decodes `params` according to `method`, in any key order;
@@ -250,6 +254,7 @@ enum Notice { updateAvailable { version: String }, credentialExpiring { at: i64 
 
 - **Call ids** are `u32`, chosen by the client, and unique among its in-flight calls on that connection. Replies may arrive in any order.
 - **In-flight cap.** At most `maxInFlightCalls` (64) calls per connection; further calls get `busy`.
+- **Malformed params.** A `call` whose `params` do not decode for its `method` is answered `badRequest`; only an undecodable envelope closes the connection with `protocolError`.
 - **Cancellation.** `cancel{id}` is best effort. A daemon that has already finished sends the normal reply.
 - **Idempotency.**
   - `orchestration.dispatch` is idempotent by `commandId`, through durable command receipts (RFC 0001).
@@ -608,12 +613,14 @@ Commands that are internal in T3 (`thread.stop`, `checkpoint.rollback.fail`, and
 | `terminalList` | `{root?}` | `snapshot{terminals: Vec<TerminalInfo>}`, `upserted{terminal}`, `removed{terminalId}` | none | `read` |
 | `vcsStatus` | `{root}` | `status{status: GitStatus, at}`, coalesced to at most one per second and computed only while subscribed | none | `read` |
 | `blobDownload` | `{reference, offset?}` | `meta{size, mime, sha256}`, then DATA with `FIN` on the last chunk, then `end{completed}` | `offset` | `read` |
-| `settings` | `{}` | `snapshot{revision, settings}`, `updated{revision, settings}` | `revision` | `read` |
+| `settings` | `{}` | `snapshot{revision, settings}`, `updated{revision, settings}`, `synchronized{cursor}` | `revision` | `read` |
 | `providers` | `{}` | `snapshot{revision, statuses}`, `statusUpdated{revision, status}`, `planUsageUpdated{instanceId, usage}` | `revision` | `read` |
 | `drafts` | `{}` | `snapshot{revision, drafts}`, `changed{revision, changes}` | `revision` | `read` |
 | `access` | `{}` | `snapshot{revision, pairings, clients}`, `pairingUpserted`, `pairingRemoved`, `clientUpserted`, `clientRemoved` (each with `revision`) | `revision` | `admin` |
 | `providerAuth` | *reserved* (Phase 7) | `progress{stage, url?, userCode?}`, `completed`, `failed{error}` | none | `providers:manage` |
 | `scheduledTasks` | *reserved* (Phase 4) | | `revision` | `read` |
+
+> **Changed in #53.** A settings `revision` is a content hash (53-bit FNV-1a of the MessagePack encoding of `Settings`), not a counter: equal revisions mean equal settings even across daemon restarts, so `after` stays valid without persisted state. Revisions are compared for equality only. Settings changed through the legacy protocol are published to v8 subscribers as well.
 
 **Stream rules:**
 - **Bounded thread snapshot.** At most 10 user turns, 75 turn items and 1 MiB. Required control records, such as pending runtime requests, are always included. At least one row is always admitted. Older rows come from `threads.historyPage`.
@@ -741,6 +748,8 @@ The daemon removes `WAKU_DAEMON_TOKEN` from provider child environments, as it a
 - 64 connections per daemon (the v7 cap);
 - 8 connections per session.
 
+> **Changed in #53 (interim).** Until pairing and session tokens land (Phase 7), the daemon accepts only `credential: local`, on both the local socket and `/v8`, checked against the daemon token in constant time; that is the same trust as the legacy `/v1` bearer token. `session` and `pairing` are answered `rejected{unauthenticated}`. Every accepted connection gets `admin`.
+
 ### 6.3 Payload-dependent scopes
 
 - `threadCreate` with `newWorktree` adds `vcs:write`.
@@ -765,6 +774,8 @@ Names come from `crates/waku-protocol/src/identity.rs` (D5). Debug builds use th
 | Windows | `\\.\pipe\waku-fork-<user SID>-v8` |
 
 - **Override.** `WAKU_DAEMON_SOCKET` overrides the path (tests, multiple daemons), and the `DaemonReady` stdout line gains a `socket` field.
+
+> **Changed in #53.** v8 shares the legacy daemon socket (`daemon.sock`, #19) instead of opening `daemon-v8.sock`. The first four bytes tell the protocols apart: a v8 client opens with the `WAKU` preface, a legacy client with an HTTP `GET`. One socket keeps one lock, one permission check and one peer-credential check, and the `DaemonReady` line does not change. Endpoints still never mix: a connection is one protocol from its first byte. The socket can take the `-v8` name when the legacy protocol is removed.
 - **Permissions (Unix).**
   - The `run` directory is mode 0700 and owned by the daemon's euid. The daemon refuses to start if it is not.
   - The daemon binds with umask `0177`, then sets 0600 explicitly.
@@ -1025,6 +1036,8 @@ commands! { "messageDispatch" => MessageDispatch(MessageDispatchCommand), scope 
    - Mobile starts on JSON. MessagePack is added through each platform's Codable or kotlinx format once measurements justify it.
 4. `protocol:generate` and `protocol:check` cover v8 the same way they cover v7 today: regenerate into a temporary directory, then diff byte for byte.
 
+> **Changed in #53.** The exporter, the lint and the TypeScript generator live in one crate, `crates/waku-codegen` (binary `waku-codegen`, `--check` for CI), instead of a mode of `export_types`, which stays the legacy ts-rs exporter. The generated TypeScript goes to `packages/waku-client/src/v8/generated/`, beside the hand-written v8 client in `src/v8/`, because `export_types` owns and rewrites `src/generated/`. The TypeScript MessagePack codec is our own (`src/v8/msgpack.ts`, about 300 lines) rather than `@msgpack/msgpack`: it writes the same bytes as `rmp-serde` for the same values (verified against the golden fixtures in both directions) and adds no dependency. The lint also rejects closed string enums: every string enum on the wire is an `open_string_enum!`. The `schema` feature only builds through `waku-codegen`, which is not a default workspace member.
+
 **ts-rs stays only for legacy types** until legacy removal, behind a feature flag (PLAN §5.2 item 8). It is not used for v8 because:
 - it emits TypeScript only, which rules it out under D2;
 - it models `Option` as `T | null`;
@@ -1041,6 +1054,7 @@ commands! { "messageDispatch" => MessageDispatch(MessageDispatchCommand), scope 
    - Move the current types to `waku_protocol::legacy`, re-exported at the old paths so nothing breaks.
    - Add `waku_protocol::v8`: the types in this RFC, the macros, the frame codec (preface, header, limits, zstd) and `export_schema`.
    - Rename the legacy constant.
+   - Done in #53 (part 1) with one difference: `LEGACY_PROTOCOL_VERSION` is added as an alias of `PROTOCOL_VERSION` instead of renaming it, so in-flight work on the legacy protocol does not conflict; the old name goes with the `legacy` module (step 5). The legacy types stay where they are until then.
 2. **Daemon serves both.** Legacy JSON stays on TCP `/v1`; v8 runs on the local socket and on `/v8`.
    - v8 methods that already have a v7 backend (settings, probe, files, vcs, skills, drafts, blobs, terminal, usage) start as adapters over the existing `Backend`.
    - Orchestration methods, the `shell` and `thread` streams and the output hub land with RFC 0001 (#165), #54 and #56.
@@ -1057,7 +1071,7 @@ commands! { "messageDispatch" => MessageDispatch(MessageDispatchCommand), scope 
 
 - **Golden encodings.**
   - A `golden` generator builds canonical sample values for every message variant (frames, every method's params and result, every stream item, `DomainEvent`, `TurnItem`, `Error`).
-  - It writes `crates/waku-protocol/tests/golden/v8/<name>.json` and `<name>.msgpack.hex`.
+  - It writes `crates/waku-protocol/tests/v8/<name>.json` and `<name>.msgpack.hex` (plus raw frames as `<name>.hex` and an `index.json` with the routes needed to decode replies and items), from `tests/v8_golden.rs` with `WAKU_UPDATE_GOLDEN=1`.
   - Rust tests assert `encode(sample) == golden` byte for byte, and `decode(golden) == sample`.
   - Determinism comes from declaration-order fields, `BTreeMap`, omitted `None`s and minimal-width integers.
 - **Forward compatibility.** Vectors with unknown variants, unknown fields, unknown methods, unknown frame kinds and unknown string-enum values. Each must decode to `Unknown` or be skipped without losing the frame, and stream cursors must still advance.
