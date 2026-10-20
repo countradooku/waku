@@ -4,7 +4,7 @@
 //! CommandEnvelope ─► receipt lookup ─► per-key lock ─► decide (pure)
 //!   ─► EventSink::commit (one SQLite transaction: events, projections,
 //!      receipt, cancellations, outbox) ─► apply to the cached projection
-//!   ─► publish to CommittedFeed ─► wake the effect workers
+//!   ─► publish to CommittedFeed ─► wake EffectWorkerPool
 //! ```
 //!
 //! The crate exposes blocking APIs and has no async runtime (R9). It depends
@@ -28,6 +28,10 @@ pub use decide::{
     CancelUnsettled, CapabilitySource, DecideContext, Decision, NoCapabilities,
     OrchestratorSettings, decide,
 };
+pub use effects::executor::{
+    CancelToken, ClaimedEffect, DefaultExecutor, EffectContext, EffectError, EffectExecutor, Ports,
+};
+pub use effects::worker::{EffectWorkerPool, WorkerConfig};
 pub use effects::{Effect, EffectType, Lane};
 pub use feed::CommittedFeed;
 pub use ids::{IdSource, SequentialIds, UuidV7Ids};
@@ -35,6 +39,7 @@ pub use orchestrator::{
     Dependencies, DispatchError, DispatchReceipt, IngestOutcome, Orchestrator, OrchestratorConfig,
 };
 pub use projection::{ApplyOutcome, ThreadProjection};
+pub use store::outbox::ReconcileReport;
 pub use store::sink::{CommitContext, CommitResult, EventSink, WriteGuard};
 pub use store::{SinkError, StoreError};
 

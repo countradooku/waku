@@ -5,6 +5,7 @@
 mod common;
 
 mod crash;
+mod effects;
 mod feed;
 mod forward_compat;
 mod idempotency;

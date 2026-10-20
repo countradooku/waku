@@ -1,6 +1,9 @@
 //! Side effects decided with the events and run after commit (RFC 0001
 //! "Effects").
 
+pub mod executor;
+pub mod worker;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};

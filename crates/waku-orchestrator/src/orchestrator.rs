@@ -15,6 +15,7 @@ use waku_protocol::orchestration::*;
 use crate::clock::Clock;
 use crate::command::{AnyCommand, CommandError, InternalCommand, LockKey};
 use crate::decide::{CapabilitySource, DecideContext, Decision, OrchestratorSettings, decide};
+use crate::effects::worker::WorkerConfig;
 use crate::feed::{CommittedFeed, DEFAULT_FEED_CAPACITY, FeedPublisher};
 use crate::ids::IdSource;
 use crate::projection::maintenance::{self, REBUILD_PAGE, VerifyReport};
@@ -29,6 +30,7 @@ pub struct OrchestratorConfig {
     pub read_connections: usize,
     /// Hot threads kept in memory (R10).
     pub cache_threads: usize,
+    pub workers: WorkerConfig,
     pub settings: OrchestratorSettings,
 }
 
@@ -38,6 +40,7 @@ impl OrchestratorConfig {
             database_path: database_path.into(),
             read_connections: 4,
             cache_threads: 64,
+            workers: WorkerConfig::default(),
             settings: OrchestratorSettings::default(),
         }
     }
@@ -228,6 +231,7 @@ pub struct Orchestrator {
     clock: Arc<dyn Clock>,
     capabilities: Arc<dyn CapabilitySource>,
     settings: OrchestratorSettings,
+    workers: WorkerConfig,
     locks: KeyedLocks,
     cache: ThreadCache,
     projects: RwLock<HashMap<ProjectId, Project>>,
@@ -310,6 +314,7 @@ impl Orchestrator {
             clock: deps.clock,
             capabilities: deps.capabilities,
             settings: config.settings,
+            workers: config.workers,
             locks: KeyedLocks::default(),
             cache: ThreadCache::new(config.cache_threads),
             projects: RwLock::new(projects),
@@ -571,6 +576,10 @@ impl Orchestrator {
 
     pub fn clock(&self) -> &Arc<dyn Clock> {
         &self.clock
+    }
+
+    pub fn worker_config(&self) -> &WorkerConfig {
+        &self.workers
     }
 
     pub fn settings(&self) -> &OrchestratorSettings {
