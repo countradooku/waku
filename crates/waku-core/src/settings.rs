@@ -60,6 +60,7 @@ impl DaemonSettingsStore {
             Err(error) => return Err(error),
         };
         settings.discard_legacy_app_keys();
+        normalize(&mut settings);
         if write_current {
             write_atomic(&path, &settings)?;
         }
@@ -75,11 +76,19 @@ impl DaemonSettingsStore {
 
     pub fn replace(&self, mut settings: DaemonSettings) -> io::Result<()> {
         settings.discard_legacy_app_keys();
+        normalize(&mut settings);
         let mut current = self.settings.lock();
         write_atomic(&self.path, &settings)?;
         *current = settings;
         Ok(())
     }
+}
+
+/// Clamp storage rules and drop worktree locations that could never be
+/// valid, whether they came from a client or a hand-edited file.
+fn normalize(settings: &mut DaemonSettings) {
+    settings.storage =
+        std::mem::take(&mut settings.storage).normalized(dirs::home_dir().as_deref());
 }
 
 fn quarantine_corrupt_settings(path: &Path) -> io::Result<PathBuf> {
@@ -172,6 +181,32 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("settings.json.corrupt-")
         }));
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn storage_settings_migrate_to_safe_defaults_and_are_normalized() {
+        let directory = std::env::temp_dir().join(format!("waku-settings-{}", Uuid::new_v4()));
+        let path = directory.join("settings.json");
+        fs::create_dir_all(&directory).unwrap();
+        // A document written before storage settings existed.
+        fs::write(&path, r#"{"computer_use_enabled":false,"future":1}"#).unwrap();
+        let store = DaemonSettingsStore::open(path.clone()).unwrap();
+        let storage = store.get().storage;
+        assert_eq!(storage, waku_protocol::storage::StorageSettings::default());
+        assert!(!storage.worktree_cleanup.any_rule_enabled());
+
+        // Hand-edited values are clamped and invalid locations dropped.
+        fs::write(
+            &path,
+            r#"{"storage":{"worktrees_directory":"relative","worktree_cleanup":{"inactive_after_days":0,"interval_hours":0}}}"#,
+        )
+        .unwrap();
+        let store = DaemonSettingsStore::open(path.clone()).unwrap();
+        let storage = store.get().storage;
+        assert_eq!(storage.worktrees_directory, None);
+        assert_eq!(storage.worktree_cleanup.inactive_after_days, Some(1));
+        assert_eq!(storage.worktree_cleanup.interval_hours, 1);
         fs::remove_dir_all(directory).ok();
     }
 }

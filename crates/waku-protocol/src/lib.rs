@@ -44,6 +44,7 @@ pub mod provider_session;
 pub mod settings;
 pub mod shared;
 pub mod skills;
+pub mod storage;
 pub mod theme;
 pub mod usage;
 pub mod usage_history;

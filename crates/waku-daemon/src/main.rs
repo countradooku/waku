@@ -72,10 +72,13 @@ fn main() -> anyhow::Result<()> {
     )
     .context("could not load daemon settings")?;
     let task_store = waku_core::persistence::StateStore::daemon(task_path);
+    let backend = Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?);
+    waku_core::daemon::start_worktree_cleanup_scheduler(&backend)
+        .context("could not start worktree cleanup")?;
     waku_core::serve_listeners(
         waku_core::Listeners { tcp, local },
         token,
-        Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?),
+        backend,
         shutdown,
         waku_core::ServerOptions {
             allowed_origins: arguments.allowed_origins.into_iter().collect(),

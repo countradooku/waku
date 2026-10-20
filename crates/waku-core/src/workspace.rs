@@ -18,6 +18,15 @@ pub use waku_protocol::workspace::{
 };
 
 pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult> {
+    execute_in(operation, None)
+}
+
+/// Like [`execute`], creating new worktrees beneath `worktree_root` (the
+/// configured managed folder) instead of the default one.
+pub fn execute_in(
+    operation: WorkspaceOperation,
+    worktree_root: Option<&Path>,
+) -> anyhow::Result<WorkspaceResult> {
     let repository_lock = match &operation {
         WorkspaceOperation::StageFiles { cwd, .. }
         | WorkspaceOperation::Pull { cwd }
@@ -122,13 +131,23 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
             prompt,
             base_branch,
         } => WorkspaceResult::WorktreeCreated {
-            worktree: crate::worktree::create(
-                &project_path,
-                project_id,
-                session_id,
-                &prompt,
-                base_branch.as_deref(),
-            )?,
+            worktree: match worktree_root {
+                Some(root) => crate::worktree::create_in(
+                    &project_path,
+                    root,
+                    project_id,
+                    session_id,
+                    &prompt,
+                    base_branch.as_deref(),
+                )?,
+                None => crate::worktree::create(
+                    &project_path,
+                    project_id,
+                    session_id,
+                    &prompt,
+                    base_branch.as_deref(),
+                )?,
+            },
         },
         WorkspaceOperation::InspectCommit { cwd } => WorkspaceResult::CommitSnapshot {
             snapshot: crate::git_commit::inspect(&cwd)?,

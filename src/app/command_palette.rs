@@ -840,6 +840,12 @@ impl Waku {
                 "settings preferences usage tokens cost history",
             ),
             (
+                SettingsPage::Storage,
+                "settings.storage",
+                "icons/folder.svg",
+                "settings preferences storage worktrees cleanup delete disk space location",
+            ),
+            (
                 SettingsPage::Daemon,
                 "settings.daemon",
                 "icons/server.svg",

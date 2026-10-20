@@ -1887,6 +1887,7 @@ fn settings_search_filters_pages_for_arrow_cycling() {
         SettingsPage::Providers,
         SettingsPage::Skills,
         SettingsPage::Usage,
+        SettingsPage::Storage,
         SettingsPage::Daemon,
     ];
     if cfg!(debug_assertions) {

@@ -1,14 +1,17 @@
 //! Daemon-owned isolated Git worktrees for tasks.
 //!
 //! A draft records only the user's choice. The first submission creates the
-//! worktree beneath `~/.waku/worktrees`, then every workspace consumer uses
+//! worktree beneath the managed folder (`~/.waku-fork/worktrees` unless the
+//! user moved it in Settings → Storage), then every workspace consumer uses
 //! the returned project-relative path for the lifetime of the task.
+//! [`crate::worktree_cleanup`] removes them again according to the user's
+//! rules.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use anyhow::{Context as _, anyhow, bail};
+use anyhow::{Context as _, bail};
 use uuid::Uuid;
 
 const DEFAULT_SLUG: &str = "new-worktree";
@@ -24,10 +27,7 @@ pub fn create(
     prompt: &str,
     base_branch: Option<&str>,
 ) -> anyhow::Result<CreatedWorktree> {
-    let root = dirs::home_dir()
-        .ok_or_else(|| anyhow!("could not locate the home directory for worktrees"))?
-        .join(crate::identity::HOME_DIRECTORY_NAME)
-        .join("worktrees");
+    let root = crate::worktree_cleanup::default_worktrees_directory()?;
     create_in(
         project_path,
         &root,
@@ -38,7 +38,9 @@ pub fn create(
     )
 }
 
-fn create_in(
+/// Create a task worktree beneath `worktree_root`, at
+/// `<worktree_root>/<project id>/<slug>` on a new `waku/<slug>` branch.
+pub fn create_in(
     project_path: &Path,
     worktree_root: &Path,
     project_id: Uuid,
