@@ -71,6 +71,13 @@ actions!(
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const CURSOR_BLINK_PAUSE: Duration = Duration::from_millis(300);
+/// Blink phases an untouched caret goes through before it rests solid:
+/// 10 s at [`CURSOR_BLINK_INTERVAL`]. Each phase is a window frame — the
+/// root view renders on every draw, and the field's ancestors (the composer,
+/// the root) re-render with it — so a focused field left alone must stop
+/// drawing, the way native text views stop their insertion point. Any edit,
+/// caret move, focus or window activation starts the count again.
+const CURSOR_BLINK_LIMIT: u32 = 20;
 
 /// The full table, with the AppKit selector each chord answers to, is in
 /// `docs/text-field-keys.md`.
@@ -223,6 +230,8 @@ struct BlinkCursor {
     visible: bool,
     paused: bool,
     epoch: usize,
+    /// Phases blinked since the last activity; see [`CURSOR_BLINK_LIMIT`].
+    blinks: u32,
     _task: Task<()>,
 }
 
@@ -232,11 +241,13 @@ impl BlinkCursor {
             visible: false,
             paused: false,
             epoch: 0,
+            blinks: 0,
             _task: Task::ready(()),
         }
     }
 
     fn start(&mut self, cx: &mut Context<Self>) {
+        self.blinks = 0;
         self.blink(self.epoch, cx);
     }
 
@@ -252,6 +263,7 @@ impl BlinkCursor {
     fn pause(&mut self, cx: &mut Context<Self>) {
         self.paused = true;
         self.visible = true;
+        self.blinks = 0;
         cx.notify();
 
         let epoch = self.next_epoch();
@@ -276,7 +288,17 @@ impl BlinkCursor {
             self.visible = true;
             return;
         }
+        if self.blinks >= CURSOR_BLINK_LIMIT {
+            // Idle: rest solid and schedule nothing, so the window stops
+            // drawing until the user does something.
+            if !self.visible {
+                self.visible = true;
+                cx.notify();
+            }
+            return;
+        }
 
+        self.blinks += 1;
         self.visible = !self.visible;
         cx.notify();
 
@@ -3109,8 +3131,9 @@ mod tests {
 
     use super::TokenClass;
     use super::{
-        ComposerEvent, ComposerInput, DeleteToLineEnd, DeleteToLineStart, DeleteToParagraphEnd,
-        EditHistory, FieldMode, SearchPaint, TextInput, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP,
+        BlinkCursor, CURSOR_BLINK_INTERVAL, CURSOR_BLINK_LIMIT, CURSOR_BLINK_PAUSE, ComposerEvent,
+        ComposerInput, DeleteToLineEnd, DeleteToLineStart, DeleteToParagraphEnd, EditHistory,
+        FieldMode, SearchPaint, TextInput, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP,
         cursor_should_be_visible, input_text_runs, media_paste_entries, next_word_boundary,
         pasted_text_for_mode, previous_word_boundary, single_line_scroll, trimmed_splice,
         visual_row_count, word_range_at,
@@ -3170,6 +3193,38 @@ mod tests {
         cx.update(|window, cx| window.focus(&composer.read(cx).focus(), cx));
         cx.run_until_parked();
         (composer, cx)
+    }
+
+    #[gpui::test]
+    fn an_untouched_caret_stops_blinking_and_activity_restarts_it(cx: &mut TestAppContext) {
+        let cursor = cx.new(|_| BlinkCursor::new());
+        let notifies = Rc::new(std::cell::Cell::new(0_u32));
+        let _subscription = cx.update(|cx| {
+            let notifies = notifies.clone();
+            cx.observe(&cursor, move |_, _| notifies.set(notifies.get() + 1))
+        });
+
+        cursor.update(cx, |cursor, cx| cursor.start(cx));
+        cx.executor()
+            .advance_clock(CURSOR_BLINK_INTERVAL * (CURSOR_BLINK_LIMIT + 10));
+        cx.run_until_parked();
+        let settled = notifies.get();
+        // One notify per phase, plus the one that rests it solid.
+        assert!(settled > CURSOR_BLINK_LIMIT && settled <= CURSOR_BLINK_LIMIT + 1);
+        assert!(cursor.read_with(cx, |cursor, _| cursor.visible()));
+
+        // Left alone, it draws nothing more.
+        cx.executor().advance_clock(CURSOR_BLINK_INTERVAL * 120);
+        cx.run_until_parked();
+        assert_eq!(notifies.get(), settled);
+        assert!(cursor.read_with(cx, |cursor, _| cursor.visible()));
+
+        // Typing (which pauses the caret) starts the blink again.
+        cursor.update(cx, |cursor, cx| cursor.pause(cx));
+        cx.executor()
+            .advance_clock(CURSOR_BLINK_PAUSE + CURSOR_BLINK_INTERVAL * 4);
+        cx.run_until_parked();
+        assert!(notifies.get() >= settled + 4);
     }
 
     #[gpui::test]
