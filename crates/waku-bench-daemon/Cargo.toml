@@ -40,3 +40,6 @@ libc = "0.2"
 
 [dev-dependencies]
 waku-client = { path = "../waku-client" }
+
+[lints]
+workspace = true
