@@ -208,7 +208,7 @@ Definitions:
 
 | Counter | Counted where |
 | --- | --- |
-| frame | Each `Waku::render`. The root re-renders on every window draw, so this is the frame count, and `renders.root` equals it. |
+| frame | Each `Waku::render`, plus each render of the launch shell that stands in for it while the daemon starts (`src/startup.rs`). The root re-renders on every window draw, so this is the frame count, and `renders.root` equals it. |
 | `renders.sidebar` / `transcript` / `right_panel` | The `WakuPane` delegates. A cached pane replaying its subtree is not a render. |
 | `renders.composer` | `ComposerInput::render`. |
 | stream commit | A pump drain (`drain_event_pump`) that applied at least one text or reasoning delta, however many sessions streamed in it. |
@@ -222,7 +222,7 @@ Report schema (`"schema": "waku.perf-counters/1"`). Counts are integers;
 `null` when their denominator is zero. Fields are only ever added within a
 schema version (readers ignore what they do not know); a field that changes
 meaning bumps it. `startup` and `totals.session_visits` were added for the
-baseline harness (#9).
+baseline harness (#9), `startup.daemon_ready_ms` for the parallel launch (#29).
 
 | Field | Meaning |
 | --- | --- |
@@ -230,8 +230,9 @@ baseline harness (#9).
 | `elapsed_ms` | Time since the counters started (early in `waku::run`). |
 | `startup.origin` | `"process"` when the times below run from the moment the OS created the process (macOS, from `proc_pidinfo`); `"init"` when the process start is unknown and they run from counter start. |
 | `startup.init_ms` | Process start to counter start: exec, dyld, static initializers and `main` up to `waku::run`. `null` with `origin: "init"`. |
-| `startup.first_frame_ms` | To the first root render, the first window frame being drawn (not yet presented). |
+| `startup.first_frame_ms` | To the first root render, the first window frame being drawn (not yet presented). This is the launch shell's frame when the daemon was not ready yet as the window opened. |
 | `startup.first_content_ms` | To the first transcript row built, i.e. the first frame drawing transcript content. `null` until a session with messages is on screen. |
+| `startup.daemon_ready_ms` | To the `waku-startup` thread delivering the connected daemon with task state, drafts and the selected session loaded (or failing to). It runs in parallel with GPUI start-up and the window opening, so `first_frame_ms` < `daemon_ready_ms` means the launch shell was on screen. |
 | `totals.frames` | Frames since start. |
 | `totals.renders.{root,sidebar,transcript,right_panel,composer}` | Renders since start. |
 | `totals.stream_commits` | Stream commits since start. |

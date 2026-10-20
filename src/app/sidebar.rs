@@ -2352,6 +2352,66 @@ impl Waku {
     }
 }
 
+impl Waku {
+    /// The sidebar as plain rows for the next launch's shell
+    /// (`crate::startup::snapshot`), or `None` when the task state never
+    /// loaded and the rows would describe a placeholder. Reuses the rows the
+    /// sidebar itself last built; one pass over at most `MAX_ROWS` of them.
+    pub(crate) fn startup_snapshot(&self) -> Option<crate::startup::snapshot::SidebarSnapshot> {
+        use crate::startup::snapshot::{MAX_ROWS, ShellSettings, SidebarSnapshot, SnapshotRow};
+
+        if !self.store.task_state_loaded() {
+            return None;
+        }
+        let rows = self.sidebar_rows_cached(Local::now().date_naive(), unix_time());
+        let selected = self
+            .pending_session_activation
+            .map(|pending| pending.session_id)
+            .or(self.state.selected_session);
+        let rows = rows
+            .iter()
+            .filter_map(|row| match *row {
+                SidebarRow::Search | SidebarRow::ShowMore(_) => None,
+                SidebarRow::GroupSpacer => Some(SnapshotRow::Spacer),
+                SidebarRow::Header(group) => Some(SnapshotRow::Header {
+                    label: match group {
+                        SidebarGroup::Updated(group) => group.label(),
+                        SidebarGroup::Project(project_id) => self
+                            .state
+                            .projects
+                            .iter()
+                            .find(|project| project.id == project_id)
+                            .map(Project::display_name)
+                            .unwrap_or_else(|| tr!("project.no_project_name")),
+                        SidebarGroup::Projectless => tr!("project.no_project_name"),
+                    },
+                }),
+                SidebarRow::Session(session_id) => self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| SnapshotRow::Session {
+                        title: localized_session_title(session),
+                        selected: selected == Some(session_id),
+                    }),
+            })
+            .take(MAX_ROWS)
+            .collect();
+        Some(SidebarSnapshot::new(
+            crate::startup::snapshot::daemon_key(),
+            ShellSettings {
+                theme: self.state.theme,
+                language: self.state.language,
+                ui_font_size: self.state.ui_font_size,
+                sidebar_visible: self.sidebar_visible,
+                sidebar_width: self.sidebar_width,
+            },
+            rows,
+        ))
+    }
+}
+
 fn localized_session_title(session: &AgentSession) -> String {
     let title = session.display_title();
     if title == AgentSession::DEFAULT_TITLE {

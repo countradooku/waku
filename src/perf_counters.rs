@@ -120,6 +120,9 @@ static SESSION_VISITS: AtomicU64 = AtomicU64::new(0);
 /// row, plus one so zero can mean "not yet".
 static FIRST_FRAME_NS: AtomicU64 = AtomicU64::new(0);
 static FIRST_CONTENT_NS: AtomicU64 = AtomicU64::new(0);
+/// Same encoding: to the startup thread having the daemon connected and the
+/// task state, drafts and selected session loaded (#29).
+static DAEMON_READY_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Record "now" in `cell` the first time only. One relaxed load per call
 /// once set.
@@ -183,6 +186,12 @@ pub fn transcript_row() {
     if COMMIT_FRAME.load(Relaxed) == COMMIT_FRAME_IN_FRAME {
         TRANSCRIPT_ROWS_BUILT_IN_COMMIT_FRAMES.fetch_add(1, Relaxed);
     }
+}
+
+/// The startup thread finished: daemon connected, initial state loaded (or
+/// the attempt failed). Runs off the UI thread.
+pub fn daemon_ready() {
+    mark_first(&DAEMON_READY_NS);
 }
 
 /// The bench harness's session visitor selected a session.
@@ -424,11 +433,15 @@ pub struct Startup {
     /// Process start to [`init`] (early in `waku::run`): dyld, static
     /// initializers and `main`. `null` with `origin: "init"`.
     pub init_ms: Option<f64>,
-    /// To the first root render: the first window frame being drawn.
+    /// To the first root render: the first window frame being drawn, which
+    /// is the launch shell when the daemon is not ready yet.
     pub first_frame_ms: Option<f64>,
     /// To the first transcript row built: the first frame with transcript
     /// content. `null` until a session with messages is on screen.
     pub first_content_ms: Option<f64>,
+    /// To the startup thread delivering the daemon and the loaded state.
+    /// Runs in parallel with GPUI start-up and the window opening.
+    pub daemon_ready_ms: Option<f64>,
 }
 
 impl Startup {
@@ -447,6 +460,7 @@ impl Startup {
             init_ms: init_offset_ns.map(|nanos| nanos as f64 / 1e6),
             first_frame_ms: since_origin(&FIRST_FRAME_NS),
             first_content_ms: since_origin(&FIRST_CONTENT_NS),
+            daemon_ready_ms: since_origin(&DAEMON_READY_NS),
         }
     }
 }
@@ -767,6 +781,7 @@ mod tests {
         assert!(json["per_commit"]["alloc_bytes"].is_null());
         assert_eq!(json["startup"]["origin"], "process");
         assert_eq!(json["startup"]["init_ms"], 5.0);
+        assert!(json["startup"]["daemon_ready_ms"].is_null());
         assert_eq!(json["totals"]["session_visits"], 0);
         assert_eq!(json["totals"]["renders"]["right_panel"], 0);
     }

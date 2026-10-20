@@ -997,6 +997,12 @@ impl StateStore {
         Ok(state)
     }
 
+    /// Whether this store loaded the daemon's task state, the same guard
+    /// [`StateStore::save`] checks.
+    pub fn task_state_loaded(&self) -> bool {
+        self.task_state_loaded.load(Ordering::Acquire)
+    }
+
     pub fn hydrate(&self, session: &mut AgentSession) -> io::Result<()> {
         if session.detail_loaded {
             return Ok(());

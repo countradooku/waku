@@ -2,6 +2,9 @@ _version: 1
 
 diff.ignore_whitespace: 忽略空白更改
 
+startup.daemon_failed: Waku 无法启动其守护进程
+startup.daemon_failed_hint: 退出并重新打开 Waku 以重试。
+
 commit.pull: 拉取（仅快进）
 commit.pulling: 正在拉取…
 commit.pulled: 拉取成功
