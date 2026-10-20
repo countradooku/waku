@@ -325,6 +325,10 @@ settings.render_math:
   en: Render math expressions
 settings.render_math_description:
   en: Show formatted math in Markdown. Turn off to show LaTeX source.
+settings.animate_panels:
+  en: Animate panels
+settings.animate_panels_description:
+  en: Slide the sidebar and side panel open and closed. Off shows them instantly.
 settings.theme_system:
   en: System
 settings.theme_light:

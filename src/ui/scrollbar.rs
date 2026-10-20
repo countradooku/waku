@@ -216,7 +216,7 @@ fn arm_fade_wake(state: &Rc<ScrollbarState>, view: gpui::EntityId, delay: Durati
             .timer(delay + Duration::from_millis(16))
             .await;
         state.fade_wake_armed.set(false);
-        cx.update(|cx| cx.notify(view));
+        cx.update(|cx| super::motion::notify_view(view, cx));
     })
     .detach();
 }
@@ -349,18 +349,25 @@ where
                 }
             }
 
+            // Every listener below changes only what this bar and its
+            // surface draw, and both are painted by the view painting the
+            // bar now. Notifying that view rebuilds its island alone, where a
+            // `window.refresh()` rebuilt every pane (sidebar, transcript,
+            // terminal, diff) on each hover edge and each drag move.
+            let view = window.current_view();
+
             // Hover is tracked from move events rather than by an interactive
             // child: the bar has to be able to reveal itself while invisible,
             // and a hidden child could not be hovered.
             window.on_mouse_event({
                 let state = state.clone();
-                move |event: &MouseMoveEvent, phase, window, _| {
+                move |event: &MouseMoveEvent, phase, _, cx| {
                     if phase != gpui::DispatchPhase::Bubble {
                         return;
                     }
                     let hovering = track.contains(&event.position);
                     if state.hovered.replace(hovering) != hovering {
-                        window.refresh();
+                        super::motion::notify_view(view, cx);
                     }
                 }
             });
@@ -368,7 +375,7 @@ where
             window.on_mouse_event({
                 let list = list.clone();
                 let state = state.clone();
-                move |event: &MouseDownEvent, phase, window, _| {
+                move |event: &MouseDownEvent, phase, _, cx| {
                     if phase != gpui::DispatchPhase::Bubble
                         || event.button != MouseButton::Left
                         || !track.contains(&event.position)
@@ -390,14 +397,14 @@ where
                             geometry.max_offset,
                         );
                     }
-                    window.refresh();
+                    super::motion::notify_view(view, cx);
                 }
             });
 
             window.on_mouse_event({
                 let list = list.clone();
                 let state = state.clone();
-                move |event: &MouseMoveEvent, phase, window, _| {
+                move |event: &MouseMoveEvent, phase, _, cx| {
                     if phase != gpui::DispatchPhase::Bubble {
                         return;
                     }
@@ -409,18 +416,18 @@ where
                         offset_for_thumb_top(track.top(), event.position.y - px(grab), &geometry),
                         geometry.max_offset,
                     );
-                    window.refresh();
+                    super::motion::notify_view(view, cx);
                 }
             });
 
             window.on_mouse_event({
                 let state = state.clone();
-                move |_: &MouseUpEvent, phase, window, _| {
+                move |_: &MouseUpEvent, phase, _, cx| {
                     if phase != gpui::DispatchPhase::Bubble || state.grab_offset.get().is_none() {
                         return;
                     }
                     state.grab_offset.set(None);
-                    window.refresh();
+                    super::motion::notify_view(view, cx);
                 }
             });
         },

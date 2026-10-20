@@ -667,13 +667,14 @@ impl WakuPane {
     fn bind(&mut self, waku: &Entity<Waku>, cx: &mut Context<Self>) {
         self.waku = Some(waku.downgrade());
         cx.observe(waku, |_, waku, cx| {
-            // A panel slide notifies the root at display rate for its 200ms,
-            // and this fan-out would price every one of those ticks at a
-            // three-island rebuild. Skipping it hands the decision to the
-            // cached-view keys: the sliding panel (its clip moves) and the
-            // transcript (its bounds move) miss their caches and re-render
-            // with fresh state anyway, while the island nothing is moving
-            // re-plays its cached subtree. Root-state changes it displays
+            // A panel slide (opt-in: **Animate panels**) notifies the root at
+            // display rate for its 200ms, and this fan-out would price every
+            // one of those ticks at a three-island rebuild. Skipping it hands
+            // the decision to the cached-view keys: the sliding panel (its
+            // clip moves) and, for a sidebar slide, the transcript (its
+            // origin moves; its width is held at the settled one) miss their
+            // caches and re-render with fresh state anyway, while the island
+            // nothing is moving re-plays its cached subtree. Root-state changes it displays
             // can wait out the slide: updates born inside an island
             // (terminal output, pulse leases) dirty their ancestor pane
             // without this observer, and the slide's retirement notify
@@ -1562,6 +1563,11 @@ pub struct Waku {
     /// message id (unique across sessions), so switching back to a recent
     /// session costs no re-parse; a byte-budgeted LRU bounds it.
     message_markdown: RefCell<memory::ByteBudgetLru<Uuid, MarkdownView>>,
+    /// Element ids of message rows; see [`Waku::message_row_ids`].
+    transcript_row_ids: RefCell<HashMap<Uuid, Rc<transcript_view::MessageRowIds>>>,
+    /// The Markdown palette of the transcript frame being built, resolved
+    /// once by `render_transcript` instead of once per row.
+    transcript_palette: Cell<Option<MarkdownPalette>>,
     /// Stable offsets for capped user bubbles, including across virtualized row rebuilds.
     user_message_viewports: RefCell<HashMap<Uuid, UserMessageScrollViewport>>,
     /// Parsed markdown for reasoning activities, keyed by (session id,
@@ -1608,6 +1614,8 @@ pub struct Waku {
     sidebar_pane: Entity<WakuPane>,
     transcript_pane: Entity<WakuPane>,
     right_panel_pane: Entity<WakuPane>,
+    /// Notified for a root-only frame; see [`RootFrame`].
+    root_frame: Entity<RootFrame>,
     /// The unix second the pending time-label wake-up targets, or `None` when
     /// none is armed. See `schedule_time_label_wake`.
     time_label_wake: Cell<Option<u64>>,
@@ -1627,6 +1635,7 @@ mod command_palette;
 mod commit_dialog;
 mod components;
 mod composer;
+mod dirty;
 mod drafts;
 mod file_search;
 mod goal_dialog;
@@ -1656,12 +1665,16 @@ use background_work::{
 pub use command_palette::init as init_command_palette;
 pub use commit_dialog::init as init_commit_dialog_keys;
 use components::*;
+use dirty::{
+    DirtySet, DriverEventImpact, RootFrame, driver_event_impact, session_drain_dirty,
+    session_sidebar_fingerprint, widest_impact,
+};
 pub use goal_dialog::init as init_goal_dialog_keys;
 pub use image_preview::init as init_image_preview_keys;
 use project_picker::ProjectPickerSite;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
-use sidebar::{SidebarGroup, SidebarRow};
+use sidebar::{SidebarGroup, SidebarRow, sidebar_session_fingerprint};
 pub use skills_page::init as init_skills_keys;
 use streaming::*;
 use transcript::*;
@@ -1883,7 +1896,18 @@ impl Waku {
                 }
                 // Consumed: the notified frame re-arms the next boundary.
                 this.time_label_wake.set(None);
-                cx.notify();
+                // Relative reply times live in the sidebar, "Working for Ns"
+                // in the sidebar and the transcript; the right panel shows
+                // neither and replays.
+                this.notify_dirty(
+                    DirtySet {
+                        root: true,
+                        sidebar: true,
+                        transcript: true,
+                        right_panel: false,
+                    },
+                    cx,
+                );
             });
         })
         .detach();
@@ -2058,6 +2082,7 @@ impl Waku {
         let sidebar_pane = WakuPane::new(Waku::sidebar_pane_content, cx);
         let transcript_pane = WakuPane::new(Waku::transcript_pane_content, cx);
         let right_panel_pane = WakuPane::new(Waku::right_panel_pane_content, cx);
+        let root_frame = cx.new(|_| RootFrame);
         let workspace_client = waku_client::WorkspaceClient::new(daemon.client());
         let (projectless_migrated, projectless_migration_error) =
             migrate_legacy_projectless_projects(&mut state, &workspace_client);
@@ -2272,26 +2297,31 @@ impl Waku {
         // when a bottom-aligned list reaches the end — it represents that end as
         // no logical offset — but a turn renders through the top-aligned
         // anchored list, whose end is an ordinary offset, so only this can.
+        //
+        // Everything these handlers record is read by the transcript island
+        // alone (tail recheck, scroll-to-bottom affordance, rail emphasis), and
+        // `ListState::scroll` notifies the view that painted the list — that
+        // island — right after the handler returns. A `window.refresh()` here
+        // used to rebuild the sidebar and right panel (terminal, diff, editor)
+        // on every scroll tick for nothing.
         transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
             let transcript_tail_recheck = transcript_tail_recheck.clone();
-            move |event, window, _| {
+            move |event, _, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
                 transcript_tail_recheck.set(true);
-                window.refresh();
             }
         });
         anchored_transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
             let transcript_tail_recheck = transcript_tail_recheck.clone();
-            move |event, window, _| {
+            move |event, _, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
                 transcript_tail_recheck.set(true);
-                window.refresh();
             }
         });
         // Enable GPUI's experimental overlay plane so deferred draws (menus,
@@ -3049,6 +3079,8 @@ impl Waku {
                     memory::MARKDOWN_MIN_ENTRIES,
                     MarkdownView::source_len,
                 )),
+                transcript_row_ids: RefCell::new(HashMap::new()),
+                transcript_palette: Cell::new(None),
                 user_message_viewports: RefCell::new(HashMap::new()),
                 activity_markdown: RefCell::new(memory::ByteBudgetLru::new(
                     memory::ACTIVITY_MARKDOWN_BUDGET,
@@ -3071,6 +3103,7 @@ impl Waku {
                 sidebar_pane: sidebar_pane.clone(),
                 transcript_pane: transcript_pane.clone(),
                 right_panel_pane: right_panel_pane.clone(),
+                root_frame: root_frame.clone(),
                 time_label_wake: Cell::new(None),
                 time_label_wake_generation: Cell::new(0),
                 fps_last_frame: Instant::now(),
@@ -3082,6 +3115,10 @@ impl Waku {
         for pane in [&sidebar_pane, &transcript_pane, &right_panel_pane] {
             pane.update(cx, |pane, cx| pane.bind(&entity, cx));
         }
+        // A pulse loader or overlay scrollbar painted by the root view leases
+        // the root itself. Redirect those ticks to the root frame so they
+        // repaint the root without fanning out to every island.
+        crate::ui::motion::redirect_notifications(entity.entity_id(), root_frame.entity_id(), cx);
         let initial_row_count = entity.read(cx).transcript_row_count();
         entity.read(cx).reset_transcript_rows(initial_row_count);
         // Everything launch needs from `git` or the filesystem, started now

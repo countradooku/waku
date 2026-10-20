@@ -110,8 +110,9 @@ pub struct Line {
     pub new_line: Option<u32>,
     pub kind: LineKind,
     /// Code content without the unified-diff marker for code rows; raw Git
-    /// metadata for hunk/meta rows.
-    pub content: String,
+    /// metadata for hunk/meta rows. Shared, so a row can hand it to its text
+    /// element on every frame without copying the line.
+    pub content: gpui::SharedString,
     /// Paint-only syntax spans over `content`, computed off the UI thread.
     pub tokens: Vec<Token>,
 }
@@ -267,7 +268,7 @@ fn push_remaining_gap(replacement: &mut Vec<Line>, file_index: usize, mut gap: G
         old_line: None,
         new_line: None,
         kind: LineKind::Gap(gap),
-        content: String::new(),
+        content: gpui::SharedString::default(),
         tokens: Vec::new(),
     });
 }
@@ -394,7 +395,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
                 old_line: None,
                 new_line: None,
                 kind: LineKind::FileHeader,
-                content: String::new(),
+                content: gpui::SharedString::default(),
                 tokens: Vec::new(),
             });
             continue;
@@ -446,7 +447,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
                     old_line: None,
                     new_line: None,
                     kind: LineKind::HunkHeader,
-                    content: String::new(),
+                    content: gpui::SharedString::default(),
                     tokens: Vec::new(),
                 });
             }
@@ -476,7 +477,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
                             GapPosition::Between
                         },
                     }),
-                    content: String::new(),
+                    content: gpui::SharedString::default(),
                     tokens: Vec::new(),
                 });
                 next_gap_id = next_gap_id.wrapping_add(1);
@@ -486,7 +487,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
                     old_line: None,
                     new_line: None,
                     kind: LineKind::HunkHeader,
-                    content: raw.to_owned(),
+                    content: raw.to_owned().into(),
                     tokens: Vec::new(),
                 });
             }
@@ -540,7 +541,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
             old_line: shown_old,
             new_line: shown_new,
             kind,
-            content,
+            content: content.into(),
             tokens,
         });
     }
@@ -671,7 +672,7 @@ fn push_context_gap(
             hidden: hidden[..count as usize].to_vec(),
             position,
         }),
-        content: String::new(),
+        content: gpui::SharedString::default(),
         tokens: Vec::new(),
     });
     *next_gap_id = next_gap_id.wrapping_add(1);

@@ -23,7 +23,7 @@ price:
 | --- | --- | --- |
 | `cx.notify(view)` | Re-renders that view and its ancestors; **cached sibling panes replay** | The stream pump (per commit), the pulse clock, user-event handlers |
 | `window.refresh()` | Re-renders everything and **bypasses every cached pane** | Genuine whole-window invalidation only: hover transitions, drags, theme |
-| `request_animation_frame` | Display-rate (120 Hz) re-render of the current view for as long as it re-arms | Nothing during streaming. One mounted repeating `with_animation` pinned the window at 120 Hz for a whole turn (~36% CPU by itself). The one sanctioned transient: the 200 ms panel show/hide slide ([src/app/render.rs](../src/app/render.rs)), which re-arms only while an edge is moving and gates the pane fan-out (below) |
+| `request_animation_frame` | Display-rate (120 Hz) re-render of the current view for as long as it re-arms | Nothing during streaming. One mounted repeating `with_animation` pinned the window at 120 Hz for a whole turn (~36% CPU by itself). The one sanctioned transient: the 200 ms panel show/hide slide ([src/app/render.rs](../src/app/render.rs)), which is off by default (**Animate panels** in settings), re-arms only while an edge is moving and gates the pane fan-out (below) |
 
 The root `Waku` view re-renders on every frame regardless of what is dirty, so
 it must stay thin: the sidebar, transcript, and right panel are `WakuPane`
@@ -33,12 +33,43 @@ re-renders every island, so caching can never show stale state — while a
 notify targeted at one pane (the pulse clock leases `window.current_view()`)
 rebuilds only that island and replays the rest.
 
-The one exception to that fan-out is the 200 ms panel slide: its display-rate
-root notifies would price every tick at a three-island rebuild, so while
-`panels_sliding()` the observer skips the fan-out and the cached-view keys
-decide instead — the sliding panel (its clip moves) and the transcript (its
-bounds move) miss their caches and rebuild with fresh state anyway, while the
-island nothing is moving replays. Updates born inside an island still land
+Producers that know what they changed notify islands directly instead of the
+root ([src/app/dirty.rs](../src/app/dirty.rs)). The event pump builds a
+`DirtySet { root, sidebar, transcript, right_panel }` per drain:
+
+- text and reasoning deltas of the selected session dirty the transcript;
+- tool activity and background work also dirty the right panel;
+- a background session's deltas dirty nothing;
+- the sidebar is dirty only when a drained session's sidebar fingerprint
+  (`sidebar_session_fingerprint`: status, title, recency, branch, last turn)
+  moved;
+- everything else (turn boundaries, permissions, errors, usage, session
+  added or removed, the other result queues) is `DirtySet::ALL`, a plain root
+  notify.
+
+`Waku::notify_dirty` notifies the named panes, or uses a plain root notify
+when all three are dirty. The root renders on every draw anyway, so root
+state rides along with any pane notify. When only the root is dirty, it
+notifies `RootFrame`, a zero-size child of the root: gpui marks it and its
+ancestors dirty, so the root repaints and every island replays. Pulse ticks
+and overlay-scrollbar wakes aimed at the root go to the same stand-in
+(`motion::redirect_notifications`), so a spinner in the header or composer
+no longer rebuilds all three islands at pulse rate. The time-label wake
+dirties the root, sidebar and transcript, not the right panel.
+
+The one exception to that fan-out is the 200 ms panel slide. Panels toggle
+instantly unless the user turns on **Animate panels**; with it on, the slide's
+display-rate root notifies would price every tick at a three-island rebuild,
+so while `panels_sliding()` the observer skips the fan-out and the cached-view
+keys decide instead. The sliding panel (its clip moves) misses its cache and
+rebuilds with fresh state; the island nothing is moving replays. The
+transcript keeps its *settled* width for the whole slide
+(`transcript_slide_width`): animating the column's width used to change the
+`list()` width every frame, which drops every cached row height and re-wraps
+every visible paragraph at display rate. Held at the settled width, a right
+panel slide leaves the transcript's bounds alone (it replays), and a sidebar
+slide only moves its origin (it rebuilds rows, but heights and the line-layout
+cache stay warm). Updates born inside an island still land
 mid-slide because a child notify dirties its ancestor pane without the
 observer, and the slide's retirement schedules one ungated notify so any
 root-state drift in a reused pane converges the frame after the slide ends. Two traps to know: gpui's
@@ -94,6 +125,13 @@ the whole turn — and the hold is constant-opacity, needing zero repaints.
 one-shot wake for hold expiry and rides the pulse clock only through the
 350 ms fade. Driving frames through the hold pinned the pane at pulse rate the
 moment any scrollbar became visible.
+
+Scrolling is island-local too. `ListState::scroll` notifies the view that
+painted the list, so the transcript's scroll handlers only record intent, and
+the scrollbar's hover, click and drag listeners notify the view captured at
+paint (`window.current_view()`). Neither calls `window.refresh()`, which used
+to rebuild the sidebar and the right panel (terminal, diff, editor) on every
+scroll tick.
 
 ## Bounding what is visible
 

@@ -364,7 +364,7 @@ fn diff_row_selection_key(
 pub(super) fn render_diff_code_row(
     line: &crate::review_diff::Line,
     index: usize,
-    key_prefix: &str,
+    key_prefix: &SharedString,
     selection: &TranscriptSelection,
     style: DiffRowStyle,
     theme: &Theme,
@@ -389,10 +389,10 @@ pub(super) fn render_diff_code_row(
         _ => (" ", None, None, None, theme.text_tertiary),
     };
     let shown_line = line.new_line.or(line.old_line);
-    let flat = review_diff_flat_text(line, theme);
+    let (flat, selection_key) = cached_diff_row_text(line, index, key_prefix, theme);
     let selectable = md::render::selectable_flat_text(
         &flat,
-        crate::md::selection::TextKey::new(diff_row_selection_key(key_prefix, line, index), 0),
+        crate::md::selection::TextKey::new(selection_key, 0),
         selection.clone(),
         theme.code_wash,
         theme.selection,
@@ -429,10 +429,9 @@ pub(super) fn render_diff_code_row(
         .items_start()
         .when_some(body_background, |body, background| body.bg(background))
         .child(
+            // Ids are scoped by the row's own id below, so this one is fixed.
             div()
-                .id(SharedString::from(format!(
-                    "{key_prefix}-line-content-{index}"
-                )))
+                .id("line-content")
                 .min_h(px(style.row_height))
                 .min_w_0()
                 .flex_1()
@@ -444,7 +443,7 @@ pub(super) fn render_diff_code_row(
                 .child(selectable),
         );
     div()
-        .id(SharedString::from(format!("{key_prefix}-row-{index}")))
+        .id((key_prefix.clone(), index))
         .w_full()
         .min_w_0()
         .min_h(px(style.row_height))
@@ -461,6 +460,98 @@ pub(super) fn render_diff_code_row(
         .child(gutter)
         .child(body)
         .into_any_element()
+}
+
+/// Diff code rows whose text and selection key [`cached_diff_row_text`] keeps
+/// before it starts over.
+const DIFF_ROW_CACHE_CAP: usize = 8192;
+
+/// Everything one diff code row's text and selection key derive from: its
+/// surface and position (the key), its text and syntax spans (the runs).
+/// Keyed by value, not by address: short shared strings live inline, so
+/// their address says nothing about their contents. A hit costs a hash and a
+/// compare of one line, no allocation.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DiffRowKey {
+    prefix: SharedString,
+    index: usize,
+    file_index: usize,
+    old_line: Option<u32>,
+    new_line: Option<u32>,
+    kind: u8,
+    content: SharedString,
+    tokens: u64,
+}
+
+struct DiffRowEntry {
+    palette: MarkdownPalette,
+    text_color: Hsla,
+    flat: Rc<md::render::FlatText>,
+    selection_key: Rc<str>,
+}
+
+thread_local! {
+    static DIFF_ROWS: RefCell<HashMap<DiffRowKey, DiffRowEntry>> = RefCell::new(HashMap::new());
+}
+
+/// The styled text and selection key of a diff code row.
+///
+/// Diff rows are rebuilt for every visible line on every frame the Review
+/// list or an expanded activity diff renders. Both depend only on the
+/// immutable parsed line, its position and the theme, so they are built once
+/// per line instead of copying the line, rebuilding its runs and `format!`ing
+/// its key each frame.
+fn cached_diff_row_text(
+    line: &crate::review_diff::Line,
+    index: usize,
+    key_prefix: &SharedString,
+    theme: &Theme,
+) -> (Rc<md::render::FlatText>, Rc<str>) {
+    let palette = MarkdownPalette::from_theme(theme);
+    let key = DiffRowKey {
+        prefix: key_prefix.clone(),
+        index,
+        file_index: line.file_index,
+        old_line: line.old_line,
+        new_line: line.new_line,
+        kind: match line.kind {
+            crate::review_diff::LineKind::Context => 0,
+            crate::review_diff::LineKind::Addition => 1,
+            crate::review_diff::LineKind::Deletion => 2,
+            _ => 3,
+        },
+        content: line.content.clone(),
+        tokens: {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for token in &line.tokens {
+                token.range.hash(&mut hasher);
+                (token.class as u8).hash(&mut hasher);
+            }
+            hasher.finish()
+        },
+    };
+    DIFF_ROWS.with(|rows| {
+        let mut rows = rows.borrow_mut();
+        if let Some(entry) = rows.get(&key)
+            && entry.palette == palette
+            && entry.text_color == theme.text_secondary
+        {
+            return (entry.flat.clone(), entry.selection_key.clone());
+        }
+        if rows.len() >= DIFF_ROW_CACHE_CAP {
+            rows.clear();
+        }
+        let entry = DiffRowEntry {
+            palette,
+            text_color: theme.text_secondary,
+            flat: Rc::new(review_diff_flat_text(line, theme)),
+            selection_key: diff_row_selection_key(key_prefix, line, index).into(),
+        };
+        let result = (entry.flat.clone(), entry.selection_key.clone());
+        rows.insert(key, entry);
+        result
+    })
 }
 
 fn review_diff_flat_text(line: &crate::review_diff::Line, theme: &Theme) -> md::render::FlatText {
@@ -492,7 +583,7 @@ fn review_diff_flat_text(line: &crate::review_diff::Line, theme: &Theme) -> md::
         push(text.len() - offset, theme.text_secondary);
     }
     md::render::FlatText {
-        text: text.into(),
+        text,
         runs,
         links: Vec::new(),
         code_ranges: Vec::new(),
@@ -1077,6 +1168,53 @@ fn tab_scroll_fade(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_rows_build_their_text_and_key_once_per_line_and_theme() {
+        let line = crate::review_diff::Line {
+            file_index: 0,
+            old_line: Some(4),
+            new_line: Some(6),
+            kind: crate::review_diff::LineKind::Context,
+            content: "let kept = 1;".into(),
+            tokens: Vec::new(),
+        };
+        let prefix = SharedString::new_static("review-diff");
+        let dark = Theme::dark();
+        let (flat, key) = cached_diff_row_text(&line, 9, &prefix, &dark);
+        let (again, again_key) = cached_diff_row_text(&line.clone(), 9, &prefix, &dark);
+        assert!(
+            Rc::ptr_eq(&flat, &again),
+            "a cloned line shares the cached text"
+        );
+        assert!(Rc::ptr_eq(&key, &again_key));
+        assert_eq!(&*key, "review-diff-line-0-context-4-6");
+        assert_eq!(flat.text, line.content);
+
+        // A theme change rebuilds the runs; another surface keys separately.
+        let (light, _) = cached_diff_row_text(&line, 9, &prefix, &Theme::light());
+        assert!(!Rc::ptr_eq(&flat, &light));
+        let (_, activity_key) =
+            cached_diff_row_text(&line, 9, &SharedString::new_static("activity"), &dark);
+        assert_eq!(&*activity_key, "activity-line-0-context-4-6");
+
+        // Different text or syntax spans at the same position rebuild.
+        let edited = crate::review_diff::Line {
+            content: "let kept = 2;".into(),
+            ..line.clone()
+        };
+        let (edited_flat, _) = cached_diff_row_text(&edited, 9, &prefix, &dark);
+        assert_eq!(edited_flat.text, edited.content);
+        let highlighted = crate::review_diff::Line {
+            tokens: vec![crate::md::highlight::Token {
+                range: 0..3,
+                class: crate::md::highlight::TokenClass::Keyword,
+            }],
+            ..line.clone()
+        };
+        let (highlighted_flat, _) = cached_diff_row_text(&highlighted, 9, &prefix, &dark);
+        assert!(highlighted_flat.runs.len() > flat.runs.len());
+    }
 
     #[test]
     fn transcript_file_links_route_by_the_active_workspace() {
@@ -4008,7 +4146,7 @@ impl Waku {
             | crate::review_diff::LineKind::Deletion => render_diff_code_row(
                 line,
                 index,
-                "review-diff",
+                &SharedString::new_static("review-diff"),
                 &self.right_panel_diff_selection,
                 style,
                 &theme,
