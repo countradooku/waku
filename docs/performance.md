@@ -219,12 +219,19 @@ Definitions:
 
 Report schema (`"schema": "waku.perf-counters/1"`). Counts are integers;
 `_ns` fields are nanoseconds, `_ms` milliseconds, `_bytes` bytes. Ratios are
-`null` when their denominator is zero.
+`null` when their denominator is zero. Fields are only ever added within a
+schema version (readers ignore what they do not know); a field that changes
+meaning bumps it. `startup` and `totals.session_visits` were added for the
+baseline harness (#9).
 
 | Field | Meaning |
 | --- | --- |
 | `schema`, `pid`, `final` | Layout version, app process id, and whether this is the report written at quit. |
 | `elapsed_ms` | Time since the counters started (early in `waku::run`). |
+| `startup.origin` | `"process"` when the times below run from the moment the OS created the process (macOS, from `proc_pidinfo`); `"init"` when the process start is unknown and they run from counter start. |
+| `startup.init_ms` | Process start to counter start: exec, dyld, static initializers and `main` up to `waku::run`. `null` with `origin: "init"`. |
+| `startup.first_frame_ms` | To the first root render, the first window frame being drawn (not yet presented). |
+| `startup.first_content_ms` | To the first transcript row built, i.e. the first frame drawing transcript content. `null` until a session with messages is on screen. |
 | `totals.frames` | Frames since start. |
 | `totals.renders.{root,sidebar,transcript,right_panel,composer}` | Renders since start. |
 | `totals.stream_commits` | Stream commits since start. |
@@ -234,6 +241,7 @@ Report schema (`"schema": "waku.perf-counters/1"`). Counts are integers;
 | `totals.save_calls`, `totals.save_ui_ns`, `totals.save_max_ns` | `Waku::save` calls, total UI-thread time in them, and the longest single call. |
 | `totals.alloc_bytes`, `totals.alloc_count` | Bytes and allocations, all threads. |
 | `totals.ui_alloc_bytes` | Bytes allocated on the UI thread, as of the last frame. |
+| `totals.session_visits` | Sessions selected by the bench visitor (`WAKU_PERF_VISIT_SESSIONS_MS`, below). |
 | `totals.commit_alloc_bytes` | UI-thread bytes allocated inside the pump drains that were stream commits. |
 | `mean_per_s.{frames,stream_commits}`, `mean_per_s.renders.*` | Totals divided by `elapsed_ms / 1000`. |
 | `peak_per_s.{frames,stream_commits,transcript_rows_built,save_ui_ns,alloc_bytes}`, `peak_per_s.renders.*` | The highest value in any one complete one-second bucket. |
@@ -241,6 +249,12 @@ Report schema (`"schema": "waku.perf-counters/1"`). Counts are integers;
 | `per_commit.alloc_bytes` | `commit_alloc_bytes / stream_commits`: UI-thread bytes to apply one commit (not to render it). |
 | `per_commit.renders.*` | Total renders divided by `stream_commits`. This is meaningful only for a run that does nothing but stream, which is what the budget harness drives. |
 | `series[]` | One-second buckets, oldest first, at most 3600 (`series_dropped` counts the evicted ones). Each has `t_ms` (bucket end, since start), `dur_ms`, and the per-bucket deltas `frames`, `renders.*`, `stream_commits`, `transcript_rows_built`, `save_calls`, `save_ui_ns`, `alloc_bytes` and `commit_alloc_bytes`. |
+
+With `WAKU_PERF_VISIT_SESSIONS_MS=<ms>` set, a `perf-counters` build also
+selects every started session once, in catalog order, one per interval,
+through the same path as a sidebar click. The memory scenarios of
+`scripts/bench/baseline.sh` use it to visit N long sessions without UI input.
+Default builds have neither the variable nor the code.
 
 Budget checks map onto it directly. For example, "commits/s ≤ budget" is
 `peak_per_s.stream_commits`, "transcript renders per commit ≤ 1" is

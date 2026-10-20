@@ -13,7 +13,8 @@
 //! - the FPS counter overlay shows the last bucket.
 //!
 //! The JSON schema is documented in docs/performance.md; bump [`SCHEMA`] when
-//! a field changes meaning.
+//! a field changes meaning. Added fields keep the version: readers must
+//! ignore fields they do not know.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -113,6 +114,25 @@ static SAVE_UI_NS: AtomicU64 = AtomicU64::new(0);
 static SAVE_MAX_NS: AtomicU64 = AtomicU64::new(0);
 static UI_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 static COMMIT_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+static SESSION_VISITS: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds from [`init`] to the first frame and to the first transcript
+/// row, plus one so zero can mean "not yet".
+static FIRST_FRAME_NS: AtomicU64 = AtomicU64::new(0);
+static FIRST_CONTENT_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Record "now" in `cell` the first time only. One relaxed load per call
+/// once set.
+#[inline]
+fn mark_first(cell: &AtomicU64) {
+    if cell.load(Relaxed) != 0 {
+        return;
+    }
+    if let Some(state) = STATE.get() {
+        let nanos = u64::try_from(state.started.elapsed().as_nanos()).unwrap_or(u64::MAX - 1);
+        let _ = cell.compare_exchange(0, nanos.saturating_add(1), Relaxed, Relaxed);
+    }
+}
 
 /// Where the frame that presents a stream commit stands. A commit arms it;
 /// the next root render (the start of that frame) moves it to `IN_FRAME`, so
@@ -126,6 +146,7 @@ const COMMIT_FRAME_IN_FRAME: u8 = 2;
 /// The root view rendered: one window frame. Also publishes the UI thread's
 /// allocation total, since the root render always runs on the UI thread.
 pub fn frame() {
+    mark_first(&FIRST_FRAME_NS);
     FRAMES.fetch_add(1, Relaxed);
     RENDER_ROOT.fetch_add(1, Relaxed);
     UI_ALLOC_BYTES.store(thread_alloc_bytes(), Relaxed);
@@ -157,10 +178,16 @@ pub fn render_composer() {
 
 /// The transcript row builder ran for one row.
 pub fn transcript_row() {
+    mark_first(&FIRST_CONTENT_NS);
     TRANSCRIPT_ROWS_BUILT.fetch_add(1, Relaxed);
     if COMMIT_FRAME.load(Relaxed) == COMMIT_FRAME_IN_FRAME {
         TRANSCRIPT_ROWS_BUILT_IN_COMMIT_FRAMES.fetch_add(1, Relaxed);
     }
+}
+
+/// The bench harness's session visitor selected a session.
+pub fn session_visit() {
+    SESSION_VISITS.fetch_add(1, Relaxed);
 }
 
 /// Set while the current pump drain has applied streamed content.
@@ -284,6 +311,7 @@ pub struct Totals {
     pub alloc_count: u64,
     pub ui_alloc_bytes: u64,
     pub commit_alloc_bytes: u64,
+    pub session_visits: u64,
 }
 
 impl Totals {
@@ -309,6 +337,7 @@ impl Totals {
             alloc_count: ALLOC_COUNT.load(Relaxed),
             ui_alloc_bytes: UI_ALLOC_BYTES.load(Relaxed),
             commit_alloc_bytes: COMMIT_ALLOC_BYTES.load(Relaxed),
+            session_visits: SESSION_VISITS.load(Relaxed),
         }
     }
 }
@@ -386,6 +415,74 @@ pub struct PerCommit {
     pub renders: Option<RendersRatio>,
 }
 
+/// Launch milestones. With `origin: "process"` every time is measured from
+/// the moment the OS created the process (macOS); with `origin: "init"` the
+/// process start is unknown and times run from [`init`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Startup {
+    pub origin: &'static str,
+    /// Process start to [`init`] (early in `waku::run`): dyld, static
+    /// initializers and `main`. `null` with `origin: "init"`.
+    pub init_ms: Option<f64>,
+    /// To the first root render: the first window frame being drawn.
+    pub first_frame_ms: Option<f64>,
+    /// To the first transcript row built: the first frame with transcript
+    /// content. `null` until a session with messages is on screen.
+    pub first_content_ms: Option<f64>,
+}
+
+impl Startup {
+    fn load(init_offset_ns: Option<u64>) -> Self {
+        let offset = init_offset_ns.unwrap_or(0);
+        let since_origin = |cell: &AtomicU64| match cell.load(Relaxed) {
+            0 => None,
+            plus_one => Some((offset + plus_one - 1) as f64 / 1e6),
+        };
+        Self {
+            origin: if init_offset_ns.is_some() {
+                "process"
+            } else {
+                "init"
+            },
+            init_ms: init_offset_ns.map(|nanos| nanos as f64 / 1e6),
+            first_frame_ms: since_origin(&FIRST_FRAME_NS),
+            first_content_ms: since_origin(&FIRST_CONTENT_NS),
+        }
+    }
+}
+
+/// How long this process had existed when [`init`] ran, from the kernel's
+/// record of its start time.
+#[cfg(target_os = "macos")]
+fn process_age() -> Option<Duration> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a writable buffer of exactly `size` bytes.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: the kernel filled all `size` bytes.
+    let info = unsafe { info.assume_init() };
+    let started = std::time::UNIX_EPOCH
+        + Duration::from_secs(info.pbi_start_tvsec)
+        + Duration::from_micros(info.pbi_start_tvusec);
+    std::time::SystemTime::now().duration_since(started).ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_age() -> Option<Duration> {
+    None
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Report {
     pub schema: &'static str,
@@ -393,6 +490,7 @@ pub struct Report {
     #[serde(rename = "final")]
     pub is_final: bool,
     pub elapsed_ms: u64,
+    pub startup: Startup,
     pub totals: Totals,
     pub mean_per_s: Rates,
     pub peak_per_s: Peaks,
@@ -429,7 +527,7 @@ impl Series {
         bucket
     }
 
-    fn report(&self, totals: Totals, elapsed_ms: u64, is_final: bool) -> Report {
+    fn report(&self, totals: Totals, elapsed_ms: u64, is_final: bool, startup: Startup) -> Report {
         let seconds = elapsed_ms as f64 / 1000.0;
         let per_second = |value: u64| {
             if seconds > 0.0 {
@@ -445,6 +543,7 @@ impl Series {
             pid: std::process::id(),
             is_final,
             elapsed_ms,
+            startup,
             totals,
             mean_per_s: Rates {
                 frames: per_second(totals.frames),
@@ -474,6 +573,8 @@ impl Series {
 
 struct State {
     started: Instant,
+    /// Process start to `started`, when the platform reports it.
+    init_offset_ns: Option<u64>,
     out: Option<PathBuf>,
     series: Mutex<Series>,
     /// The most recent complete bucket, for the overlay.
@@ -487,8 +588,11 @@ pub fn init() {
     let out = std::env::var_os(OUT_ENV)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from);
+    let started = Instant::now();
+    let init_offset_ns = process_age().and_then(|age| u64::try_from(age.as_nanos()).ok());
     let state = State {
-        started: Instant::now(),
+        started,
+        init_offset_ns,
         out,
         series: Mutex::new(Series {
             last_totals: Totals::load(),
@@ -519,10 +623,9 @@ pub fn init() {
                     if let Ok(mut last) = state.last.lock() {
                         *last = Some(bucket);
                     }
-                    state
-                        .out
-                        .as_ref()
-                        .map(|_| series.report(totals, now_ms, false))
+                    state.out.as_ref().map(|_| {
+                        series.report(totals, now_ms, false, Startup::load(state.init_offset_ns))
+                    })
                 };
                 if let (Some(report), Some(path)) = (report, state.out.as_deref()) {
                     write_report(path, &report);
@@ -550,7 +653,7 @@ pub fn write_final() {
     let now_ms = elapsed_ms(state);
     let totals = Totals::load();
     let report = match state.series.lock() {
-        Ok(series) => series.report(totals, now_ms, true),
+        Ok(series) => series.report(totals, now_ms, true, Startup::load(state.init_offset_ns)),
         Err(_) => return,
     };
     write_report(path, &report);
@@ -613,7 +716,7 @@ mod tests {
         let mut series = Series::default();
         series.close_bucket(totals(60, 8, 8), 1000);
         series.close_bucket(totals(180, 10, 10), 2000);
-        let report = series.report(totals(180, 10, 10), 2000, true);
+        let report = series.report(totals(180, 10, 10), 2000, true, Startup::load(None));
         assert_eq!(report.series.len(), 2);
         assert_eq!(report.series[1].frames, 120);
         assert_eq!(report.series[1].stream_commits, 2);
@@ -639,12 +742,19 @@ mod tests {
     #[test]
     fn report_serializes_the_documented_fields() {
         let series = Series::default();
-        let json = serde_json::to_value(series.report(Totals::default(), 0, false)).unwrap();
+        let json = serde_json::to_value(series.report(
+            Totals::default(),
+            0,
+            false,
+            Startup::load(Some(5_000_000)),
+        ))
+        .unwrap();
         assert_eq!(json["schema"], SCHEMA);
         assert_eq!(json["final"], false);
         for field in [
             "pid",
             "elapsed_ms",
+            "startup",
             "totals",
             "mean_per_s",
             "peak_per_s",
@@ -655,6 +765,9 @@ mod tests {
             assert!(json.get(field).is_some(), "missing {field}");
         }
         assert!(json["per_commit"]["alloc_bytes"].is_null());
+        assert_eq!(json["startup"]["origin"], "process");
+        assert_eq!(json["startup"]["init_ms"], 5.0);
+        assert_eq!(json["totals"]["session_visits"], 0);
         assert_eq!(json["totals"]["renders"]["right_panel"], 0);
     }
 

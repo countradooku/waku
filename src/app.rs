@@ -3090,6 +3090,8 @@ impl Waku {
             // And the header's "open project in app" targets, so its menu
             // lists installed apps and icons without ever probing on a frame.
             this.detect_open_in_apps(cx);
+            #[cfg(feature = "perf-counters")]
+            this.start_perf_session_visits(cx);
         });
         entity
     }
