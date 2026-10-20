@@ -1567,6 +1567,11 @@ pub struct Waku {
     /// Parsed markdown per assistant message, keeping each response's
     /// incremental parse and flattened blocks alive across frames.
     message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// Element ids of message rows; see [`Waku::message_row_ids`].
+    transcript_row_ids: RefCell<HashMap<Uuid, Rc<transcript_view::MessageRowIds>>>,
+    /// The Markdown palette of the transcript frame being built, resolved
+    /// once by `render_transcript` instead of once per row.
+    transcript_palette: Cell<Option<MarkdownPalette>>,
     /// Stable offsets for capped user bubbles, including across virtualized row rebuilds.
     user_message_viewports: RefCell<HashMap<Uuid, UserMessageScrollViewport>>,
     /// Parsed markdown for reasoning activities, keyed by stable activity id.
@@ -3061,6 +3066,8 @@ impl Waku {
                 transcript_scrollbar_dragging: Cell::new(false),
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 message_markdown: RefCell::new(HashMap::new()),
+                transcript_row_ids: RefCell::new(HashMap::new()),
+                transcript_palette: Cell::new(None),
                 user_message_viewports: RefCell::new(HashMap::new()),
                 activity_markdown: RefCell::new(HashMap::new()),
                 reasoning_window_starts: RefCell::new(HashMap::new()),
