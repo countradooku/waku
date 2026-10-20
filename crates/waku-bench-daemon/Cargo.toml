@@ -1,0 +1,33 @@
+[package]
+name = "waku-bench-daemon"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic Waku daemon and fake provider CLIs that replay scripted benchmark timelines"
+license = "GPL-3.0-only"
+publish = false
+default-run = "waku-bench-daemon"
+
+[[bin]]
+name = "waku-bench-daemon"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+# Timelines are committed gzip-compressed; see README.md for the size budget.
+flate2 = "1"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+# The bench daemon is the real daemon server (`waku_core::serve`) and the real
+# persistence backend with only the provider runtime replaced, so the desktop
+# cannot tell the two apart on the wire.
+waku-core = { path = "../waku-core" }
+waku-protocol = { path = "../waku-protocol" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+waku-client = { path = "../waku-client" }
