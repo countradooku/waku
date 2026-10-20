@@ -166,13 +166,18 @@ export class Subscription<S extends StreamName> {
   /** @internal */
   deliver(raw: unknown): void {
     const item = itemNormalizers[this.stream](raw) as StreamItemOf<S>;
-    const record = item as { type?: string; cursor?: T.StreamCursor; revision?: unknown };
+    const record = item as { type?: string; cursor?: T.StreamCursor; revision?: unknown; seq?: unknown };
     // Unknown items still advance nothing they do not carry, but they are
     // delivered so the caller can count them (RFC 0003 §4).
-    if (record.type === "synchronized" && record.cursor) {
+    const kind = STREAMS[this.stream].cursor;
+    if ((record.type === "synchronized" || record.type === "snapshot") && record.cursor) {
       this.currentCursor = record.cursor;
-    } else if (STREAMS[this.stream].cursor === "revision" && typeof record.revision === "number") {
+    } else if (kind === "revision" && typeof record.revision === "number") {
       this.currentCursor = { type: "revision", revision: record.revision };
+    } else if (kind === "sequence" && typeof record.seq === "number" && this.currentCursor?.type === "sequence") {
+      // Shell and thread items carry the sequence of the store their
+      // snapshot or `synchronized` named.
+      this.currentCursor = { ...this.currentCursor, seq: record.seq };
     }
     this.handlers.item(item);
   }

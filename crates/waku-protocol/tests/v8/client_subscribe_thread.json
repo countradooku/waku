@@ -1,0 +1,1 @@
+{"type":"subscribe","channel":3,"stream":{"type":"thread","threadId":"7e8ead00-0000-4000-8000-000000000004","compactTurnItems":true},"after":{"type":"sequence","store":"5705e000-0000-4000-8000-000000000001","seq":1000}}

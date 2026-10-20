@@ -113,17 +113,62 @@
     {
       "direction": "server",
       "name": "server_goodbye"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_orchestration_dispatch"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_orchestration_dispatch"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_threads_history_page"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_threads_history_page"
+    },
+    {
+      "direction": "client",
+      "name": "client_subscribe_thread"
+    },
+    {
+      "direction": "server",
+      "name": "server_items_thread"
+    },
+    {
+      "direction": "client",
+      "name": "client_subscribe_shell"
+    },
+    {
+      "direction": "server",
+      "name": "server_items_shell"
+    },
+    {
+      "direction": "client",
+      "name": "client_subscribe_command_output"
+    },
+    {
+      "direction": "server",
+      "name": "server_items_command_output"
     }
   ],
   "routes": {
     "calls": {
       "1": "settings.get",
       "2": "projects.list",
-      "3": "files.read"
+      "3": "files.read",
+      "4": "orchestration.dispatch",
+      "5": "threads.historyPage"
     },
     "channels": {
       "1": "settings",
-      "2": "blobDownload"
+      "2": "blobDownload",
+      "3": "thread",
+      "4": "shell",
+      "5": "commandOutput"
     }
   }
 }
