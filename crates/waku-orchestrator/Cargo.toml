@@ -23,5 +23,9 @@ waku-protocol = { path = "../waku-protocol" }
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3"
 
+[[bench]]
+name = "dispatch"
+harness = false
+
 [lints]
 workspace = true
