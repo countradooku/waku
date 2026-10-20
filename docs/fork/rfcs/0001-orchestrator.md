@@ -1393,3 +1393,18 @@ Each step is usable once the steps it needs have landed. Steps on the same line 
 | 6 | [#59](https://github.com/countradooku/waku/issues/59) recovery | The startup sequence above, `RecoverThread`, `ContinueRun`, `provider_runtime.continue`, the setting | #41, #44 |
 | 7 | [#55](https://github.com/countradooku/waku/issues/55) daemon-owned transcripts | Desktop on streams, `SaveTaskState` and the `app.db` write path removed, the `waku-core` moves listed above | #54, #63 |
 | 8 | [#58](https://github.com/countradooku/waku/issues/58) background service | `waku doctor` runs projection verify and rebuild from `projection::maintenance` | #55 |
+
+## Amendments made during implementation
+
+The sketches above are kept as written; where the code differs, this list is the contract.
+
+### Wire and disk types (`waku-protocol::orchestration`, #42, #43)
+
+- **Casing.** Struct fields are `camelCase`. Every fieldless enum serializes as a `snake_case` string, which is also the value stored in indexed columns (`as_str()`); data-carrying unions use `"type"` with `snake_case` tags; `DomainEvent`, `Command` and `Effect` keep the dotted tags above. Capability groups keep RFC 0002's snake_case field names.
+- **`DomainEvent` is internally tagged** (`{"type": "run.updated", ...entity}`), not adjacently tagged. serde's `#[serde(other)]` cannot skip the `payload` of an unknown adjacently tagged variant (decoding fails with "expected unit variant"), so adjacency would break R20. `thread.updated` becomes the newtype `ThreadUpdated(ThreadUpdate { change, thread })`. On disk nothing changes: `event_type` and `payload_json` (the entity, or `{change, thread}`) stay separate columns and `DomainEvent::from_parts` decodes the payload directly.
+- **No reuse of the legacy `model` types.** `RuntimeMode`, `Attachment`, `PermissionOption`, `UserInputQuestion`/`UserInputOption`/`UserInputAnswer`, `ThreadGoal`/`ThreadGoalStatus` and `ContextUsage` are orchestration-native copies: the legacy enums reject unknown values and `MessageAttachment` has snake_case fields, which RFC 0003 §1.1 forbids. `orchestration::legacy` converts from the legacy types for #55 and #63. `NativeMetadata.resume_cursor` holds the legacy `ProviderResumeCursor` as `JsonText`, the opaque per-driver cursor (R23).
+- **No `serde_json::Value`.** `DynamicTool.input`/`output` and `ContextRecord.data` are `JsonText` (RFC 0003 §1.1).
+- **Fallbacks instead of `Unknown`** where a weakest value exists: `RefStrength`, `Quality` and `Enforcement` decode an unknown value to `None`/`None`/`ClientBoundary`; `NotificationSource` decodes an unknown source to `BackgroundTask` (the T3 rule stated above). Every other open enum and union ends in `Unknown`.
+- `ContextHandoff.covered_run_ordinals` is `RunOrdinalRange { first, last }` instead of a tuple, so non-TS codegen gets a named type. `TransferResolution`'s handoff variants carry `handoff_id`.
+- `TurnItem` gains `stream_rev: u32` (RFC 0003 §5.4), omitted when 0.
+- `ContextRecord` is `{ context_id, kind, label?, data?: JsonText }`; its body stays opaque to the orchestrator.
