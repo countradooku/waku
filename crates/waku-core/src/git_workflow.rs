@@ -314,6 +314,9 @@ mod tests {
             fs::create_dir(&path).unwrap();
             // Git reports canonical paths; on macOS the temp dir is under the
             // `/var` -> `/private/var` symlink, so compare against the real path.
+            // Not on Windows, where `canonicalize` yields `\\?\` verbatim paths
+            // that git does not accept.
+            #[cfg(not(windows))]
             let path = path.canonicalize().unwrap();
             git(&path, &["init", "-b", "main"]).unwrap();
             git(&path, &["config", "user.name", "Waku Tests"]).unwrap();
