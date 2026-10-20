@@ -31,12 +31,24 @@ pub const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_se
 pub const KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
+/// Overrides the managed daemon's local socket path (Unix) or pipe name
+/// (Windows), for tests and side-by-side daemons. See
+/// [`crate::identity::daemon_socket_path`].
+pub const DAEMON_SOCKET_ENV: &str = "WAKU_DAEMON_SOCKET";
 pub const APP_EXECUTABLE_ENV: &str = "WAKU_APP_EXECUTABLE";
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonReady {
+    /// The TCP listener's address, or empty when the daemon listens only on
+    /// its local socket (the managed daemon with exposure off).
+    #[serde(default)]
     pub address: String,
+    /// The per-user Unix socket path or Windows pipe name, when the daemon
+    /// listens on one. Clients on the same machine prefer it over TCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub socket: Option<String>,
     pub protocol_version: u32,
     pub pid: u32,
 }

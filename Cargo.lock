@@ -8985,6 +8985,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dirs",
+ "libc",
  "objc2-foundation 0.3.2",
  "rust-i18n",
  "serde",

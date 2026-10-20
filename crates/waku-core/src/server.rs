@@ -33,6 +33,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 use uuid::Uuid;
 
+use crate::local_socket::LocalListener;
 use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
 use crate::protocol::{
     ClientMessage, Command, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, MAX_WIRE_MESSAGE_BYTES,
@@ -638,17 +639,17 @@ impl RequestDispatcher {
 }
 
 /// Everything a connection task needs from the server.
-struct ServerContext {
+pub(crate) struct ServerContext {
     token: String,
     dispatcher: Arc<RequestDispatcher>,
     hub: Arc<Hub>,
-    shutdown: ShutdownSignal,
+    pub(crate) shutdown: ShutdownSignal,
     options: ServerOptions,
     active_connections: Arc<AtomicUsize>,
 }
 
 impl ServerContext {
-    fn spawn_connection<S>(self: &Arc<Self>, stream: S)
+    pub(crate) fn spawn_connection<S>(self: &Arc<Self>, stream: S)
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -665,6 +666,16 @@ impl ServerContext {
     }
 }
 
+/// Where the daemon accepts connections. At least one is required.
+#[derive(Default)]
+pub struct Listeners {
+    /// Loopback or, with exposure enabled, a network address.
+    pub tcp: Option<TcpListener>,
+    /// The per-user Unix socket or named pipe (#19).
+    pub local: Option<LocalListener>,
+}
+
+/// Serve on one TCP listener.
 pub fn serve(
     listener: TcpListener,
     token: String,
@@ -672,9 +683,35 @@ pub fn serve(
     shutdown: ShutdownSignal,
     options: ServerOptions,
 ) -> anyhow::Result<()> {
-    listener
-        .set_nonblocking(true)
-        .context("could not configure Waku daemon listener")?;
+    serve_listeners(
+        Listeners {
+            tcp: Some(listener),
+            local: None,
+        },
+        token,
+        backend,
+        shutdown,
+        options,
+    )
+}
+
+/// Serve on every listener in `listeners` until `shutdown` fires or one of
+/// them fails.
+pub fn serve_listeners(
+    listeners: Listeners,
+    token: String,
+    backend: Arc<dyn Backend>,
+    shutdown: ShutdownSignal,
+    options: ServerOptions,
+) -> anyhow::Result<()> {
+    if listeners.tcp.is_none() && listeners.local.is_none() {
+        bail!("the Waku daemon needs at least one listener");
+    }
+    if let Some(listener) = &listeners.tcp {
+        listener
+            .set_nonblocking(true)
+            .context("could not configure Waku daemon listener")?;
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(TRANSPORT_WORKERS)
         .max_blocking_threads(MAX_BLOCKING_THREADS)
@@ -697,7 +734,26 @@ pub fn serve(
         options,
         active_connections: Arc::new(AtomicUsize::new(0)),
     });
-    let result = runtime.block_on(accept_tcp(listener, context));
+    let result = runtime.block_on(async move {
+        let mut accepting = Vec::new();
+        if let Some(listener) = listeners.tcp {
+            accepting.push(tokio::spawn(accept_tcp(listener, context.clone())));
+        }
+        if let Some(listener) = listeners.local {
+            accepting.push(tokio::spawn(crate::local_socket::accept_local(
+                listener,
+                context.clone(),
+            )));
+        }
+        // Every accept loop returns on shutdown; the first to return (or
+        // fail) ends the server.
+        let (finished, _, rest) = futures_util::future::select_all(accepting).await;
+        context.shutdown.trigger();
+        for task in rest {
+            let _ = task.await;
+        }
+        finished.context("a Waku daemon accept loop panicked")?
+    });
     backend.shutdown();
     // Connections still open are dropped with the runtime, which closes their
     // sockets so clients see the daemon go away at once.
@@ -725,7 +781,7 @@ async fn accept_tcp(listener: TcpListener, context: Arc<ServerContext>) -> anyho
 }
 
 /// Transient accept failures are retried; anything else stops the server.
-async fn accept_failed(error: io::Error) -> anyhow::Result<()> {
+pub(crate) async fn accept_failed(error: io::Error) -> anyhow::Result<()> {
     match error.kind() {
         io::ErrorKind::Interrupted
         | io::ErrorKind::WouldBlock
@@ -2262,6 +2318,61 @@ mod tests {
 
         shutdown.trigger();
         server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_socket_is_private_and_serves_without_tcp() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Short, so the path fits in `sun_path` on every runner.
+        let root =
+            PathBuf::from("/tmp").join(format!("wk-{}", &Uuid::new_v4().simple().to_string()[..8]));
+        let path = root.join("run").join("daemon.sock");
+        let listener = LocalListener::bind(&path).unwrap();
+        assert_eq!(listener.path(), path);
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        // A second daemon of the same user cannot take the locked default
+        // path, so it binds a pid-suffixed one beside it.
+        let second = LocalListener::bind(&path).unwrap();
+        assert_ne!(second.path(), path);
+        drop(second);
+
+        let shutdown = ShutdownSignal::new();
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve_listeners(
+                Listeners {
+                    tcp: None,
+                    local: Some(listener),
+                },
+                "secret".into(),
+                Arc::new(TestBackend::default()),
+                server_shutdown,
+                ServerOptions::default(),
+            )
+            .unwrap()
+        });
+        let address = format!("unix:{}", path.display());
+        assert!(DaemonClient::connect(&address, "wrong".into()).is_err());
+        let client = DaemonClient::connect(&address, "secret".into()).unwrap();
+        assert!(matches!(
+            client
+                .request(Uuid::nil(), Uuid::nil(), Command::GetSettings)
+                .unwrap(),
+            ResponsePayload::Settings { .. }
+        ));
+
+        shutdown.trigger();
+        server.join().unwrap();
+        assert!(
+            !path.exists(),
+            "the daemon removes its socket when it stops"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -88,7 +88,7 @@ impl DaemonClient {
                 )
             })
             .collect();
-        let url = daemon_url(address)?;
+        let endpoint = Endpoint::parse(address)?;
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(ClientInner {
             outgoing,
@@ -122,7 +122,7 @@ impl DaemonClient {
                     }
                 };
                 runtime.block_on(connect_and_run(
-                    url,
+                    endpoint,
                     hello,
                     ready_tx,
                     outgoing_rx,
@@ -263,6 +263,46 @@ impl DaemonClient {
     }
 }
 
+/// The address form of a daemon's local endpoint, as [`DaemonClient::connect`]
+/// accepts it: `unix:<path>` for a Unix socket, `pipe:<name>` for a Windows
+/// named pipe.
+pub fn local_endpoint_address(socket: &str) -> String {
+    if cfg!(windows) {
+        format!("pipe:{socket}")
+    } else {
+        format!("unix:{socket}")
+    }
+}
+
+/// Where a [`DaemonClient`] connects.
+#[derive(Debug, PartialEq)]
+enum Endpoint {
+    /// `host:port`, `ws://…` or `wss://…`, normalized to the `/v1` URL.
+    WebSocket(String),
+    /// `unix:/path/to/daemon.sock`
+    Unix(std::path::PathBuf),
+    /// `pipe:\\.\pipe\name`, or a bare `\\.\pipe\name`
+    Pipe(String),
+}
+
+impl Endpoint {
+    fn parse(address: &str) -> anyhow::Result<Self> {
+        if let Some(path) = address.strip_prefix("unix:") {
+            if path.is_empty() {
+                bail!("Waku daemon socket path is empty");
+            }
+            return Ok(Self::Unix(path.into()));
+        }
+        if let Some(name) = address.strip_prefix("pipe:") {
+            return Ok(Self::Pipe(name.to_owned()));
+        }
+        if address.starts_with(r"\\.\pipe\") {
+            return Ok(Self::Pipe(address.to_owned()));
+        }
+        daemon_url(address).map(Self::WebSocket)
+    }
+}
+
 fn daemon_url(address: &str) -> anyhow::Result<String> {
     let normalized = if address.starts_with("ws://") || address.starts_with("wss://") {
         address.to_owned()
@@ -276,28 +316,109 @@ fn daemon_url(address: &str) -> anyhow::Result<String> {
     Ok(url.into())
 }
 
+/// The WebSocket URL sent over a local socket. Only the path is checked.
+#[cfg(any(unix, windows))]
+const LOCAL_WEBSOCKET_URL: &str = "ws://localhost/v1";
+
 fn websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_message_size(Some(MAX_WIRE_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_WIRE_MESSAGE_BYTES))
 }
 
+type Ready = std::sync::mpsc::SyncSender<anyhow::Result<()>>;
+
 /// Connects, says hello, reports the outcome through `ready`, and then runs
 /// the connection until either side closes it.
 async fn connect_and_run(
-    url: String,
+    endpoint: Endpoint,
     hello: ClientMessage,
-    ready: std::sync::mpsc::SyncSender<anyhow::Result<()>>,
+    ready: Ready,
     outgoing: mpsc::UnboundedReceiver<Outgoing>,
     inner: &ClientInner,
 ) {
-    let connect = async {
-        let (socket, _) =
-            tokio_tungstenite::connect_async_with_config(url, Some(websocket_config()), true)
+    match endpoint {
+        Endpoint::WebSocket(url) => {
+            let connect = async {
+                let (socket, _) = tokio_tungstenite::connect_async_with_config(
+                    url,
+                    Some(websocket_config()),
+                    true,
+                )
                 .await
                 .context("could not connect to Waku daemon")?;
-        handshake(socket, &hello).await
-    };
+                handshake(socket, &hello).await
+            };
+            run_connected(connect, ready, outgoing, inner).await;
+        }
+        #[cfg(unix)]
+        Endpoint::Unix(path) => {
+            let connect = async {
+                let stream = tokio::net::UnixStream::connect(&path)
+                    .await
+                    .with_context(|| {
+                        format!("could not connect to Waku daemon at {}", path.display())
+                    })?;
+                let (socket, _) = tokio_tungstenite::client_async_with_config(
+                    LOCAL_WEBSOCKET_URL,
+                    stream,
+                    Some(websocket_config()),
+                )
+                .await?;
+                handshake(socket, &hello).await
+            };
+            run_connected(connect, ready, outgoing, inner).await;
+        }
+        #[cfg(windows)]
+        Endpoint::Pipe(name) => {
+            let connect = async {
+                let stream = open_pipe(&name)
+                    .await
+                    .with_context(|| format!("could not connect to Waku daemon at {name}"))?;
+                let (socket, _) = tokio_tungstenite::client_async_with_config(
+                    LOCAL_WEBSOCKET_URL,
+                    stream,
+                    Some(websocket_config()),
+                )
+                .await?;
+                handshake(socket, &hello).await
+            };
+            run_connected(connect, ready, outgoing, inner).await;
+        }
+        #[allow(unreachable_patterns)]
+        other => {
+            let _ = ready.send(Err(anyhow!("{other:?} is not supported on this platform")));
+        }
+    }
+}
+
+/// A named pipe whose server has not created an instance yet, or whose
+/// instances are all busy, is retried until the connect timeout.
+#[cfg(windows)]
+async fn open_pipe(
+    name: &str,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+    loop {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(name) {
+            Ok(client) => return Ok(client),
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                    || error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn run_connected<S>(
+    connect: impl Future<Output = anyhow::Result<WebSocketStream<S>>>,
+    ready: Ready,
+    outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    inner: &ClientInner,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let socket = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
         Ok(Ok(socket)) => socket,
         Ok(Err(error)) => {
@@ -540,5 +661,28 @@ mod tests {
             daemon_url("wss://waku.example.test/old?ignored=1").unwrap(),
             "wss://waku.example.test/v1"
         );
+    }
+
+    #[test]
+    fn daemon_endpoint_accepts_local_sockets_and_pipes() {
+        assert_eq!(
+            Endpoint::parse("unix:/tmp/waku/daemon.sock").unwrap(),
+            Endpoint::Unix("/tmp/waku/daemon.sock".into())
+        );
+        assert!(Endpoint::parse("unix:").is_err());
+        assert_eq!(
+            Endpoint::parse(r"pipe:\\.\pipe\waku-fork-me-daemon").unwrap(),
+            Endpoint::Pipe(r"\\.\pipe\waku-fork-me-daemon".into())
+        );
+        assert_eq!(
+            Endpoint::parse(r"\\.\pipe\waku-fork-me-daemon").unwrap(),
+            Endpoint::Pipe(r"\\.\pipe\waku-fork-me-daemon".into())
+        );
+        assert_eq!(
+            Endpoint::parse("127.0.0.1:4312").unwrap(),
+            Endpoint::WebSocket("ws://127.0.0.1:4312/v1".into())
+        );
+        let local = local_endpoint_address("/tmp/waku/daemon.sock");
+        assert!(Endpoint::parse(&local).is_ok());
     }
 }

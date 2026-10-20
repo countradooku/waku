@@ -16,12 +16,30 @@ fn main() -> anyhow::Result<()> {
     // before any provider or workspace subprocess can inherit the daemon's
     // environment.
     unsafe { std::env::remove_var(DAEMON_TOKEN_ENV) };
-    let listener = TcpListener::bind(&arguments.bind)
-        .with_context(|| format!("could not bind Waku daemon to {}", arguments.bind))?;
-    let address = listener.local_addr()?;
-    ensure_bind_allowed(address, arguments.allow_non_loopback)?;
+    // Bind before any other thread starts: the local socket briefly narrows
+    // the process umask.
+    let local = arguments
+        .socket
+        .as_deref()
+        .map(waku_core::LocalListener::bind)
+        .transpose()?;
+    let tcp = arguments
+        .tcp_bind()
+        .map(|bind| {
+            let listener = TcpListener::bind(bind)
+                .with_context(|| format!("could not bind Waku daemon to {bind}"))?;
+            ensure_bind_allowed(listener.local_addr()?, arguments.allow_non_loopback)?;
+            anyhow::Ok(listener)
+        })
+        .transpose()?;
     let ready = DaemonReady {
-        address: address.to_string(),
+        address: match &tcp {
+            Some(listener) => listener.local_addr()?.to_string(),
+            None => String::new(),
+        },
+        socket: local
+            .as_ref()
+            .map(|local| local.path().to_string_lossy().into_owned()),
         protocol_version: PROTOCOL_VERSION,
         pid: std::process::id(),
     };
@@ -46,8 +64,8 @@ fn main() -> anyhow::Result<()> {
     )
     .context("could not load daemon settings")?;
     let task_store = waku_core::persistence::StateStore::daemon(task_path);
-    waku_core::serve(
-        listener,
+    waku_core::serve_listeners(
+        waku_core::Listeners { tcp, local },
         token,
         Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?),
         shutdown,
@@ -102,7 +120,11 @@ fn ensure_bind_allowed(address: SocketAddr, allow_non_loopback: bool) -> anyhow:
 }
 
 struct Arguments {
-    bind: String,
+    /// `--bind`: the TCP listener. Without it the daemon listens on TCP
+    /// (127.0.0.1, any port) only when no `--socket` is given either.
+    bind: Option<String>,
+    /// `--socket`: the per-user local socket (or Windows pipe) to listen on.
+    socket: Option<std::path::PathBuf>,
     parent_pid: Option<u32>,
     allowed_origins: Vec<String>,
     allow_non_loopback: bool,
@@ -110,7 +132,8 @@ struct Arguments {
 
 impl Arguments {
     fn parse(arguments: impl IntoIterator<Item = String>) -> anyhow::Result<Self> {
-        let mut bind = "127.0.0.1:0".to_owned();
+        let mut bind = None;
+        let mut socket = None;
         let mut parent_pid = None;
         let mut allowed_origins = Vec::new();
         let mut allow_non_loopback = false;
@@ -118,9 +141,20 @@ impl Arguments {
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--bind" => {
-                    bind = arguments
-                        .next()
-                        .ok_or_else(|| anyhow!("--bind requires an address"))?;
+                    bind = Some(
+                        arguments
+                            .next()
+                            .ok_or_else(|| anyhow!("--bind requires an address"))?,
+                    );
+                }
+                "--socket" => {
+                    socket = Some(
+                        arguments
+                            .next()
+                            .filter(|path| !path.is_empty())
+                            .ok_or_else(|| anyhow!("--socket requires a path"))?
+                            .into(),
+                    );
                 }
                 "--parent-pid" => {
                     parent_pid = Some(
@@ -143,7 +177,7 @@ impl Arguments {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: {} [--bind ADDRESS] [--allow-non-loopback] [--parent-pid PID] [--allow-origin ORIGIN]...",
+                        "usage: {} [--socket PATH] [--bind ADDRESS] [--allow-non-loopback] [--parent-pid PID] [--allow-origin ORIGIN]...",
                         env!("CARGO_BIN_NAME")
                     );
                     std::process::exit(0);
@@ -153,10 +187,23 @@ impl Arguments {
         }
         Ok(Self {
             bind,
+            socket,
             parent_pid,
             allowed_origins,
             allow_non_loopback,
         })
+    }
+}
+
+impl Arguments {
+    /// The TCP address to listen on, if any. A daemon started with only
+    /// `--socket` opens no TCP port at all.
+    fn tcp_bind(&self) -> Option<&str> {
+        match (&self.bind, &self.socket) {
+            (Some(bind), _) => Some(bind),
+            (None, Some(_)) => None,
+            (None, None) => Some("127.0.0.1:0"),
+        }
     }
 }
 
@@ -313,6 +360,23 @@ mod tests {
             ["https://app.waku.test", "http://localhost:3000"]
         );
         assert!(!arguments.allow_non_loopback);
+    }
+
+    #[test]
+    fn a_local_socket_replaces_the_default_tcp_listener() {
+        let socket_only = Arguments::parse(["--socket".into(), "/tmp/waku.sock".into()]).unwrap();
+        assert_eq!(socket_only.tcp_bind(), None);
+        let both = Arguments::parse([
+            "--socket".into(),
+            "/tmp/waku.sock".into(),
+            "--bind".into(),
+            "0.0.0.0:34123".into(),
+        ])
+        .unwrap();
+        assert_eq!(both.tcp_bind(), Some("0.0.0.0:34123"));
+        let neither = Arguments::parse(Vec::<String>::new()).unwrap();
+        assert_eq!(neither.tcp_bind(), Some("127.0.0.1:0"));
+        assert!(Arguments::parse(["--socket".into()]).is_err());
     }
 
     #[test]
