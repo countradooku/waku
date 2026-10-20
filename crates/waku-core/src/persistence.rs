@@ -489,6 +489,7 @@ impl PersistedState {
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
             disabled_providers: self.disabled_providers.clone(),
             provider_binary_overrides: self.provider_binary_overrides.clone(),
+            storage: Default::default(),
             extra: self.daemon_settings_extra.clone(),
         }
     }
@@ -1340,6 +1341,42 @@ impl StateStore {
             },
         });
         Ok(state)
+    }
+
+    /// The materialized worktree of every stored session, or of one session,
+    /// read without hydrating transcripts. Worktree cleanup needs these for
+    /// sessions that are still skeletons in memory (#62).
+    pub fn session_worktrees(
+        &self,
+        only: Option<Uuid>,
+    ) -> io::Result<HashMap<Uuid, SessionWorkspace>> {
+        let mut guard = self.storage.lock();
+        if guard.is_none() {
+            *guard = Some(self.open_storage()?);
+        }
+        let connection = &guard.as_ref().expect("storage opened above").connection;
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT session_id, json_extract(data, '$.workspace') FROM session_details
+                 WHERE json_extract(data, '$.workspace.kind') = 'worktree'
+                   AND (?1 IS NULL OR session_id = ?1)",
+            )
+            .map_err(to_io_error)?;
+        let rows = statement
+            .query_map(params![only.map(|id| id.to_string())], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(to_io_error)?;
+        let mut worktrees = HashMap::new();
+        for (id, workspace) in rows.filter_map(Result::ok) {
+            if let (Ok(id), Ok(workspace)) = (
+                Uuid::parse_str(&id),
+                serde_json::from_str::<SessionWorkspace>(&workspace),
+            ) {
+                worktrees.insert(id, workspace);
+            }
+        }
+        Ok(worktrees)
     }
 
     /// Fills in a session's transcript, turns and messages.
@@ -2354,6 +2391,23 @@ mod tests {
         // A skeleton still counts as started, since only started sessions
         // are stored at all.
         assert!(session.has_started());
+
+        // Worktree cleanup reads the binding without hydrating anything.
+        let worktrees = reopened.session_worktrees(None).unwrap();
+        assert_eq!(
+            worktrees.get(&id),
+            Some(&SessionWorkspace::Worktree {
+                path: PathBuf::from("/tmp/worktrees/investigate"),
+                branch: "waku/investigate".into(),
+            })
+        );
+        assert_eq!(reopened.session_worktrees(Some(id)).unwrap().len(), 1);
+        assert!(
+            reopened
+                .session_worktrees(Some(Uuid::new_v4()))
+                .unwrap()
+                .is_empty()
+        );
 
         reopened.hydrate(&mut restored.sessions[0]).unwrap();
         let session = &restored.sessions[0];

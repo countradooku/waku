@@ -19,12 +19,14 @@ use crate::attachments::AttachmentStore;
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::model::{
     AgentSession, Checkpoint, CheckpointStatus, DriverEvent, Project, ProviderKind,
-    ProviderResumeCursor, SessionStatus,
+    ProviderResumeCursor, SessionStatus, SessionWorkspace,
 };
 use crate::persistence::{ComposerDraftStore, PersistedState, StateStore};
 use crate::settings::DaemonSettingsStore;
+use crate::worktree_cleanup::{DeletedWorktree, TaskWorktree, WorktreeCleanup};
 use waku_protocol::event_to_wire;
 use waku_protocol::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
+use waku_protocol::storage::{StorageSettings, WorktreeCleanupReason, WorktreeCleanupTrigger};
 
 /// How many fully hydrated transcripts the daemon keeps resident.
 ///
@@ -57,6 +59,7 @@ pub struct WakuBackend {
     checkpoint_capture_locks: Mutex<HashMap<(PathBuf, Uuid, usize), Arc<Mutex<()>>>>,
     usage_rates_dir: std::path::PathBuf,
     default_cwd: std::path::PathBuf,
+    worktree_cleanup: Arc<WorktreeCleanup>,
 }
 
 impl WakuBackend {
@@ -78,6 +81,9 @@ impl WakuBackend {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_owned();
+        let worktree_cleanup = Arc::new(WorktreeCleanup::open(
+            usage_rates_dir.join("worktree-cleanup.json"),
+        ));
         Ok(Self {
             sessions: Mutex::new(HashMap::new()),
             terminals: Mutex::new(HashMap::new()),
@@ -93,6 +99,7 @@ impl WakuBackend {
             checkpoint_capture_locks: Mutex::new(HashMap::new()),
             usage_rates_dir,
             default_cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            worktree_cleanup,
         })
     }
 
@@ -243,10 +250,22 @@ impl Backend for WakuBackend {
             Command::GetSettings => Ok(ResponsePayload::Settings {
                 settings: self.settings.get(),
             }),
-            Command::UpdateSettings { settings } => {
+            Command::UpdateSettings { mut settings } => {
+                let previous = self.settings.get();
+                settings.storage = merge_storage_settings(&previous.storage, settings.storage);
+                let storage_changed = previous.storage != settings.storage;
                 self.settings.replace(settings)?;
+                if storage_changed {
+                    self.worktree_cleanup.wake_scheduler();
+                }
                 Ok(ResponsePayload::Ack)
             }
+            Command::GetWorktreeCleanupStatus => Ok(ResponsePayload::WorktreeCleanupStatus {
+                status: self.worktree_cleanup.status(&self.settings.get().storage),
+            }),
+            Command::RunWorktreeCleanup => Ok(ResponsePayload::WorktreeCleanupReport {
+                report: self.run_worktree_cleanup(WorktreeCleanupTrigger::Manual),
+            }),
             Command::ProbeProvider {
                 provider,
                 binary_override,
@@ -430,8 +449,9 @@ impl Backend for WakuBackend {
                 Ok(ResponsePayload::TaskStateSaved { sessions })
             }
             Command::RemoveSession => {
-                {
+                let deleted_worktree = {
                     let mut state = self.task_state.lock();
+                    let deleted_worktree = self.deleted_worktree(&state, session_id);
                     self.removed_session_ids.lock().insert(session_id);
                     let project_id = state
                         .sessions
@@ -454,9 +474,15 @@ impl Backend for WakuBackend {
                         }
                     }
                     self.task_store.save(&mut state)?;
-                }
+                    deleted_worktree
+                };
                 let removed = self.sessions.lock().remove(&session_id);
                 drop(removed);
+                // The worktree stays until cleanup's "deleted tasks" rule
+                // removes it; that run checks for local work first.
+                if let Some(deleted) = deleted_worktree {
+                    self.worktree_cleanup.record_deleted(deleted);
+                }
                 Ok(ResponsePayload::Ack)
             }
             Command::HydrateSession { session_id } => {
@@ -731,9 +757,31 @@ impl Backend for WakuBackend {
                     checkpoint: self.capture_turn_checkpoint(cwd, session_id, turn_count)?,
                 },
             }),
-            Command::Workspace { operation } => Ok(ResponsePayload::Workspace {
-                result: crate::workspace::execute(operation)?,
-            }),
+            Command::Workspace {
+                operation: operation @ WorkspaceOperation::CreateWorktree { .. },
+            } => {
+                let root =
+                    crate::worktree_cleanup::worktrees_directory(&self.settings.get().storage)?;
+                Ok(ResponsePayload::Workspace {
+                    result: crate::workspace::execute_in(operation, Some(&root))?,
+                })
+            }
+            Command::Workspace { operation } => {
+                // Every turn starts by capturing its workspace. A worktree
+                // that cleanup removed from this live task comes back here,
+                // from the branch cleanup kept for it.
+                if let WorkspaceOperation::CaptureTurnStart { cwd, .. } = &operation
+                    && let Err(error) = self.worktree_cleanup.restore_if_removed(cwd)
+                {
+                    eprintln!(
+                        "Waku daemon could not restore worktree {}: {error:#}",
+                        cwd.display()
+                    );
+                }
+                Ok(ResponsePayload::Workspace {
+                    result: crate::workspace::execute(operation)?,
+                })
+            }
             Command::OpenTerminal { cwd, cols, rows } => {
                 let terminal = self.open_terminal(&cwd, cols, rows, events)?;
                 // Bound so a replaced terminal shuts down after the lock is
@@ -1536,6 +1584,47 @@ impl WakuBackend {
         driver.rollback(rollback_turns)
     }
 
+    /// The worktree a task being removed leaves behind, for the "deleted
+    /// tasks" cleanup rule. A skeleton session's binding is read from the
+    /// store, since only hydrated sessions carry it in memory.
+    fn deleted_worktree(
+        &self,
+        state: &PersistedState,
+        session_id: Uuid,
+    ) -> Option<DeletedWorktree> {
+        let session = state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)?;
+        let workspace = if session.detail_loaded {
+            session.workspace.clone()
+        } else {
+            self.task_store
+                .session_worktrees(Some(session_id))
+                .ok()?
+                .remove(&session_id)?
+        };
+        let SessionWorkspace::Worktree { path, branch } = workspace else {
+            return None;
+        };
+        Some(DeletedWorktree {
+            task_id: session_id,
+            title: session.display_title().to_owned(),
+            workspace_path: path,
+            branch,
+            deleted_at: crate::worktree_cleanup::now_seconds(),
+        })
+    }
+
+    /// Apply the saved cleanup rules once and return the report.
+    pub fn run_worktree_cleanup(
+        &self,
+        trigger: WorktreeCleanupTrigger,
+    ) -> waku_protocol::storage::WorktreeCleanupReport {
+        let storage = self.settings.get().storage;
+        self.worktree_cleanup.run(self, &storage, trigger)
+    }
+
     fn provider_binary(&self, provider: ProviderKind) -> anyhow::Result<PathBuf> {
         ensure_shell_environment();
         let settings = self.settings.get();
@@ -1547,6 +1636,128 @@ impl WakuBackend {
             .path
             .ok_or_else(|| anyhow!("{} is not installed on the daemon", provider.display_name()))
     }
+}
+
+impl crate::worktree_cleanup::CleanupHost for WakuBackend {
+    fn tasks(&self) -> anyhow::Result<Vec<TaskWorktree>> {
+        let stored = self
+            .task_store
+            .session_worktrees(None)
+            .context("could not read task worktrees")?;
+        let state = self.task_state.lock();
+        Ok(state
+            .sessions
+            .iter()
+            .filter_map(|session| {
+                let workspace = if session.detail_loaded {
+                    &session.workspace
+                } else {
+                    stored.get(&session.id)?
+                };
+                let SessionWorkspace::Worktree { path, branch } = workspace else {
+                    return None;
+                };
+                Some(TaskWorktree {
+                    task_id: session.id,
+                    title: session.display_title().to_owned(),
+                    workspace_path: path.clone(),
+                    branch: branch.clone(),
+                    activity_at: session
+                        .updated_at
+                        .max(session.created_at)
+                        .max(session.last_reply_at.unwrap_or_default()),
+                    finished: session.status == SessionStatus::Idle,
+                })
+            })
+            .collect())
+    }
+
+    fn blocked(&self, task_ids: &[Uuid]) -> Option<WorktreeCleanupReason> {
+        // Take each lock on its own; the runtime map is never held while
+        // waiting for the task state.
+        let live = {
+            let sessions = self.sessions.lock();
+            task_ids
+                .iter()
+                .filter(|id| sessions.contains_key(id))
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        if !live.is_empty() {
+            let running = self
+                .task_state
+                .lock()
+                .sessions
+                .iter()
+                .any(|session| live.contains(&session.id) && session.is_busy());
+            return Some(if running {
+                WorktreeCleanupReason::TaskRunning
+            } else {
+                WorktreeCleanupReason::LiveRuntime
+            });
+        }
+        let terminals = self.terminals.lock();
+        task_ids
+            .iter()
+            .any(|id| terminals.contains_key(id))
+            .then_some(WorktreeCleanupReason::OpenTerminal)
+    }
+}
+
+/// Start the thread that runs worktree cleanup on daemon start and then at
+/// most every `interval_hours`. It sleeps until the next run is due, or
+/// until a settings change wakes it while no rule is enabled, so an idle
+/// daemon is not woken for it. The thread holds only the cleanup state and
+/// a weak backend reference, and exits once the backend is gone.
+pub fn start_worktree_cleanup_scheduler(backend: &Arc<WakuBackend>) -> std::io::Result<()> {
+    let weak = Arc::downgrade(backend);
+    let cleanup = backend.worktree_cleanup.clone();
+    std::thread::Builder::new()
+        .name("waku-worktree-cleanup".into())
+        .spawn(move || {
+            loop {
+                let seen = cleanup.wake_generation();
+                let Some(storage) = weak.upgrade().map(|backend| backend.settings.get().storage)
+                else {
+                    return;
+                };
+                let delay =
+                    cleanup.automatic_delay(&storage, crate::worktree_cleanup::now_seconds());
+                if cleanup.wait(seen, delay) {
+                    continue;
+                }
+                let Some(backend) = weak.upgrade() else {
+                    return;
+                };
+                let report = backend.run_worktree_cleanup(WorktreeCleanupTrigger::Automatic);
+                if report.removed > 0 || report.failed > 0 {
+                    eprintln!(
+                        "Waku worktree cleanup removed {}, kept {}, failed {}",
+                        report.removed, report.kept, report.failed
+                    );
+                }
+            }
+        })?;
+    Ok(())
+}
+
+/// Apply a client's storage settings without losing earlier worktree
+/// locations: a client may send a stale list, and the location it moves
+/// away from must stay managed so cleanup can still reach its worktrees.
+fn merge_storage_settings(previous: &StorageSettings, next: StorageSettings) -> StorageSettings {
+    let mut locations = Vec::new();
+    if next.worktrees_directory != previous.worktrees_directory
+        && let Some(old) = &previous.worktrees_directory
+    {
+        locations.push(old.clone());
+    }
+    locations.extend(next.previous_worktrees_directories.iter().cloned());
+    locations.extend(previous.previous_worktrees_directories.iter().cloned());
+    StorageSettings {
+        previous_worktrees_directories: locations,
+        ..next
+    }
+    .normalized(dirs::home_dir().as_deref())
 }
 
 fn validate_message_rewind(source: &AgentSession, turn_count: usize) -> anyhow::Result<()> {
@@ -1788,6 +1999,8 @@ fn handle_driver_command(
         | Command::Start { .. }
         | Command::GetSettings
         | Command::UpdateSettings { .. }
+        | Command::GetWorktreeCleanupStatus
+        | Command::RunWorktreeCleanup
         | Command::ProbeProvider { .. }
         | Command::FetchPlanUsage { .. }
         | Command::ProbeComputerPermissions { .. }
@@ -1984,5 +2197,176 @@ mod tests {
             DriverEvent::PromptSubmitted { message, turn_id: decoded_turn, message_id: decoded_message }
                 if message == "ship it" && decoded_turn == turn_id && decoded_message == message_id
         ));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod worktree_cleanup_tests {
+    use std::net::TcpListener;
+
+    use super::*;
+    use crate::persistence::StateStore;
+    use crate::{ServerOptions, ShutdownSignal, serve};
+    use waku_client::DaemonClient;
+    use waku_protocol::storage::WorktreeCleanupOutcome;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        crate::git_workflow::git(cwd, args).unwrap();
+    }
+
+    #[test]
+    fn storage_settings_keep_earlier_worktree_locations() {
+        let previous = StorageSettings {
+            worktrees_directory: Some(PathBuf::from("/first")),
+            previous_worktrees_directories: vec![PathBuf::from("/zero")],
+            ..StorageSettings::default()
+        };
+        // A client with a stale list moves the folder.
+        let next = StorageSettings {
+            worktrees_directory: Some(PathBuf::from("/second")),
+            ..StorageSettings::default()
+        };
+        let merged = merge_storage_settings(&previous, next);
+        assert_eq!(merged.worktrees_directory, Some(PathBuf::from("/second")));
+        assert_eq!(
+            merged.previous_worktrees_directories,
+            vec![PathBuf::from("/first"), PathBuf::from("/zero")]
+        );
+        // Moving back drops the current location from the earlier ones.
+        let back = merge_storage_settings(
+            &merged,
+            StorageSettings {
+                worktrees_directory: Some(PathBuf::from("/first")),
+                ..StorageSettings::default()
+            },
+        );
+        assert_eq!(
+            back.previous_worktrees_directories,
+            vec![PathBuf::from("/second"), PathBuf::from("/zero")]
+        );
+    }
+
+    #[test]
+    fn removed_task_worktree_uses_the_configured_folder_and_is_cleaned() {
+        let root = std::env::temp_dir().join(format!("waku-daemon-cleanup-{}", Uuid::new_v4()));
+        let repository = root.join("repository");
+        std::fs::create_dir_all(&repository).unwrap();
+        git(&repository, &["init", "-b", "main"]);
+        std::fs::write(repository.join("README.md"), "main\n").unwrap();
+        git(&repository, &["add", "-A", "--", "."]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Waku Tests",
+                "-c",
+                "user.email=waku@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        let backend = WakuBackend::new(
+            DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
+            StateStore::daemon(root.join("app.db")),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = ShutdownSignal::new();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(backend),
+                shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
+            )
+            .unwrap()
+        });
+        let client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let request = |session_id: Uuid, command: Command| {
+            client.request(session_id, Uuid::nil(), command).unwrap()
+        };
+
+        let ResponsePayload::Settings { mut settings } = request(Uuid::nil(), Command::GetSettings)
+        else {
+            panic!("expected settings");
+        };
+        let trees = root.join("trees");
+        settings.storage.worktrees_directory = Some(trees.clone());
+        settings.storage.worktree_cleanup.deleted_tasks = true;
+        request(Uuid::nil(), Command::UpdateSettings { settings });
+
+        let project = Project::from_path(repository.clone());
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        let ResponsePayload::Workspace {
+            result: WorkspaceResult::WorktreeCreated { worktree },
+        } = request(
+            Uuid::nil(),
+            Command::Workspace {
+                operation: WorkspaceOperation::CreateWorktree {
+                    project_path: repository.clone(),
+                    project_id: project.id,
+                    session_id: session.id,
+                    prompt: "Clean me up".into(),
+                    base_branch: None,
+                },
+            },
+        )
+        else {
+            panic!("expected a created worktree");
+        };
+        assert!(worktree.path.starts_with(&trees), "{worktree:?}");
+        session.workspace = SessionWorkspace::Worktree {
+            path: worktree.path.clone(),
+            branch: worktree.branch.clone(),
+        };
+        session.begin_turn("work in a worktree");
+        request(
+            Uuid::nil(),
+            Command::SaveTaskState {
+                projects: vec![project],
+                live_session_ids: vec![],
+                sessions: vec![session.clone()],
+            },
+        );
+
+        // Deleting the task marks its worktree eligible; nothing is removed
+        // until cleanup runs.
+        request(session.id, Command::RemoveSession);
+        assert!(worktree.path.exists());
+
+        let ResponsePayload::WorktreeCleanupReport { report } =
+            request(Uuid::nil(), Command::RunWorktreeCleanup)
+        else {
+            panic!("expected a cleanup report");
+        };
+        assert_eq!(report.removed, 1, "{report:#?}");
+        let entry = &report.entries[0];
+        assert_eq!(entry.outcome, WorktreeCleanupOutcome::Removed);
+        assert_eq!(entry.reason, WorktreeCleanupReason::TaskDeleted);
+        assert_eq!(entry.task_id, Some(session.id));
+        assert!(entry.branch_deleted);
+        assert!(!worktree.path.exists());
+
+        let ResponsePayload::WorktreeCleanupStatus { status } =
+            request(Uuid::nil(), Command::GetWorktreeCleanupStatus)
+        else {
+            panic!("expected cleanup status");
+        };
+        assert_eq!(status.last_report, Some(report));
+        assert!(status.last_run_at.is_some());
+        assert!(status.next_run_at.is_some());
+        assert!(!status.running);
+
+        client.shutdown();
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

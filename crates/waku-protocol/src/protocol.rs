@@ -15,6 +15,7 @@ use crate::persistence::{ComposerDraftChange, ComposerDrafts, SessionMessageMatc
 use crate::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
 use crate::settings::DaemonSettings;
 use crate::skills::SkillsCatalog;
+use crate::storage::{WorktreeCleanupReport, WorktreeCleanupStatus};
 use crate::usage::PlanUsage;
 use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::wire_event::WireDriverEvent;
@@ -168,6 +169,11 @@ pub enum Command {
     UpdateSettings {
         settings: DaemonSettings,
     },
+    /// Read the worktree cleanup schedule and the last run's report.
+    GetWorktreeCleanupStatus,
+    /// Run worktree cleanup now ("Delete now") with the saved rules and
+    /// return its report. Waits for a run already in progress first.
+    RunWorktreeCleanup,
     ProbeProvider {
         provider: ProviderKind,
         binary_override: Option<String>,
@@ -415,6 +421,12 @@ pub enum ResponsePayload {
     },
     Settings {
         settings: DaemonSettings,
+    },
+    WorktreeCleanupStatus {
+        status: WorktreeCleanupStatus,
+    },
+    WorktreeCleanupReport {
+        report: WorktreeCleanupReport,
     },
     ProviderProbe {
         probe: ProviderProbe,

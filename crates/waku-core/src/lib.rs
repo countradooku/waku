@@ -69,6 +69,7 @@ pub mod usage;
 pub mod usage_history;
 pub mod workspace;
 pub mod worktree;
+pub mod worktree_cleanup;
 
 mod fs_ext;
 mod local_socket;

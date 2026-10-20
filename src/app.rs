@@ -212,6 +212,7 @@ enum SettingsPage {
     Daemon,
     ComputerUse,
     Appearance,
+    Storage,
 }
 
 impl SettingsPage {
@@ -1066,6 +1067,7 @@ pub struct Waku {
     daemon_origins_input: Entity<TextInput>,
     daemon_reconfigure_pending: bool,
     daemon_token_revealed: bool,
+    storage_settings: storage_settings::StorageSettingsUi,
     settings_focus: FocusHandle,
     onboarding_add_project_focus: FocusHandle,
     onboarding_projectless_focus: FocusHandle,
@@ -1649,6 +1651,7 @@ mod sessions;
 mod settings;
 mod sidebar;
 mod skills_page;
+mod storage_settings;
 mod streaming;
 mod task_switcher;
 mod transcript;
@@ -2069,6 +2072,15 @@ impl Waku {
             TextInput::new(window, cx)
                 .clear_on_escape()
                 .placeholder(tr!("skills.search"))
+        });
+        let worktree_location_input = cx.new(|cx| {
+            let mut input = TextInput::new(window, cx)
+                .select_all_on_focus_click()
+                .placeholder(tr!("storage.location_placeholder"));
+            if let Some(path) = &state.daemon_storage.worktrees_directory {
+                input.set_content(path.to_string_lossy().into_owned(), cx);
+            }
+            input
         });
         let session_rename_input = cx.new(|cx| TextInput::new(window, cx));
         let provider_path_input = cx.new(|cx| {
@@ -2623,6 +2635,15 @@ impl Waku {
                 )
                 .detach();
             }
+            cx.subscribe(
+                &worktree_location_input,
+                |this: &mut Self, _, event: &InputEvent, cx| match event {
+                    InputEvent::Submit(_) => this.apply_worktree_location(cx),
+                    InputEvent::Edited => cx.notify(),
+                    _ => {}
+                },
+            )
+            .detach();
             cx.subscribe(&skills_search, |_: &mut Self, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Edited) {
                     cx.notify();
@@ -2796,6 +2817,7 @@ impl Waku {
                 daemon_origins_input,
                 daemon_reconfigure_pending: false,
                 daemon_token_revealed: false,
+                storage_settings: storage_settings::StorageSettingsUi::new(worktree_location_input),
                 settings_focus,
                 onboarding_add_project_focus,
                 onboarding_projectless_focus,

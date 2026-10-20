@@ -52,6 +52,10 @@ impl Waku {
         if page == SettingsPage::Skills {
             self.ensure_skills_catalog(false, cx);
         }
+        if page == SettingsPage::Storage {
+            self.sync_worktree_location_input(cx);
+            self.ensure_worktree_cleanup_status(cx);
+        }
         cx.notify();
     }
 

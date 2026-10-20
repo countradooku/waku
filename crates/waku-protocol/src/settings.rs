@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::computer_use::ComputerAppGrant;
 use crate::model::ProviderKind;
+use crate::storage::StorageSettings;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(default)]
@@ -17,6 +18,10 @@ pub struct DaemonSettings {
     pub disabled_providers: Vec<ProviderKind>,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
+    /// Managed worktree folder and its cleanup rules (#62).
+    #[serde(skip_serializing_if = "StorageSettings::is_default")]
+    #[ts(as = "Option<StorageSettings>", optional)]
+    pub storage: StorageSettings,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
