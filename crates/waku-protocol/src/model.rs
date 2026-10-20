@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::ts::TS;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]

@@ -49,6 +49,18 @@ pub mod workspace;
 
 mod protocol;
 
+/// The `TS` derive on wire types. With the `ts` feature (only
+/// `export_types`, through `bun run protocol:generate` / `protocol:check`)
+/// it is ts-rs; otherwise a stub that accepts the same `#[ts(...)]`
+/// attributes and generates nothing, so the app and daemon never build
+/// ts-rs (#30).
+mod ts {
+    #[cfg(feature = "ts")]
+    pub use ts_rs::TS;
+    #[cfg(not(feature = "ts"))]
+    pub use waku_ts_stub::TS;
+}
+
 pub use driver_wire::{decode_enum, encode_enum, event_from_wire, event_to_wire};
 pub use protocol::{
     APP_EXECUTABLE_ENV, ClientMessage, Command, DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, DaemonReady,

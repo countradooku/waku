@@ -1,6 +1,6 @@
+use crate::ts::TS;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use ts_rs::TS;
 
 pub const ATTACHMENT_SCHEME: &str = "waku-attachment:";
 pub const MAX_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;

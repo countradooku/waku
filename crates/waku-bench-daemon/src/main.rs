@@ -22,6 +22,11 @@ use waku_bench_daemon::timeline::{BUILTIN_NAMES, Timeline};
 use waku_bench_daemon::{autoplay, generate};
 use waku_protocol::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, decode_enum};
 
+/// The real daemon's allocator (`crates/waku-daemon/src/main.rs`), so the
+/// bench daemon's CPU and memory stay comparable to it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const USAGE: &str = "\
 usage:
   waku-bench-daemon [serve] [options]   replay timelines to a connected Waku desktop

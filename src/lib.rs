@@ -82,6 +82,12 @@ mod theme;
 mod ui;
 mod updater;
 
+/// See the `mimalloc` feature in Cargo.toml. With `perf-counters` the
+/// counting allocator is the global one and forwards to mimalloc instead.
+#[cfg(all(feature = "mimalloc", not(feature = "perf-counters")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub use waku_client::{
     checkpoint, command_env, composer_complete, git_branch, git_commit, i18n, identity, model,
     model_catalog, persistence, projectless, skills, usage, usage_history, worktree,

@@ -1,5 +1,5 @@
+use crate::ts::TS;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS)]
 pub enum CommandScope {

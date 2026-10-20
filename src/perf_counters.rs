@@ -16,7 +16,7 @@
 //! a field changes meaning. Added fields keep the version: readers must
 //! ignore fields they do not know.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -37,9 +37,14 @@ const BUCKET: Duration = Duration::from_secs(1);
 // ── Allocation counting ──────────────────────────────────────────────────
 
 /// Counts every allocation, process-wide and per thread, before handing it
-/// to the system allocator. `realloc` counts its full new size, as a fresh
-/// allocation would.
+/// to the backing allocator (the system's, or mimalloc with the `mimalloc`
+/// feature). `realloc` counts its full new size, as a fresh allocation would.
 struct CountingAllocator;
+
+#[cfg(feature = "mimalloc")]
+use mimalloc::MiMalloc as Backing;
+#[cfg(not(feature = "mimalloc"))]
+use std::alloc::System as Backing;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -65,11 +70,11 @@ fn thread_alloc_bytes() -> u64 {
     THREAD_ALLOC_BYTES.try_with(Cell::get).unwrap_or(0)
 }
 
-// SAFETY: every method forwards to `System` unchanged; the bookkeeping
+// SAFETY: every method forwards to `Backing` unchanged; the bookkeeping
 // touches only atomics and a const thread-local, never the heap.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
+        let pointer = unsafe { Backing.alloc(layout) };
         if !pointer.is_null() {
             record_allocation(layout.size());
         }
@@ -77,7 +82,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc_zeroed(layout) };
+        let pointer = unsafe { Backing.alloc_zeroed(layout) };
         if !pointer.is_null() {
             record_allocation(layout.size());
         }
@@ -85,11 +90,11 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) }
+        unsafe { Backing.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
+        let pointer = unsafe { Backing.realloc(pointer, layout, new_size) };
         if !pointer.is_null() {
             record_allocation(new_size);
         }

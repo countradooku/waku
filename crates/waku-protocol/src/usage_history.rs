@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use crate::ts::TS;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 pub const WINDOW_CHOICES: [UsageWindow; 5] = [
     UsageWindow::TrailingDays(7),

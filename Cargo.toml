@@ -6,7 +6,7 @@ description = "A fast, native control plane for local coding agents"
 license = "GPL-3.0-only"
 
 [workspace]
-members = ["crates/waku-client", "crates/waku-core", "crates/waku-daemon", "crates/waku-protocol", "crates/waku-computer-use", "crates/waku-bench-daemon"]
+members = ["crates/waku-client", "crates/waku-core", "crates/waku-daemon", "crates/waku-protocol", "crates/waku-ts-stub", "crates/waku-computer-use", "crates/waku-bench-daemon"]
 default-members = [
   ".",
   "crates/waku-client",
@@ -42,6 +42,12 @@ profiling = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-tracy"]
 # shown next to the FPS counter. Off by default, and without it every counter
 # compiles to nothing. See docs/performance.md.
 perf-counters = []
+# mimalloc as the app's global allocator (#30). Off by default: the window-free
+# hot paths win clearly (streaming Markdown -22%, flatten -23%, the terminal
+# snapshot -45% in `benches/desktop.rs`), but the app's RSS under the GUI
+# harness's memory scenarios has not been measured yet, and memory is one of
+# the fork's targets. With `perf-counters`, the counting allocator wraps it.
+mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }
@@ -83,6 +89,7 @@ smol = "2"
 ropey = "=2.0.0-beta.1"
 futures-lite = "2"
 futures = "0.3"
+mimalloc = { version = "0.1.52", optional = true }
 nucleo-matcher = "0.3.1"
 tokio = { version = "1", features = ["rt"] }
 tracing = { version = "0.1", optional = true }

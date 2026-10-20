@@ -341,6 +341,28 @@ per-round Criterion medians. A benchmark fails the job only when both hold:
 
 The report is written to the job summary.
 
+### Release build settings (#30)
+
+Measured on the M5 Pro with `scripts/bench/compare.py` over alternating
+rounds of release-profile Criterion benches, plus daemon replays through
+`replay-client` (numbers in the #30 commit):
+
+- **LTO stays thin.** Fat LTO made the app 6% and the daemon 8% smaller, but
+  no benchmark got faster (5 rounds: -2% to +5%, all within noise), and it
+  costs +33% on a full release build and +82% on a relink.
+- **The daemon uses mimalloc** (`crates/waku-daemon/src/main.rs`, and the
+  bench daemon so measurements match). The app has it behind the `mimalloc`
+  feature, off by default until its RSS has been measured in the GUI
+  harness's memory scenarios; with `perf-counters` the counting allocator
+  forwards to it.
+- **ts-rs is behind `waku-protocol`'s `ts` feature**, which only
+  `export_types` needs (`bun run protocol:generate` / `protocol:check` pass
+  it). Without it `#[derive(TS)]` is a no-op stub (`crates/waku-ts-stub`).
+- **PGO** is a script, not the default build: `scripts/bench/pgo.sh` builds
+  instrumented binaries, trains them on the benches, headless timeline
+  replays and `rpc-latency` (and on the GUI harness with `PGO_GUI=1`),
+  merges the profiles and writes PGO binaries to `$PGO_DIR/release`.
+
 ## Known floor and next levers
 
 With both cadences enforced, a streaming frame still rebuilds every visible
