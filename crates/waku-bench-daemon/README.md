@@ -105,3 +105,60 @@ cargo run -p waku-bench-daemon -- list              # describe the built-ins
 ```
 
 Gzip output is deterministic: it has no file name, `mtime` is 0, and the compressor is pinned through `Cargo.lock`. The test `checked_in_timelines_match_the_generator` compares the decoded files with the generators.
+
+## Fake provider CLIs (#8)
+
+`fake-codex` and `fake-claude` stream the same timelines through each provider's own protocol. That lets the **real** Waku daemon (`waku-daemon` with its real Codex and Claude drivers) and T3 Code be driven with identical input and no network.
+
+```sh
+# Build both fakes and create a private PATH directory with `codex` and
+# `claude` symlinks plus a waku-bench.json config:
+dir="$(scripts/bench/fake-path.sh --timeline burst --rate 1)"
+PATH="$dir:$PATH" <app or daemon>
+```
+
+Each fake reads its configuration on every launch. The highest-precedence source wins:
+
+1. The environment variables `WAKU_BENCH_TIMELINE` (a built-in name or a file path), `WAKU_BENCH_RATE`, `WAKU_BENCH_LOOPS` and `WAKU_BENCH_LOG` (a JSONL protocol log).
+2. `waku-bench.json` in the directory the executable was invoked from: the symlink's directory, or the first PATH entry holding it.
+3. The defaults: `prose` at its recorded rate, played once.
+
+A prompt whose whole text is a built-in timeline name replays that timeline.
+
+For Waku, `command_env` rebuilds a provider's PATH from the login shell. Pointing the provider's **binary override** at `$dir/codex` / `$dir/claude` is therefore more reliable than relying on PATH.
+
+### What is real and what is faked
+
+| | `fake-codex` (`codex app-server`) | `fake-claude` (stream-json) |
+| --- | --- | --- |
+| Transport | Newline-delimited JSON-RPC on stdio. Only JSON ever reaches stdout. | NDJSON on stdio. Only JSON ever reaches stdout. |
+| Handshake | `initialize` returns `userAgent` (`codex_cli_rs/0.160.0`), `codexHome` and the platform; a second `initialize` returns `-32600`. | The `initialize` control request returns an API-key account with no `subscriptionType`, so T3 makes no usage-API call, plus the stock model list. |
+| Probes | `account/read` (API key), `model/list` (Waku's fallback catalog), `skills/list` (empty), `account/rateLimits/read` (empty). `--version` prints `codex-cli 0.160.0`, and `app-server --help` exits 0. | `--version` prints `2.1.300 (Claude Code)`. |
+| Session | `thread/start` and `thread/resume` return the full thread object (id, timestamps, `source`, `status`, `turns`, …). `thread/name/set` echoes `thread/name/updated`. | `--session-id` / `--resume` set the session id. `system/init` opens each turn. |
+| Turn | The `turn/start` response, then `turn/started`, items, `thread/tokenUsage/updated`, and finally `turn/completed` after a 20 ms pause. | The `--replay-user-messages` echo, then `system/init`. Next come partial `stream_event`s (with `--include-partial-messages`), one `assistant` frame per content block, and `tool_use` / `tool_result` pairs. The turn closes with `result` (`modelUsage.contextWindow`). |
+| Text and reasoning | One `agentMessage` item with `item/agentMessage/delta`. One `reasoning` item with `item/reasoning/summaryTextDelta` (`summaryIndex` 0). | `text_delta` and `thinking_delta` in `text` and `thinking` blocks. |
+| Commands | A `commandExecution` with `aggregatedOutput` and `exitCode` on completion. | `Bash` `tool_use` and a text `tool_result`. |
+| Reads, searches, lists | A `commandExecution` with one parsed `commandAction` (`read` / `search` / `listFiles`), as Codex reports them. | `Read`, `Grep` and `Glob`. |
+| Edits | A `fileChange` with `changes[{path, diff, kind: update}]`. | `Edit` with `old_string`/`new_string` rebuilt from the diff, plus a `tool_use_result.structuredPatch` carrying the hunks. |
+| Images | An `mcpToolCall` (server `bench`) whose `result.content` holds `{type: image, data, mimeType}`. | A `Read` whose `tool_result` content is base64 `image` blocks. |
+| Interrupt | `turn/interrupt` leads to `turn/completed` with status `interrupted`. | The `interrupt` control request leads to `result` with `error_during_execution` and `errors`. |
+| Structured side requests | A `turn/start` with `outputSchema` (Waku's title generation) and `codex exec --output-schema … --output-last-message FILE -` (T3's text generation) return a value shaped by the schema. `mcp list --json` prints `[]`. | `-p --json-schema …` returns `structured_output` in a `result`. |
+| Not supported | Steering (an error, which Waku shows as a rejected steer), goals, background terminals, rollback, fork, compaction, approvals (no server requests are sent) and `item/commandExecution/outputDelta` streaming. | Steering (the message only starts the next turn), permission prompts (`can_use_tool` is never sent), subagents and background tasks, rewind and fork. No session JSONL is written under `~/.claude`, so Waku's native title and rewind-cursor lookups and T3's fork and history readers find nothing. |
+
+The translations are approximations. Ids, timestamps and token counts are synthetic, and the per-block framing follows current Claude Code but is not byte-identical to it. Waku's Codex driver truncates tool output at 16,000 characters, so on that path `tool-storm` rows show truncated output, exactly as with real Codex.
+
+### Tests
+
+- `tests/fake_codex.rs` and `tests/fake_claude.rs` spawn the binaries and drive them through their protocols. They assert the framing, the event order, the fields T3's schemas require, interrupts, title generation and the CLI probes.
+- `tests/real_drivers.rs` starts the real `WakuBackend` behind `waku_core::serve`. It points Waku's own Codex and Claude drivers at the fakes, through the private-directory symlink and config mechanism, and asserts the resulting `DriverEvent`s:
+  - the text, reasoning, command output, edit diff, image URL, usage and completion;
+  - for `burst`, `reasoning-fast` and `code-wall`, text and reasoning byte-identical to the timeline.
+
+### Still to verify end to end (#9)
+
+These tests never launch a GUI. The bench runner still has to show the following:
+
+- the desktop renders each timeline identically across runs against `waku-bench-daemon`;
+- T3 Code drives both fakes through its real adapters (Effect schemas, Agent SDK spawn path and probes);
+- Waku and T3 show the same visible transcript;
+- no network traffic occurs during a run. Disable T3's provider update checks and isolate `HOME` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR`.

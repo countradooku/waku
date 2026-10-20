@@ -8647,6 +8647,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "crossbeam-channel",
  "flate2",
  "libc",
  "parking_lot",
