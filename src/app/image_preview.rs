@@ -30,6 +30,36 @@ pub(super) struct ImagePreviewState {
     generation: u64,
 }
 
+/// Releases images the cache evicted from GPUI too. Dropping our `Arc` frees
+/// only the encoded bytes: the decoded frames stay in GPUI's asset cache and
+/// the texture in each window's sprite atlas until both are removed
+/// explicitly. That happens after the current frame, as GPUI's own image
+/// caches do, through any open window (the asset cache is app-wide, and
+/// `drop_image` clears every window's atlas).
+fn retire_images(images: Vec<Arc<gpui::Image>>, cx: &mut App) {
+    if images.is_empty() {
+        return;
+    }
+    cx.defer(move |cx| {
+        // Without a window there is no atlas to clear, only the asset cache.
+        if let Some(window) = cx.windows().into_iter().next() {
+            let _ = window.update(cx, |_, window, cx| {
+                for image in &images {
+                    // An image that was never drawn has no decoded form;
+                    // asking starts a decode that `remove_asset` below
+                    // cancels again.
+                    if let Some(render_image) = image.clone().get_render_image(window, cx) {
+                        cx.drop_image(render_image, Some(window));
+                    }
+                }
+            });
+        }
+        for image in images {
+            image.remove_asset(cx);
+        }
+    });
+}
+
 pub(super) fn attachment_menu_items(path: PathBuf, can_reveal: bool) -> Vec<MenuItem> {
     vec![
         MenuItem::new(tr!("common.reveal_in_finder"), move |_, cx| {
@@ -51,14 +81,18 @@ impl Waku {
         name: Option<&str>,
         cx: &mut Context<Self>,
     ) -> Option<Arc<gpui::Image>> {
+        if reference.starts_with("data:") {
+            return self.data_url_image(reference, cx);
+        }
         let attachment_reference =
             reference.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME);
         if !waku_protocol::blob::is_reference(reference) && !attachment_reference {
             return None;
         }
-        if let Some(state) = self.remote_images.borrow().get(reference) {
+        let cache_key = memory::ImageCache::reference_key(reference);
+        if let Some(state) = self.remote_images.borrow_mut().get(cache_key) {
             return match state {
-                RemoteImageState::Ready(image) => Some(image.clone()),
+                RemoteImageState::Ready { image, .. } => Some(image.clone()),
                 RemoteImageState::Loading | RemoteImageState::Unavailable => None,
             };
         }
@@ -67,17 +101,12 @@ impl Waku {
             .and_then(image_format_for_name)
             .or_else(|| image_format_for_name(reference))
         else {
-            self.remote_images
-                .borrow_mut()
-                .insert(reference.to_owned(), RemoteImageState::Unavailable);
+            self.cache_image(cache_key, RemoteImageState::Unavailable, cx);
             return None;
         };
 
-        self.remote_images
-            .borrow_mut()
-            .insert(reference.to_owned(), RemoteImageState::Loading);
-        let cache_key = reference.to_owned();
-        let fetch_reference = cache_key.clone();
+        self.cache_image(cache_key, RemoteImageState::Loading, cx);
+        let fetch_reference = reference.to_owned();
         let daemon_path = daemon_path.map(Path::to_path_buf);
         let daemon = self.daemon.clone();
         cx.spawn(async move |waku, cx| {
@@ -89,19 +118,51 @@ impl Waku {
                         daemon_path.as_deref(),
                         &daemon,
                     )
-                    .map(|bytes| Arc::new(gpui::Image::from_bytes(format, bytes)))
+                    .map(|bytes| {
+                        // Header-only size probe, off the UI thread.
+                        RemoteImageState::ready(Arc::new(gpui::Image::from_bytes(format, bytes)))
+                    })
                 })
                 .await;
             let _ = waku.update(cx, |waku, cx| {
-                waku.remote_images.borrow_mut().insert(
-                    cache_key,
-                    image.map_or(RemoteImageState::Unavailable, RemoteImageState::Ready),
-                );
+                // Evicted while loading: the row that wanted it will ask
+                // again if it is still visible.
+                if waku.remote_images.borrow().contains(cache_key) {
+                    waku.cache_image(
+                        cache_key,
+                        image.unwrap_or(RemoteImageState::Unavailable),
+                        cx,
+                    );
+                }
                 cx.notify();
             });
         })
         .detach();
         None
+    }
+
+    /// A legacy inline `data:` image, base64-decoded once and then served
+    /// from the image cache instead of being decoded on every frame.
+    fn data_url_image(&self, url: &str, cx: &mut Context<Self>) -> Option<Arc<gpui::Image>> {
+        let cache_key = memory::ImageCache::data_url_key(url);
+        if let Some(state) = self.remote_images.borrow_mut().get(cache_key) {
+            return match state {
+                RemoteImageState::Ready { image, .. } => Some(image.clone()),
+                RemoteImageState::Loading | RemoteImageState::Unavailable => None,
+            };
+        }
+        let image = memory::decode_data_url_image(url);
+        let state = image
+            .clone()
+            .map_or(RemoteImageState::Unavailable, RemoteImageState::ready);
+        self.cache_image(cache_key, state, cx);
+        image
+    }
+
+    /// Stores one image state and releases whatever the byte budget evicts.
+    pub(super) fn cache_image(&self, key: u64, state: RemoteImageState, cx: &mut Context<Self>) {
+        let evicted = self.remote_images.borrow_mut().insert(key, state);
+        retire_images(evicted, cx);
     }
 
     pub(super) fn open_image_preview(

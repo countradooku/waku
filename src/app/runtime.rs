@@ -2661,6 +2661,9 @@ impl Waku {
                 runtime.driver.close();
             }
         }
+        // Sessions whose runtime just went, or that were left long ago, can
+        // now give back their transcripts.
+        self.dehydrate_idle_sessions();
     }
 
     /// Applies a changed model, effort, tier, or mode to a session. Transports

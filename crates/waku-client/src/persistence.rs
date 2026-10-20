@@ -430,6 +430,25 @@ impl PersistedState {
         self.dirty_sessions.insert(id);
     }
 
+    /// Whether `id` has changes the next save has yet to send the daemon.
+    pub fn is_session_dirty(&self, id: Uuid) -> bool {
+        self.dirty_sessions.contains(&id)
+    }
+
+    /// Snapshots of the dirty sessions for `SaveTaskState`. Cheap: their
+    /// transcripts are shared, not copied.
+    ///
+    /// A skeleton (`detail_loaded == false`: never hydrated, or released by
+    /// dehydration) is left out. The wire cannot say "not loaded", so the
+    /// daemon would take its empty transcript as the real one.
+    fn dirty_session_snapshots(&self) -> Vec<AgentSession> {
+        self.sessions
+            .iter()
+            .filter(|session| session.detail_loaded && self.dirty_sessions.contains(&session.id))
+            .cloned()
+            .collect()
+    }
+
     pub fn push_session(&mut self, session: AgentSession) {
         self.dirty_sessions.insert(session.id);
         self.sessions.push(session);
@@ -1048,12 +1067,7 @@ impl StateStore {
                 "task state was not loaded; refusing to overwrite daemon data",
             ));
         }
-        let sessions = state
-            .sessions
-            .iter()
-            .filter(|session| state.dirty_sessions.contains(&session.id))
-            .cloned()
-            .collect();
+        let sessions = state.dirty_session_snapshots();
         let live_session_ids = state.sessions.iter().map(|session| session.id).collect();
         self.daemon
             .client()
@@ -1612,6 +1626,26 @@ mod tests {
         );
         drop(writer);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn save_snapshots_share_transcripts_and_never_send_skeletons() {
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        state.sessions[0].begin_turn("a prompt");
+        state.mark_session_dirty(id);
+        let mut skeleton = AgentSession::new(state.projects[0].id, ProviderKind::Codex);
+        skeleton.release_transcript();
+        state.push_session(skeleton);
+
+        let snapshots = state.dirty_session_snapshots();
+
+        assert_eq!(snapshots.len(), 1, "the skeleton is not sent");
+        assert_eq!(snapshots[0].id, id);
+        assert!(
+            snapshots[0].messages.ptr_eq(&state.sessions[0].messages),
+            "a snapshot shares message bodies instead of copying them"
+        );
     }
 
     #[test]
