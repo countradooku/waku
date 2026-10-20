@@ -277,13 +277,22 @@ fn waku_claude_driver_renders_the_fake_claude_stream() {
         "max",
     );
     let events = run_turn("claude", &fake);
-    assert!(
+    // `PromptSubmitted` is emitted when the daemon accepts the prompt and can
+    // land before or after the driver reports `Connected`, so check that the
+    // session connected before the turn started rather than the exact order.
+    let connected = events.iter().position(|event| {
         matches!(
-            events.first(),
-            Some(DriverEvent::Connected {
+            event,
+            DriverEvent::Connected {
                 provider_cursor: Some(ProviderResumeCursor::Claude { .. })
-            })
-        ),
+            }
+        )
+    });
+    let turn_started = events
+        .iter()
+        .position(|event| matches!(event, DriverEvent::TurnStarted));
+    assert!(
+        matches!((connected, turn_started), (Some(c), Some(t)) if c < t),
         "{events:#?}"
     );
     assert_common_transcript("claude", &events);

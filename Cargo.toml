@@ -121,6 +121,9 @@ gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview", feature
 # than divan because the CI regression gate compares the `estimates.json` it
 # writes per benchmark; plots and rayon are not needed.
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+# PNG fixtures in tests (`src/app/memory.rs`). `image` is a normal dependency
+# only on macOS and Linux, so Windows test builds need it here.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Window-free microbenchmarks over the markdown, review-diff and terminal hot
 # paths, reached through `waku::bench_support`.
