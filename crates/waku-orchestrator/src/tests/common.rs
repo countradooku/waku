@@ -1,5 +1,5 @@
 //! Test environment: a temporary `state.sqlite`, a manual clock, sequential
-//! ids, and stand-ins for provider ingestion (#44 brings the real one).
+//! ids, and a stand-in driver that ingests normalized adapter events.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,13 +12,15 @@ use waku_protocol::orchestration::*;
 use crate::clock::ManualClock;
 use crate::command::{CapturedCheckpoint, InternalCommand};
 use crate::decide::Decision;
-use crate::effects::Effect;
 use crate::fakes::StaticCapabilities;
 use crate::ids::{SequentialIds, derived_id};
 use crate::orchestrator::{
     Dependencies, DispatchError, DispatchReceipt, IngestOutcome, Orchestrator, OrchestratorConfig,
 };
 use crate::projection::ThreadProjection;
+use crate::provider::{
+    AdapterEvent, IngestEnvelope, RunRef, ThreadDisposition, TurnOutcome, TurnTerminal,
+};
 use crate::store::outbox::{self, EffectStatus};
 use crate::store::sink::WriteGuard;
 
@@ -222,7 +224,10 @@ fn open(
     .unwrap()
 }
 
-// -- provider ingestion stand-ins ------------------------------------------------
+// -- provider ingestion ------------------------------------------------------------
+//
+// A driver's normalized events, ingested through `Orchestrator::ingest` and
+// `decide_ingest` exactly as the session manager does (RFC 0002).
 
 fn derived<T: From<Uuid>>(scope: &str, key: impl std::fmt::Display) -> T {
     T::from(derived_id(scope, &key.to_string()))
@@ -239,10 +244,25 @@ fn current(
     Some((run, attempt, node))
 }
 
-fn guard_for(attempt: &RunAttempt) -> WriteGuard {
-    WriteGuard::RunCurrent {
-        run_id: attempt.run_id,
+fn run_ref(run: &Run, attempt: &RunAttempt, node: &ExecutionNode) -> RunRef {
+    RunRef {
+        thread_id: run.thread_id,
+        run_id: run.id,
         attempt_id: attempt.id,
+        root_node_id: node.id,
+    }
+}
+
+/// The provider session a stand-in driver uses for a provider thread.
+pub fn session_for(provider_thread: ProviderThreadId) -> ProviderSessionId {
+    derived("session", provider_thread)
+}
+
+impl Env {
+    /// Ingests one adapter event and expects the storage to accept it.
+    pub fn adapter(&self, envelope: IngestEnvelope) -> IngestOutcome {
+        self.tick();
+        self.orchestrator.ingest(envelope).unwrap()
     }
 }
 
@@ -258,7 +278,7 @@ pub fn go_running(env: &Env, thread_id: ThreadId, run_id: RunId) -> Option<Inges
         .provider_threads
         .get(&attempt.provider_thread_id)?
         .clone();
-    let session_id: ProviderSessionId = derived("session", provider_thread.id);
+    let session_id = session_for(provider_thread.id);
     let capabilities = env
         .capabilities
         .0
@@ -266,6 +286,46 @@ pub fn go_running(env: &Env, thread_id: ThreadId, run_id: RunId) -> Option<Inges
         .get(&provider_thread.provider_instance_id)
         .cloned()
         .unwrap_or_default();
+    let reference = run_ref(&run, &attempt, &node);
+    env.adapter(IngestEnvelope::for_thread(
+        thread_id,
+        session_id,
+        1,
+        AdapterEvent::SessionUpdated {
+            session: ProviderSession {
+                id: session_id,
+                driver: provider_thread.driver,
+                provider_instance_id: provider_thread.provider_instance_id.clone(),
+                status: SessionStatus::Running,
+                cwd: PathBuf::from("/repo"),
+                model: None,
+                capabilities,
+                created_at: now,
+                updated_at: now,
+                last_error: None,
+                detached_at: None,
+                detach_reason: None,
+            },
+        },
+    ));
+    env.adapter(IngestEnvelope::for_thread(
+        thread_id,
+        session_id,
+        1,
+        AdapterEvent::ProviderThreadUpdated {
+            thread: ProviderThread {
+                provider_session_id: Some(session_id),
+                native_thread_ref: Some(ProviderRef::strong(
+                    provider_thread.driver,
+                    format!("native-{}", provider_thread.id),
+                )),
+                updated_at: now,
+                ..provider_thread.clone()
+            },
+            retained_native_turn_ids: None,
+        },
+    ));
+    let projection = env.projection(thread_id);
     let turn = ProviderTurn {
         id: derived("turn", attempt.id),
         provider_thread_id: provider_thread.id,
@@ -287,54 +347,20 @@ pub fn go_running(env: &Env, thread_id: ThreadId, run_id: RunId) -> Option<Inges
         token_usage: None,
         turn_token_usage: None,
     };
-    let decision = Decision {
-        events: vec![
-            DomainEvent::ProviderSessionUpdated(ProviderSession {
-                id: session_id,
-                driver: provider_thread.driver,
-                provider_instance_id: provider_thread.provider_instance_id.clone(),
-                status: SessionStatus::Running,
-                cwd: PathBuf::from("/repo"),
-                model: None,
-                capabilities,
-                created_at: now,
-                updated_at: now,
-                last_error: None,
-                detached_at: None,
-                detach_reason: None,
-            }),
-            DomainEvent::ProviderThreadUpdated(ProviderThread {
-                provider_session_id: Some(session_id),
-                native_thread_ref: Some(ProviderRef::strong(
-                    provider_thread.driver,
-                    format!("native-{}", provider_thread.id),
-                )),
-                status: ProviderThreadStatus::Active,
-                updated_at: now,
-                ..provider_thread
-            }),
-            DomainEvent::ProviderTurnUpdated(turn.clone()),
-            DomainEvent::RunAttemptUpdated(RunAttempt {
-                provider_turn_id: Some(turn.id),
-                status: AttemptStatus::Running,
-                started_at: Some(now),
-                ..attempt.clone()
-            }),
-            DomainEvent::NodeUpdated(ExecutionNode {
-                status: NodeStatus::Running,
-                provider_turn_id: Some(turn.id),
-                started_at: Some(now),
-                ..node
-            }),
-            DomainEvent::RunUpdated(Run {
-                status: RunStatus::Running,
-                started_at: Some(now),
-                ..run
-            }),
-        ],
-        ..Decision::default()
-    };
-    Some(env.ingest(thread_id, decision, guard_for(&attempt)))
+    Some(env.adapter(IngestEnvelope::for_run(
+        session_id,
+        1,
+        &reference,
+        AdapterEvent::ProviderTurnUpdated { turn },
+    )))
+}
+
+fn live_session(projection: &ThreadProjection, attempt: &RunAttempt) -> ProviderSessionId {
+    projection
+        .provider_threads
+        .get(&attempt.provider_thread_id)
+        .and_then(|provider_thread| provider_thread.provider_session_id)
+        .unwrap_or_else(|| session_for(attempt.provider_thread_id))
 }
 
 /// A streamed assistant text snapshot (R12), upserting one item per run.
@@ -350,23 +376,16 @@ pub fn assistant_text(
         return None;
     }
     let now = env.clock.advance(1);
+    let session = live_session(&projection, &attempt);
+    let reference = run_ref(&run, &attempt, &node);
     let message_id: MessageId = derived("assistant", attempt.id);
     let item_id: TurnItemId = derived("assistant_item", attempt.id);
-    let block = run.ordinal?;
-    let position = projection
-        .hot_items
-        .values()
-        .find(|item| item.id == item_id)
-        .map(|item| item.position)
-        .unwrap_or_else(|| {
-            TurnItem::position_of(
-                block,
-                projection.next_position.get(&block).copied().unwrap_or(0),
-            )
-        });
-    let decision = Decision {
-        events: vec![
-            DomainEvent::MessageUpdated(Message {
+    env.adapter(IngestEnvelope::for_run(
+        session,
+        1,
+        &reference,
+        AdapterEvent::MessageUpdated {
+            message: Message {
                 id: message_id,
                 thread_id,
                 run_id: Some(run.id),
@@ -383,8 +402,15 @@ pub fn assistant_text(
                 streaming: true,
                 created_at: now,
                 updated_at: now,
-            }),
-            DomainEvent::TurnItemUpdated(TurnItem {
+            },
+        },
+    ));
+    Some(env.adapter(IngestEnvelope::for_run(
+        session,
+        1,
+        &reference,
+        AdapterEvent::TurnItemUpdated {
+            item: TurnItem {
                 id: item_id,
                 thread_id,
                 run_id: Some(run.id),
@@ -393,7 +419,7 @@ pub fn assistant_text(
                 provider_turn_id: attempt.provider_turn_id,
                 native_item_ref: None,
                 parent_item_id: None,
-                position,
+                position: 0,
                 status: ItemStatus::Running,
                 title: None,
                 tool: None,
@@ -406,11 +432,9 @@ pub fn assistant_text(
                     text: text.to_owned(),
                     streaming: true,
                 },
-            }),
-        ],
-        ..Decision::default()
-    };
-    Some(env.ingest(thread_id, decision, guard_for(&attempt)))
+            },
+        },
+    )))
 }
 
 /// The provider asks for an approval: the run waits on the user.
@@ -430,35 +454,15 @@ pub fn request_approval(
         .provider_session_id?;
     let now = env.clock.advance(1);
     let request_id: RuntimeRequestId = fresh();
-    let request_node: NodeId = derived("request_node", request_id);
-    let block = run.ordinal?;
-    let position = TurnItem::position_of(
-        block,
-        projection.next_position.get(&block).copied().unwrap_or(0),
-    );
-    let options = vec![PermissionOption {
-        id: "allow_once".into(),
-        label: "Allow".into(),
-        allow: true,
-    }];
-    let decision = Decision {
-        events: vec![
-            DomainEvent::NodeUpdated(ExecutionNode {
-                id: request_node,
-                parent_node_id: Some(node.id),
-                kind: NodeKind::ApprovalRequest,
-                status: NodeStatus::Waiting,
-                counts_for_run: false,
-                runtime_request_id: Some(request_id),
-                checkpoint_scope_id: None,
-                started_at: Some(now),
-                completed_at: None,
-                ..node.clone()
-            }),
-            DomainEvent::RuntimeRequestUpdated(RuntimeRequest {
+    let outcome = env.adapter(IngestEnvelope::for_run(
+        session,
+        1,
+        &run_ref(&run, &attempt, &node),
+        AdapterEvent::RuntimeRequestUpdated {
+            request: RuntimeRequest {
                 id: request_id,
                 thread_id,
-                node_id: request_node,
+                node_id: node.id,
                 provider_turn_id: attempt.provider_turn_id,
                 native_request_ref: None,
                 kind: RuntimeRequestKind::CommandApproval,
@@ -466,82 +470,51 @@ pub fn request_approval(
                 response_capability: ResponseCapability::Live {
                     provider_session_id: session,
                 },
-                options: options.clone(),
+                options: vec![PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    allow: true,
+                }],
                 questions: Vec::new(),
                 response: None,
                 created_at: now,
                 resolved_at: None,
-            }),
-            DomainEvent::TurnItemUpdated(TurnItem {
-                id: derived("request_item", request_id),
-                thread_id,
-                run_id: Some(run.id),
-                node_id: Some(request_node),
-                provider_thread_id: Some(attempt.provider_thread_id),
-                provider_turn_id: attempt.provider_turn_id,
-                native_item_ref: None,
-                parent_item_id: None,
-                position,
-                status: ItemStatus::Waiting,
-                title: None,
-                tool: None,
-                stream_rev: 0,
-                started_at: Some(now),
-                completed_at: None,
-                updated_at: now,
-                kind: TurnItemKind::ApprovalRequest {
-                    request_id,
-                    request_kind: RuntimeRequestKind::CommandApproval,
-                    prompt: Some("run ls?".into()),
-                    app_name: None,
-                    options,
-                },
-            }),
-            DomainEvent::RunUpdated(Run {
-                status: RunStatus::Waiting,
-                ..run
-            }),
-        ],
-        ..Decision::default()
-    };
-    Some((
-        env.ingest(thread_id, decision, guard_for(&attempt)),
-        request_id,
-    ))
+            },
+        },
+    ));
+    Some((outcome, request_id))
 }
 
-/// The driver confirms an answered request: resolved, the run runs again.
+/// The driver confirms answered requests: resolved, the run runs again.
 pub fn resolve_requests(env: &Env, thread_id: ThreadId, run_id: RunId) -> Option<IngestOutcome> {
     let projection = env.projection(thread_id);
-    let (run, attempt, _) = current(&projection, run_id)?;
+    let (run, attempt, node) = current(&projection, run_id)?;
     if run.status != RunStatus::Waiting {
         return None;
     }
     let now = env.clock.advance(1);
-    let mut events = projection
+    let session = live_session(&projection, &attempt);
+    let reference = run_ref(&run, &attempt, &node);
+    let mut outcome = None;
+    for request in projection
         .runtime_requests
         .values()
         .filter(|request| request.status == RequestStatus::Pending)
-        .map(|request| {
-            DomainEvent::RuntimeRequestUpdated(RuntimeRequest {
-                status: RequestStatus::Resolved,
-                resolved_at: Some(now),
-                ..request.clone()
-            })
-        })
-        .collect::<Vec<_>>();
-    events.push(DomainEvent::RunUpdated(Run {
-        status: RunStatus::Running,
-        ..run
-    }));
-    Some(env.ingest(
-        thread_id,
-        Decision {
-            events,
-            ..Decision::default()
-        },
-        guard_for(&attempt),
-    ))
+    {
+        outcome = Some(env.adapter(IngestEnvelope::for_run(
+            session,
+            1,
+            &reference,
+            AdapterEvent::RuntimeRequestUpdated {
+                request: RuntimeRequest {
+                    status: RequestStatus::Resolved,
+                    resolved_at: Some(now),
+                    ..request.clone()
+                },
+            },
+        )));
+    }
+    outcome
 }
 
 /// The provider's terminal event: the run enters the finalization barrier,
@@ -552,46 +525,24 @@ pub fn provider_done(env: &Env, thread_id: ThreadId, run_id: RunId) -> Option<In
     if run.status != RunStatus::Running {
         return None;
     }
-    let now = env.clock.advance(1);
-    let mut events = Vec::new();
-    if let Some(turn) = attempt
-        .provider_turn_id
-        .and_then(|id| projection.provider_turns.get(&id))
-    {
-        events.push(DomainEvent::ProviderTurnUpdated(ProviderTurn {
-            status: ProviderTurnStatus::Completed,
-            completed_at: Some(now),
-            ..turn.clone()
-        }));
-    }
-    events.push(DomainEvent::RunAttemptUpdated(RunAttempt {
-        status: AttemptStatus::Completed,
-        completed_at: Some(now),
-        ..attempt.clone()
-    }));
-    events.push(DomainEvent::RunUpdated(Run {
-        status: RunStatus::Finalizing,
-        provider_completed_at: Some(now),
-        ..run.clone()
-    }));
-    let effects = node
-        .checkpoint_scope_id
-        .map(|scope_id| {
-            vec![Effect::CheckpointCapture {
-                run_id: Some(run.id),
-                scope_id,
-            }]
-        })
-        .unwrap_or_default();
-    Some(env.ingest(
-        thread_id,
-        Decision {
-            events,
-            effects,
-            ..Decision::default()
+    let session = live_session(&projection, &attempt);
+    let reference = run_ref(&run, &attempt, &node);
+    Some(env.adapter(IngestEnvelope::for_run(
+        session,
+        1,
+        &reference,
+        AdapterEvent::TurnTerminal {
+            terminal: TurnTerminal {
+                run: reference,
+                provider_turn: None,
+                outcome: TurnOutcome::Completed,
+                thread_disposition: ThreadDisposition::Reusable,
+                child_turns_continue: false,
+                background_pending: false,
+                summary: None,
+            },
         },
-        guard_for(&attempt),
-    ))
+    )))
 }
 
 /// A finished assistant message for the run's current attempt.

@@ -1,0 +1,1 @@
+{"instance":{"steering":"restart"},"steps":[{"type":"message","text":"[slow] start the refactor"},{"type":"wait","until":"running"},{"type":"steer","text":"use tabs"},{"type":"wait","until":"turn_terminal"}]}

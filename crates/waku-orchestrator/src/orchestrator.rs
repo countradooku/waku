@@ -14,12 +14,15 @@ use waku_protocol::orchestration::*;
 
 use crate::clock::Clock;
 use crate::command::{AnyCommand, CommandError, InternalCommand, LockKey};
-use crate::decide::{CapabilitySource, DecideContext, Decision, OrchestratorSettings, decide};
+use crate::decide::{
+    CapabilitySource, DecideContext, Decision, OrchestratorSettings, decide, decide_ingest,
+};
 use crate::effects::worker::WorkerConfig;
 use crate::feed::{CommittedFeed, DEFAULT_FEED_CAPACITY, FeedPublisher};
 use crate::ids::IdSource;
 use crate::projection::maintenance::{self, REBUILD_PAGE, VerifyReport};
 use crate::projection::{ThreadProjection, sql};
+use crate::provider::IngestEnvelope;
 use crate::store::receipts::{self, Receipt};
 use crate::store::sink::{CommitContext, CommitResult, EventSink, RejectionOutcome, WriteGuard};
 use crate::store::{GRAPH_SCHEMA_VERSION, ReadPool, Store, StoreError, StoreResult, max_sequence};
@@ -505,9 +508,50 @@ impl Orchestrator {
         Ok(loaded)
     }
 
+    /// Ingests one adapter event (RFC 0001 pipeline, right column): under
+    /// the thread's lock, `decide_ingest` against the cached projection, then
+    /// a commit guarded by the decision's `WriteGuard`. A failed guard drops
+    /// the whole decision and returns `Stale`.
+    pub fn ingest(&self, input: IngestEnvelope) -> Result<IngestOutcome, DispatchError> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(DispatchError::ShuttingDown);
+        }
+        if !input.event.is_persisted() {
+            return Ok(IngestOutcome::Noop);
+        }
+        let key = LockKey::Thread(input.thread_id);
+        let guards = self.locks.lock(&[key]);
+        let thread = self.cached_or_load(input.thread_id)?;
+        let Some(projection) = thread.as_deref() else {
+            return Err(DispatchError::Rejected(CommandError::not_found(
+                "thread",
+                input.thread_id,
+            )));
+        };
+        let project = self
+            .projects
+            .read()
+            .get(&projection.thread.project_id)
+            .cloned();
+        let now = self.clock.now();
+        let decided = {
+            let mut ids = self.ids.lock();
+            let mut cx = DecideContext {
+                now,
+                ids: &mut **ids,
+                capabilities: &*self.capabilities,
+                settings: &self.settings,
+                thread: Some(projection),
+                related: None,
+                project: project.as_ref(),
+            };
+            decide_ingest(&mut cx, &input).map_err(DispatchError::Rejected)?
+        };
+        self.commit_ingest(key, thread, decided.decision, decided.guard, now, guards)
+    }
+
     /// Commits a provider-ingestion decision under the thread's lock, guarded
-    /// by `guard`. `decide_ingest` (#44) produces the decision; this is the
-    /// half of `ingest` that does not depend on adapter events.
+    /// by `guard`: the half of `ingest` after `decide_ingest`.
     pub fn ingest_decision(
         &self,
         thread_id: ThreadId,
@@ -523,21 +567,37 @@ impl Orchestrator {
         let key = LockKey::Thread(thread_id);
         let guards = self.locks.lock(&[key]);
         let thread = self.cached_or_load(thread_id)?;
-        let Some(project_id) = thread
-            .as_ref()
-            .map(|projection| projection.thread.project_id)
-        else {
+        if thread.is_none() {
             return Err(DispatchError::Rejected(CommandError::not_found(
                 "thread", thread_id,
             )));
-        };
+        }
+        let now = self.clock.now();
+        self.commit_ingest(key, thread, decision, guard, now, guards)
+    }
+
+    fn commit_ingest(
+        &self,
+        key: LockKey,
+        thread: Option<Arc<ThreadProjection>>,
+        decision: Decision,
+        guard: WriteGuard,
+        now: Timestamp,
+        guards: KeyGuards<'_>,
+    ) -> Result<IngestOutcome, DispatchError> {
+        if decision.is_empty() {
+            return Ok(IngestOutcome::Noop);
+        }
+        let project_id = thread
+            .as_ref()
+            .map(|projection| projection.thread.project_id);
         let cx = CommitContext {
             command_id: None,
             command_type: "ingest",
             key,
-            project_id: Some(project_id),
+            project_id,
             guard: Some(&guard),
-            occurred_at: self.clock.now(),
+            occurred_at: now,
         };
         let commit = match self.commit_and_apply(key, thread, cx, &decision) {
             Ok(commit) => commit,

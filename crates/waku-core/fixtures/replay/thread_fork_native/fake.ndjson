@@ -1,0 +1,36 @@
+{"type":"transcript_start","provider":"fake","protocol":"fake.jsonl","version":"1.0.0","scenario":"thread_fork_native","metadata":{"recordedBy":"waku-replay-record","minCliVersion":"1.0.0","synthetic":false}}
+{"type":"expect_outbound","label":"process_start","frame":{"type":"process_start","program":"fake-agent","args":["--jsonl"],"env":{}}}
+{"type":"expect_outbound","label":"initialize","frame":{"id":1,"method":"initialize","params":{"client":"waku","cwd":"<workspace>"}}}
+{"type":"emit_inbound","frame":{"id":1,"result":{"agent":"fake-agent","version":"1.0.0"}}}
+{"type":"expect_outbound","label":"thread/start","frame":{"id":2,"method":"thread/start","params":{"cwd":"<workspace>"}}}
+{"type":"emit_inbound","frame":{"id":2,"result":{"threadId":"t-1"}}}
+{"type":"expect_outbound","label":"turn/start","frame":{"id":3,"method":"turn/start","params":{"threadId":"t-1","text":"one"}}}
+{"type":"emit_inbound","frame":{"id":3,"result":{"turnId":"u-2"}}}
+{"type":"emit_inbound","label":"turn/started","frame":{"method":"turn/started","params":{"threadId":"t-1","turnId":"u-2"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-2","itemId":"i-3","kind":"text","delta":"Echo"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-2","itemId":"i-3","kind":"text","delta":": one"}}}
+{"type":"emit_inbound","label":"item/completed","frame":{"method":"item/completed","params":{"turnId":"u-2","itemId":"i-3","kind":"text","text":"Echo: one"}}}
+{"type":"emit_inbound","label":"turn/completed","frame":{"method":"turn/completed","params":{"turnId":"u-2","status":"completed"}}}
+{"type":"expect_outbound","label":"turn/start","frame":{"id":4,"method":"turn/start","params":{"threadId":"t-1","text":"two"}}}
+{"type":"emit_inbound","frame":{"id":4,"result":{"turnId":"u-4"}}}
+{"type":"emit_inbound","label":"turn/started","frame":{"method":"turn/started","params":{"threadId":"t-1","turnId":"u-4"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-4","itemId":"i-5","kind":"text","delta":"Echo"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-4","itemId":"i-5","kind":"text","delta":": two"}}}
+{"type":"emit_inbound","label":"item/completed","frame":{"method":"item/completed","params":{"turnId":"u-4","itemId":"i-5","kind":"text","text":"Echo: two"}}}
+{"type":"emit_inbound","label":"turn/completed","frame":{"method":"turn/completed","params":{"turnId":"u-4","status":"completed"}}}
+{"type":"expect_outbound","label":"thread/fork","frame":{"id":5,"method":"thread/fork","params":{"threadId":"t-1","afterTurnId":"u-2"}}}
+{"type":"emit_inbound","frame":{"id":5,"result":{"threadId":"t-6"}}}
+{"type":"expect_outbound","label":"process_start","channel":"main#2","frame":{"type":"process_start","program":"fake-agent","args":["--jsonl"],"env":{}}}
+{"type":"expect_outbound","label":"initialize","channel":"main#2","frame":{"id":1,"method":"initialize","params":{"client":"waku","cwd":"<workspace>"}}}
+{"type":"emit_inbound","channel":"main#2","frame":{"id":1,"result":{"agent":"fake-agent","version":"1.0.0"}}}
+{"type":"expect_outbound","label":"thread/resume","channel":"main#2","frame":{"id":2,"method":"thread/resume","params":{"threadId":"t-6"}}}
+{"type":"emit_inbound","channel":"main#2","frame":{"id":2,"result":{"threadId":"t-6"}}}
+{"type":"expect_outbound","label":"turn/start","channel":"main#2","frame":{"id":3,"method":"turn/start","params":{"threadId":"t-6","text":"in the fork"}}}
+{"type":"emit_inbound","channel":"main#2","frame":{"id":3,"result":{"turnId":"u-7"}}}
+{"type":"emit_inbound","label":"turn/started","channel":"main#2","frame":{"method":"turn/started","params":{"threadId":"t-6","turnId":"u-7"}}}
+{"type":"emit_inbound","label":"item/delta","channel":"main#2","frame":{"method":"item/delta","params":{"turnId":"u-7","itemId":"i-8","kind":"text","delta":"Echo: in"}}}
+{"type":"emit_inbound","label":"item/delta","channel":"main#2","frame":{"method":"item/delta","params":{"turnId":"u-7","itemId":"i-8","kind":"text","delta":" the fork"}}}
+{"type":"emit_inbound","label":"item/completed","channel":"main#2","frame":{"method":"item/completed","params":{"turnId":"u-7","itemId":"i-8","kind":"text","text":"Echo: in the fork"}}}
+{"type":"emit_inbound","label":"turn/completed","channel":"main#2","frame":{"method":"turn/completed","params":{"turnId":"u-7","status":"completed"}}}
+{"type":"runtime_exit","status":"success"}
+{"type":"runtime_exit","channel":"main#2","status":"success"}

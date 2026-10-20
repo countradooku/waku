@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"[slow] take your time"},{"type":"wait","until":"running"},{"type":"interrupt"},{"type":"wait","until":"turn_terminal"}]}

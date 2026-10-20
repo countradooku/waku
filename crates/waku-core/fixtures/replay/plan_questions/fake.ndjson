@@ -1,0 +1,17 @@
+{"type":"transcript_start","provider":"fake","protocol":"fake.jsonl","version":"1.0.0","scenario":"plan_questions","metadata":{"recordedBy":"waku-replay-record","minCliVersion":"1.0.0","synthetic":false}}
+{"type":"expect_outbound","label":"process_start","frame":{"type":"process_start","program":"fake-agent","args":["--jsonl"],"env":{}}}
+{"type":"expect_outbound","label":"initialize","frame":{"id":1,"method":"initialize","params":{"client":"waku","cwd":"<workspace>"}}}
+{"type":"emit_inbound","frame":{"id":1,"result":{"agent":"fake-agent","version":"1.0.0"}}}
+{"type":"expect_outbound","label":"thread/start","frame":{"id":2,"method":"thread/start","params":{"cwd":"<workspace>"}}}
+{"type":"emit_inbound","frame":{"id":2,"result":{"threadId":"t-1"}}}
+{"type":"expect_outbound","label":"turn/start","frame":{"id":3,"method":"turn/start","params":{"threadId":"t-1","text":"[plan] [question] pick a color"}}}
+{"type":"emit_inbound","frame":{"id":3,"result":{"turnId":"u-2"}}}
+{"type":"emit_inbound","label":"turn/started","frame":{"method":"turn/started","params":{"threadId":"t-1","turnId":"u-2"}}}
+{"type":"emit_inbound","label":"plan/updated","frame":{"method":"plan/updated","params":{"turnId":"u-2","planId":"plan-1","steps":[{"id":"1","text":"Read the code","status":"completed"},{"id":"2","text":"Write the fix","status":"running"}]}}}
+{"type":"emit_inbound","label":"question/request","frame":{"id":"r1","method":"question/request","params":{"turnId":"u-2","questions":[{"id":"q1","header":"Color","question":"Which color?","options":[{"label":"Red"},{"label":"Blue"}]}]}}}
+{"type":"expect_outbound","frame":{"id":"r1","result":{"answers":{"q1":["Blue"]}}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-2","itemId":"i-3","kind":"text","delta":"You cho"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-2","itemId":"i-3","kind":"text","delta":"se Blue."}}}
+{"type":"emit_inbound","label":"item/completed","frame":{"method":"item/completed","params":{"turnId":"u-2","itemId":"i-3","kind":"text","text":"You chose Blue."}}}
+{"type":"emit_inbound","label":"turn/completed","frame":{"method":"turn/completed","params":{"turnId":"u-2","status":"completed"}}}
+{"type":"runtime_exit","status":"success"}

@@ -12,6 +12,7 @@ mod opencode_computer_use;
 mod pi;
 mod support;
 mod title_refresh;
+pub mod v2;
 
 /// One-shot title generation for the orchestrator's `TitlePort` (RFC 0001).
 pub(crate) use codex::generate_codex_title;

@@ -1,0 +1,1 @@
+{"instance":{"fork":false},"steps":[{"type":"message","text":"one"},{"type":"fork","as":"fork-a"},{"type":"message","text":"in the fork","thread":"fork-a"}]}

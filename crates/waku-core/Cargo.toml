@@ -13,6 +13,8 @@ profiling = ["dep:tracing"]
 
 [dependencies]
 agent-client-protocol = "2.0.0"
+# `DriverV2` and `DriverSession` are object-safe async traits (RFC 0002 D-1).
+async-trait = "0.1"
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1.0"
 base64 = "0.22"
@@ -26,6 +28,8 @@ parking_lot = "0.12"
 # Unix PTYs and ConPTY alike (#60). Already in the tree through alacritty.
 polling = "3"
 rust-i18n = "4"
+# Replay fixtures: secret shapes the recorder's sanitizer redacts (RFC 0002).
+regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde-saphyr = { version = "0.0.29", default-features = false, features = ["deserialize"] }
@@ -34,6 +38,10 @@ serde_json = "1.0"
 sha2 = "0.10"
 smol = "2"
 subtle = "2"
+# Unified diffs of mismatched replay frames (RFC 0002 "Matching").
+similar = "3"
+# Temporary workspaces and databases of the replay harness and recorder.
+tempfile = "3"
 toml = "0.8"
 tracing = { version = "0.1", optional = true }
 trash = "5.2.6"
@@ -42,7 +50,7 @@ trash = "5.2.6"
 # backend requests run on its blocking pool. RFC 0002 moves the drivers onto
 # the same runtime later.
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util", "process"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 url = "2"
 uuid = { version = "1.18", features = ["v4", "serde"] }
@@ -77,3 +85,8 @@ workspace = true
 [[bench]]
 name = "persistence"
 harness = false
+
+# Records a replay fixture from a live session (RFC 0002 "Recorder").
+[[bin]]
+name = "waku-replay-record"
+path = "src/bin/waku-replay-record.rs"

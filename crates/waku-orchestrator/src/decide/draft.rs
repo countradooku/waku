@@ -40,6 +40,8 @@ keyed!(
     Subagent => NodeId,
     ProviderSession => ProviderSessionId,
     ProviderThread => ProviderThreadId,
+    ProviderTurn => ProviderTurnId,
+    Plan => PlanId,
     RuntimeRequest => RuntimeRequestId,
     Message => MessageId,
     CheckpointScope => CheckpointScopeId,
@@ -76,6 +78,8 @@ pub(crate) struct Draft<'a> {
     subagents: Vec<Subagent>,
     provider_sessions: Vec<ProviderSession>,
     provider_threads: Vec<ProviderThread>,
+    provider_turns: Vec<ProviderTurn>,
+    plans: Vec<Plan>,
     requests: Vec<RuntimeRequest>,
     messages: Vec<Message>,
     scopes: Vec<CheckpointScope>,
@@ -107,6 +111,8 @@ impl<'a> Draft<'a> {
             subagents: Vec::new(),
             provider_sessions: Vec::new(),
             provider_threads: Vec::new(),
+            provider_turns: Vec::new(),
+            plans: Vec::new(),
             requests: Vec::new(),
             messages: Vec::new(),
             scopes: Vec::new(),
@@ -266,6 +272,78 @@ impl<'a> Draft<'a> {
         find(&self.provider_threads, id).or_else(|| self.base.provider_threads.get(&id))
     }
 
+    pub fn provider_turn(&self, id: ProviderTurnId) -> Option<&ProviderTurn> {
+        find(&self.provider_turns, id).or_else(|| self.base.provider_turns.get(&id))
+    }
+
+    /// A turn item of a non-terminal run, by id. Scans the hot set, which
+    /// only holds the rows of runs that are still open.
+    pub fn item(&self, id: TurnItemId) -> Option<&TurnItem> {
+        find(&self.items, id).or_else(|| self.base.hot_items.values().find(|item| item.id == id))
+    }
+
+    /// The hot turn items of a run, with this decision's changes applied.
+    pub fn items_of_run(&self, run_id: RunId) -> Vec<TurnItem> {
+        let mut items = self
+            .base
+            .hot_items
+            .values()
+            .filter(|item| item.run_id == Some(run_id))
+            .map(|item| find(&self.items, item.id).unwrap_or(item).clone())
+            .collect::<Vec<_>>();
+        items.extend(
+            self.items
+                .iter()
+                .filter(|item| {
+                    item.run_id == Some(run_id)
+                        && !self.base.hot_items.values().any(|base| base.id == item.id)
+                })
+                .cloned(),
+        );
+        items
+    }
+
+    /// The hot messages of a run, with this decision's changes applied.
+    pub fn messages_of_run(&self, run_id: RunId) -> Vec<Message> {
+        let mut messages = self
+            .base
+            .hot_messages
+            .values()
+            .filter(|message| message.run_id == Some(run_id))
+            .map(|message| find(&self.messages, message.id).unwrap_or(message).clone())
+            .collect::<Vec<_>>();
+        messages.extend(
+            self.messages
+                .iter()
+                .filter(|message| {
+                    message.run_id == Some(run_id)
+                        && !self.base.hot_messages.contains_key(&message.id)
+                })
+                .cloned(),
+        );
+        messages
+    }
+
+    /// The nodes of a run, with this decision's changes applied.
+    pub fn nodes_of_run(&self, run_id: RunId) -> Vec<ExecutionNode> {
+        let mut nodes = self
+            .base
+            .nodes
+            .values()
+            .filter(|node| node.run_id == Some(run_id))
+            .map(|node| find(&self.nodes, node.id).unwrap_or(node).clone())
+            .collect::<Vec<_>>();
+        nodes.extend(
+            self.nodes
+                .iter()
+                .filter(|node| {
+                    node.run_id == Some(run_id) && !self.base.nodes.contains_key(&node.id)
+                })
+                .cloned(),
+        );
+        nodes
+    }
+
     pub fn request(&self, id: RuntimeRequestId) -> Option<&RuntimeRequest> {
         find(&self.requests, id).or_else(|| self.base.runtime_requests.get(&id))
     }
@@ -342,6 +420,18 @@ impl<'a> Draft<'a> {
 
     pub fn put_provider_thread(&mut self, provider_thread: ProviderThread) {
         put(&mut self.provider_threads, provider_thread);
+    }
+
+    pub fn put_subagent(&mut self, subagent: Subagent) {
+        put(&mut self.subagents, subagent);
+    }
+
+    pub fn put_provider_turn(&mut self, turn: ProviderTurn) {
+        put(&mut self.provider_turns, turn);
+    }
+
+    pub fn put_plan(&mut self, plan: Plan) {
+        put(&mut self.plans, plan);
     }
 
     pub fn put_request(&mut self, request: RuntimeRequest) {
@@ -439,6 +529,11 @@ impl<'a> Draft<'a> {
                 .into_iter()
                 .map(DomainEvent::ProviderThreadUpdated),
         );
+        events.extend(
+            self.provider_turns
+                .into_iter()
+                .map(DomainEvent::ProviderTurnUpdated),
+        );
         events.extend(self.runs.into_iter().map(DomainEvent::RunUpdated));
         events.extend(
             self.attempts
@@ -462,6 +557,7 @@ impl<'a> Draft<'a> {
                 .into_iter()
                 .map(DomainEvent::RuntimeRequestUpdated),
         );
+        events.extend(self.plans.into_iter().map(DomainEvent::PlanUpdated));
         events.extend(self.messages.into_iter().map(DomainEvent::MessageUpdated));
         events.extend(self.items.into_iter().map(DomainEvent::TurnItemUpdated));
         Decision {
