@@ -28,7 +28,7 @@ use uuid::Uuid;
 use waku_protocol::{
     ClientMessage, Command, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, MAX_WIRE_MESSAGE_BYTES,
     PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome, ResponsePayload, RpcError,
-    SequencedEvent, ServerMessage,
+    SequencedEvent, ServerMessage, WireDriverEvent,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -697,7 +697,11 @@ fn deliver(message: ServerMessage, inner: &ClientInner) -> bool {
                 let sessions = inner.sessions.lock();
                 if let Some(events) = sessions.get(&key) {
                     let _ = events.send(event);
-                } else {
+                } else if !matches!(event.event, WireDriverEvent::TerminalOutput(_)) {
+                    // Every client receives every terminal's output. Nobody
+                    // here is attached to this one, and an attach replays the
+                    // daemon's retained tail, so buffering it would only hold
+                    // up to 4,096 chunks of someone else's terminal.
                     let mut pending = inner.pending_events.lock();
                     let buffered = pending.entry(key).or_default();
                     buffered.push_back(event);

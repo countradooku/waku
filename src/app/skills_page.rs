@@ -981,39 +981,33 @@ impl Waku {
                 .child(SharedString::from(label))
         };
 
-        let open_button = action_button(
-            SharedString::from(format!("skill-open-{}", skill.row_key)),
-            "icons/pencil.svg",
-            tr!("skills.open_file"),
-        )
-        .on_click(cx.listener({
-            let skill_file = skill_file.clone();
-            move |this, _, _, cx| {
-                if this.daemon.is_remote() {
-                    this.show_toast(tr!("errors.remote_host_path"));
-                    cx.notify();
-                } else {
-                    crate::platform::open_with_default_app(&skill_file, cx);
-                }
-            }
-        }));
+        // Opening and revealing act on this machine's files. A remote
+        // daemon's skills live on its host, so those two actions are not
+        // offered for it (#61); copying the path still is.
+        let host_actions = !self.daemon.is_remote();
+        let open_button = host_actions.then(|| {
+            action_button(
+                SharedString::from(format!("skill-open-{}", skill.row_key)),
+                "icons/pencil.svg",
+                tr!("skills.open_file"),
+            )
+            .on_click(cx.listener({
+                let skill_file = skill_file.clone();
+                move |_, _, _, cx| crate::platform::open_with_default_app(&skill_file, cx)
+            }))
+        });
 
-        let reveal_button = action_button(
-            SharedString::from(format!("skill-reveal-{}", skill.row_key)),
-            "icons/folder.svg",
-            tr!("skills.reveal"),
-        )
-        .on_click(cx.listener({
-            let skill_file = skill_file.clone();
-            move |this, _, _, cx| {
-                if this.daemon.is_remote() {
-                    this.show_toast(tr!("errors.remote_host_path"));
-                    cx.notify();
-                } else {
-                    crate::platform::reveal_in_file_manager(&skill_file, cx);
-                }
-            }
-        }));
+        let reveal_button = host_actions.then(|| {
+            action_button(
+                SharedString::from(format!("skill-reveal-{}", skill.row_key)),
+                "icons/folder.svg",
+                tr!("skills.reveal"),
+            )
+            .on_click(cx.listener({
+                let skill_file = skill_file.clone();
+                move |_, _, _, cx| crate::platform::reveal_in_file_manager(&skill_file, cx)
+            }))
+        });
 
         let copy_feedback_id = format!("skill-copy-{}", skill.row_key);
         let copied = self.control_was_copied(&copy_feedback_id);
@@ -1264,8 +1258,8 @@ impl Waku {
                     .items_center()
                     .flex_wrap()
                     .gap(px(7.0))
-                    .child(open_button)
-                    .child(reveal_button)
+                    .children(open_button)
+                    .children(reveal_button)
                     .child(copy_button)
                     .child(div().flex_1())
                     .child(delete_button),

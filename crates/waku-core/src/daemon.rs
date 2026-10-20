@@ -46,7 +46,7 @@ fn trim_resident_transcripts(state: &mut PersistedState, pinned: &HashSet<Uuid>)
 
 pub struct WakuBackend {
     sessions: Mutex<HashMap<Uuid, (Uuid, DriverHandle)>>,
-    terminals: Mutex<HashMap<Uuid, (Uuid, crate::terminal::DaemonTerminal)>>,
+    terminals: Mutex<HashMap<Uuid, (Uuid, Arc<crate::terminal::DaemonTerminal>)>>,
     #[cfg(all(test, unix))]
     terminal_shell: Option<alacritty_terminal::tty::Shell>,
     settings: DaemonSettingsStore,
@@ -107,6 +107,26 @@ impl WakuBackend {
     pub(crate) fn with_terminal_shell(mut self, shell: alacritty_terminal::tty::Shell) -> Self {
         self.terminal_shell = Some(shell);
         self
+    }
+
+    /// The open terminal `session_id`, which `runtime_id` must own. The
+    /// terminal is shared out of the map so slow work on it (a restart
+    /// waiting out a shell's exit) never holds up the other terminals.
+    fn terminal(
+        &self,
+        session_id: Uuid,
+        runtime_id: Uuid,
+    ) -> anyhow::Result<Arc<crate::terminal::DaemonTerminal>> {
+        let terminals = self.terminals.lock();
+        let (active_runtime_id, terminal) = terminals
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("daemon terminal {session_id} is not running"))?;
+        if *active_runtime_id != runtime_id {
+            bail!(
+                "daemon terminal {session_id} belongs to runtime {active_runtime_id}, not {runtime_id}"
+            );
+        }
+        Ok(terminal.clone())
     }
 
     fn open_terminal(
@@ -783,10 +803,20 @@ impl Backend for WakuBackend {
                 })
             }
             Command::OpenTerminal { cwd, cols, rows } => {
-                let terminal = self.open_terminal(&cwd, cols, rows, events)?;
+                {
+                    let terminals = self.terminals.lock();
+                    if terminals.len() >= crate::terminal::MAX_TERMINALS
+                        && !terminals.contains_key(&session_id)
+                    {
+                        bail!(
+                            "the daemon already has {} terminals open; close one first",
+                            crate::terminal::MAX_TERMINALS
+                        );
+                    }
+                }
+                let terminal = Arc::new(self.open_terminal(&cwd, cols, rows, events)?);
                 // Bound so a replaced terminal shuts down after the lock is
-                // released (an explicit `drop` trips clippy on Windows, where
-                // the terminal stub has no destructor).
+                // released.
                 let _previous = self
                     .terminals
                     .lock()
@@ -794,31 +824,33 @@ impl Backend for WakuBackend {
                 Ok(ResponsePayload::Ack)
             }
             Command::WriteTerminal { data } => {
-                let terminals = self.terminals.lock();
-                let (active_runtime_id, terminal) = terminals
-                    .get(&session_id)
-                    .ok_or_else(|| anyhow!("daemon terminal {session_id} is not running"))?;
-                if *active_runtime_id != runtime_id {
-                    bail!(
-                        "daemon terminal {session_id} belongs to runtime {active_runtime_id}, not {runtime_id}"
-                    );
-                }
-                terminal.write(data)?;
+                self.terminal(session_id, runtime_id)?.write(data)?;
                 Ok(ResponsePayload::Ack)
             }
             Command::ResizeTerminal { cols, rows } => {
-                let terminals = self.terminals.lock();
-                let (active_runtime_id, terminal) = terminals
-                    .get(&session_id)
-                    .ok_or_else(|| anyhow!("daemon terminal {session_id} is not running"))?;
-                if *active_runtime_id != runtime_id {
-                    bail!(
-                        "daemon terminal {session_id} belongs to runtime {active_runtime_id}, not {runtime_id}"
-                    );
-                }
-                terminal.resize(cols, rows);
+                self.terminal(session_id, runtime_id)?.resize(cols, rows);
                 Ok(ResponsePayload::Ack)
             }
+            Command::AttachTerminal {
+                cols,
+                rows,
+                max_replay_bytes,
+            } => {
+                let terminal = self.terminal(session_id, runtime_id)?;
+                if let (Some(cols), Some(rows)) = (cols, rows) {
+                    terminal.resize(cols, rows);
+                }
+                Ok(ResponsePayload::TerminalAttached {
+                    terminal: terminal.snapshot(max_replay_bytes),
+                })
+            }
+            Command::ClearTerminal => {
+                self.terminal(session_id, runtime_id)?.clear();
+                Ok(ResponsePayload::Ack)
+            }
+            Command::RestartTerminal => Ok(ResponsePayload::TerminalAttached {
+                terminal: self.terminal(session_id, runtime_id)?.restart()?,
+            }),
             Command::CloseTerminal => {
                 // Dropped at the end of the arm, outside the lock.
                 let _removed = {
@@ -2034,6 +2066,9 @@ fn handle_driver_command(
         | Command::WriteTerminal { .. }
         | Command::ResizeTerminal { .. }
         | Command::CloseTerminal
+        | Command::AttachTerminal { .. }
+        | Command::ClearTerminal
+        | Command::RestartTerminal
         | Command::CloseSession => {
             bail!("daemon received a command in the wrong dispatch path")
         }

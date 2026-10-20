@@ -99,6 +99,8 @@ export type { StorageSettings } from "./StorageSettings";
 export type { StoredAttachment } from "./StoredAttachment";
 export type { StoredTranscriptBlockContent } from "./StoredTranscriptBlockContent";
 export type { TerminalOutputPayload } from "./TerminalOutputPayload";
+export type { TerminalResetPayload } from "./TerminalResetPayload";
+export type { TerminalSnapshot } from "./TerminalSnapshot";
 export type { ThreadGoal } from "./ThreadGoal";
 export type { ThreadGoalStatus } from "./ThreadGoalStatus";
 export type { TokenTotals } from "./TokenTotals";

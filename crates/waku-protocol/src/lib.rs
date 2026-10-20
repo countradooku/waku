@@ -70,7 +70,8 @@ pub use protocol::{
     APP_EXECUTABLE_ENV, ClientMessage, Command, DAEMON_ADDRESS_ENV, DAEMON_SOCKET_ENV,
     DAEMON_TOKEN_ENV, DaemonReady, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, MAX_WIRE_MESSAGE_BYTES,
     PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome, ResponsePayload, RpcError,
-    SequencedEvent, ServerMessage, WireComputerToolRequest, WireDriverStartOptions,
+    SequencedEvent, ServerMessage, TERMINAL_REPLAY_BYTES, TERMINAL_RETAINED_BYTES,
+    TERMINAL_RETAINED_LINES, TerminalSnapshot, WireComputerToolRequest, WireDriverStartOptions,
     WireSessionOptions,
 };
 pub use settings::DaemonSettings;

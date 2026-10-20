@@ -299,6 +299,7 @@ impl Render for Waku {
             let command_palette = self.render_command_palette(window, cx);
             let commit_dialog = self.render_commit_dialog(cx);
             let goal_dialog = self.render_goal_dialog(window, cx);
+            let remote_folder_picker = self.render_remote_folder_picker(window, cx);
             let toast = self.render_active_toast(cx);
             let content = div()
                 .relative()
@@ -317,6 +318,7 @@ impl Render for Waku {
                 .children(command_palette)
                 .children(commit_dialog)
                 .children(goal_dialog)
+                .children(remote_folder_picker)
                 .children(image_preview)
                 .children(task_switcher)
                 .child(self.root_frame.clone())
@@ -334,6 +336,7 @@ impl Render for Waku {
         let command_palette = self.render_command_palette(window, cx);
         let commit_dialog = self.render_commit_dialog(cx);
         let goal_dialog = self.render_goal_dialog(window, cx);
+        let remote_folder_picker = self.render_remote_folder_picker(window, cx);
         let toast = self.render_active_toast(cx);
         let content = div()
             .key_context("Waku")
@@ -470,6 +473,7 @@ impl Render for Waku {
             .children(command_palette)
             .children(commit_dialog)
             .children(goal_dialog)
+            .children(remote_folder_picker)
             .children(image_preview)
             .children(task_switcher)
             .child(self.root_frame.clone())

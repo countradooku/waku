@@ -1441,6 +1441,9 @@ fn command_targets_runtime(command: &Command) -> bool {
             | Command::WriteTerminal { .. }
             | Command::ResizeTerminal { .. }
             | Command::CloseTerminal
+            | Command::AttachTerminal { .. }
+            | Command::ClearTerminal
+            | Command::RestartTerminal
             | Command::CloseSession
             | Command::RemoveSession
     )

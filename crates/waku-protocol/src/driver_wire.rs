@@ -161,7 +161,8 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
         WireDriverEvent::ProcessExited => DriverEvent::ProcessExited,
         event @ (WireDriverEvent::TerminalOutput(_)
         | WireDriverEvent::TerminalExited
-        | WireDriverEvent::TerminalError(_)) => {
+        | WireDriverEvent::TerminalError(_)
+        | WireDriverEvent::TerminalReset(_)) => {
             bail!("{} is a terminal event, not a provider event", event.kind())
         }
     })

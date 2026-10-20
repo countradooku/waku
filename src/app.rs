@@ -1225,6 +1225,9 @@ pub struct Waku {
     commit_dialog: Option<commit_dialog::CommitDialogState>,
     goal_dialog: Option<goal_dialog::GoalDialogState>,
     goal_dialog_request: Option<goal_dialog::GoalDialogRequest>,
+    /// New project against a remote daemon: a folder picker over the daemon
+    /// host (#61).
+    remote_folder_picker: Option<remote_folder_picker::RemoteFolderPicker>,
     /// Goal operations accepted before the session's runtime exists. Goals
     /// attach to the provider thread, not to any turn, so `/goal` on a fresh
     /// task starts the provider and these drain once it installs.
@@ -1644,6 +1647,7 @@ mod goal_dialog;
 mod image_preview;
 mod memory;
 mod project_picker;
+mod remote_folder_picker;
 mod render;
 mod right_panel;
 mod runtime;
@@ -1675,6 +1679,7 @@ use dirty::{
 pub use goal_dialog::init as init_goal_dialog_keys;
 pub use image_preview::init as init_image_preview_keys;
 use project_picker::ProjectPickerSite;
+pub use remote_folder_picker::init as init_remote_folder_picker_keys;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
 use sidebar::{SidebarGroup, SidebarRow, sidebar_session_fingerprint};
@@ -2902,6 +2907,7 @@ impl Waku {
                 commit_dialog: None,
                 goal_dialog: None,
                 goal_dialog_request: None,
+                remote_folder_picker: None,
                 pending_goal_operations: HashMap::new(),
                 goal_runtime_starts: HashSet::new(),
                 goal_observed_at: HashMap::new(),

@@ -4,4 +4,10 @@ export type TerminalOutputPayload = {
 /**
  * Base64 of the raw bytes.
  */
-data: string, };
+data: string,
+/**
+ * The raw output offset of the first byte. A client that attached with
+ * a replay ending at offset `n` skips chunks below `n`. Older daemons
+ * omit it.
+ */
+offset?: number, };

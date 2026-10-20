@@ -107,10 +107,16 @@ expose the child daemon on a fixed port, configure exact browser origins, and
 copy its stable authentication token. It remains loopback-only by default.
 
 When connected to a daemon managed outside the desktop process, Waku never
-interprets daemon paths on the client machine. The local folder picker and PTY
-are therefore unavailable until the protocol gains daemon-host picker and
-terminal-stream endpoints; files, diffs, Git, skills, usage, task state, and
-attachments already use daemon RPC.
+interprets daemon paths on the client machine. New project browses the daemon
+host's folders instead of opening the local folder dialog, and terminals are
+always daemon-owned PTYs (ConPTY on Windows) that keep 5,000 lines of
+scrollback and replay it when a client attaches or reconnects. Files, diffs,
+Git, skills, usage, task state, and attachments use daemon RPC too. Actions
+that only make sense on the daemon's own machine are not offered for a remote
+daemon: "Open in…" and a skill's Open and Reveal are hidden, an attachment's
+"Show in File Manager" is disabled with a note saying why, and a file link in
+the transcript or a terminal names a daemon-host path that the desktop does
+not try to open.
 
 Release apps bundle and sign `waku-daemon`. Development keeps the daemon at
 `target/debug/waku-debug-daemon`, allowing provider-only edits to rebuild and

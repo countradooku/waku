@@ -53,6 +53,9 @@ pub enum WireDriverEvent {
     TerminalOutput(TerminalOutputPayload),
     TerminalExited,
     TerminalError(String),
+    /// The daemon terminal dropped its retained output (a clear or a
+    /// restart). Clients clear their screen and scrollback.
+    TerminalReset(TerminalResetPayload),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -117,6 +120,19 @@ pub struct TurnFinishedPayload {
 pub struct TerminalOutputPayload {
     /// Base64 of the raw bytes.
     pub data: String,
+    /// The raw output offset of the first byte. A client that attached with
+    /// a replay ending at offset `n` skips chunks below `n`. Older daemons
+    /// omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+pub struct TerminalResetPayload {
+    pub generation: u32,
+    /// The raw output offset at the reset; later output starts here.
+    pub offset: u64,
 }
 
 impl WireDriverEvent {
@@ -149,6 +165,7 @@ impl WireDriverEvent {
             Self::TerminalOutput(_) => "terminalOutput",
             Self::TerminalExited => "terminalExited",
             Self::TerminalError(_) => "terminalError",
+            Self::TerminalReset(_) => "terminalReset",
         }
     }
 
