@@ -21,6 +21,14 @@ use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
 pub const PROTOCOL_VERSION: u32 = 8;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
+/// WebSocket keepalive (RFC 0003 §2.5). Each native side sends a ping after
+/// it has written nothing for this long; the timer is re-armed by traffic, so
+/// an idle connection costs a wakeup every few seconds instead of a poll loop.
+pub const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+/// A connection that has received nothing at all — not even a pong — for
+/// this long is considered dead and closed. Browsers answer WebSocket pings
+/// on their own, so this also covers web clients that never ping.
+pub const KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
 pub const APP_EXECUTABLE_ENV: &str = "WAKU_APP_EXECUTABLE";

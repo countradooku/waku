@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -60,7 +59,7 @@ pub struct BenchServer {
     pub history_session: Option<uuid::Uuid>,
     /// The session `--autoplay` replays into, when enabled.
     pub autoplay_session: Option<uuid::Uuid>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: waku_core::ShutdownSignal,
     backend: Arc<BenchBackend>,
     thread: Option<JoinHandle<anyhow::Result<()>>>,
     autoplay: Option<Autoplay>,
@@ -114,7 +113,7 @@ impl BenchServer {
             );
         }
         let bin_dir = options.state_dir.join("bin");
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = waku_core::ShutdownSignal::new();
         let default_session = fixture::session_id(&options.default_timeline);
         let autoplay_session = options.autoplay.map(|_| default_session);
         let backend = Arc::new(BenchBackend::new(
@@ -183,7 +182,7 @@ impl BenchServer {
         Ok(server)
     }
 
-    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
+    pub fn shutdown_flag(&self) -> waku_core::ShutdownSignal {
         self.shutdown.clone()
     }
 
@@ -202,7 +201,7 @@ impl BenchServer {
         };
         // The server sets the flag on every exit path; the autoplay thread
         // watches it.
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.trigger();
         if let Some(autoplay) = self.autoplay.take() {
             let _ = autoplay.thread.join();
         }
@@ -211,14 +210,14 @@ impl BenchServer {
     }
 
     pub fn stop(self) -> anyhow::Result<Vec<ReplayStats>> {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.trigger();
         self.wait()
     }
 }
 
 impl Drop for BenchServer {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.trigger();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

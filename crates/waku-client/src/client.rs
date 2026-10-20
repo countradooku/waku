@@ -1,27 +1,43 @@
+//! The desktop's connection to `waku-daemon`.
+//!
+//! Each [`DaemonClient`] owns one thread that runs a current-thread tokio
+//! runtime (#18): a reader blocked on the socket and a writer blocked on the
+//! outgoing queue, plus the keepalive timers. Nothing polls, so a request
+//! goes out the moment it is queued and an idle connection costs a keepalive
+//! ping every few seconds. Callers never see the runtime: requests block on
+//! crossbeam channels and events arrive on crossbeam receivers, so GUI and
+//! CLI code stay runtime-agnostic.
+
 use std::collections::{HashMap, VecDeque};
-use std::io;
-use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt as _, StreamExt as _};
 use parking_lot::Mutex;
-use tungstenite::protocol::WebSocketConfig;
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use uuid::Uuid;
 
-use waku_protocol::MAX_WIRE_MESSAGE_BYTES;
 use waku_protocol::{
-    ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
-    ResponsePayload, RpcError, SequencedEvent, ServerMessage,
+    ClientMessage, Command, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, MAX_WIRE_MESSAGE_BYTES,
+    PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome, ResponsePayload, RpcError,
+    SequencedEvent, ServerMessage,
 };
 
-const READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Connecting, the WebSocket upgrade (and TLS for `wss://`) and the hello
+/// exchange must finish within this.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BUFFERED_EVENTS_PER_RUNTIME: usize = 4096;
+/// Queued requests written before one flush.
+const MAX_MESSAGES_PER_FLUSH: usize = 64;
 
 enum Outgoing {
     Message(ClientMessage),
@@ -30,7 +46,7 @@ enum Outgoing {
 }
 
 struct ClientInner {
-    outgoing: Sender<Outgoing>,
+    outgoing: mpsc::UnboundedSender<Outgoing>,
     pending: Mutex<HashMap<Uuid, Sender<Result<ResponsePayload, RpcError>>>>,
     sessions: Mutex<HashMap<(Uuid, Uuid), Sender<SequencedEvent>>>,
     pending_events: Mutex<HashMap<(Uuid, Uuid), VecDeque<SequencedEvent>>>,
@@ -73,38 +89,7 @@ impl DaemonClient {
             })
             .collect();
         let url = daemon_url(address)?;
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(MAX_WIRE_MESSAGE_BYTES))
-            .max_frame_size(Some(MAX_WIRE_MESSAGE_BYTES));
-        let (mut socket, _) =
-            tungstenite::client::connect_with_config(url.as_str(), Some(config), 3)
-                .context("could not connect to Waku daemon")?;
-        set_client_read_timeout(&mut socket, Some(Duration::from_secs(5)))?;
-        write_json(
-            &mut socket,
-            &ClientMessage::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                token,
-                client_id: Uuid::new_v4(),
-                resume_from,
-            },
-        )?;
-        let hello = read_server_message(&mut socket)?;
-        match hello {
-            ServerMessage::Hello {
-                protocol_version, ..
-            } if protocol_version == PROTOCOL_VERSION => {}
-            ServerMessage::Hello {
-                protocol_version, ..
-            } => bail!(
-                "daemon protocol {protocol_version} does not match desktop protocol {PROTOCOL_VERSION}"
-            ),
-            ServerMessage::Rejected { message } => bail!("daemon rejected connection: {message}"),
-            other => bail!("daemon sent an invalid handshake response: {other:?}"),
-        }
-        set_client_read_timeout(&mut socket, Some(READ_POLL_INTERVAL))?;
-
-        let (outgoing, outgoing_rx) = unbounded();
+        let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(ClientInner {
             outgoing,
             pending: Mutex::new(HashMap::new()),
@@ -114,12 +99,43 @@ impl DaemonClient {
             last_sequences: Mutex::new(last_sequences),
             disconnected: AtomicBool::new(false),
         });
+        let hello = ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            token,
+            client_id: Uuid::new_v4(),
+            resume_from,
+        };
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let thread_inner = inner.clone();
         std::thread::Builder::new()
             .name("waku-daemon-client".into())
-            .spawn(move || run_client(socket, outgoing_rx, thread_inner))
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(anyhow!(error)));
+                        return;
+                    }
+                };
+                runtime.block_on(connect_and_run(
+                    url,
+                    hello,
+                    ready_tx,
+                    outgoing_rx,
+                    &thread_inner,
+                ));
+                disconnected(&thread_inner);
+            })
             .context("could not start Waku daemon client thread")?;
-        Ok(Self { inner })
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Self { inner }),
+            Ok(Err(error)) => Err(error),
+            Err(_) => bail!("Waku daemon client thread exited during the handshake"),
+        }
     }
 
     pub fn subscribe(&self, session_id: Uuid, runtime_id: Uuid) -> Receiver<SequencedEvent> {
@@ -260,104 +276,236 @@ fn daemon_url(address: &str) -> anyhow::Result<String> {
     Ok(url.into())
 }
 
-fn run_client(
-    mut socket: WebSocket<MaybeTlsStream<TcpStream>>,
-    outgoing: Receiver<Outgoing>,
-    inner: Arc<ClientInner>,
+fn websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_WIRE_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_WIRE_MESSAGE_BYTES))
+}
+
+/// Connects, says hello, reports the outcome through `ready`, and then runs
+/// the connection until either side closes it.
+async fn connect_and_run(
+    url: String,
+    hello: ClientMessage,
+    ready: std::sync::mpsc::SyncSender<anyhow::Result<()>>,
+    outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    inner: &ClientInner,
 ) {
-    'connection: loop {
-        while let Ok(message) = outgoing.try_recv() {
-            match message {
+    let connect = async {
+        let (socket, _) =
+            tokio_tungstenite::connect_async_with_config(url, Some(websocket_config()), true)
+                .await
+                .context("could not connect to Waku daemon")?;
+        handshake(socket, &hello).await
+    };
+    let socket = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+        Ok(Ok(socket)) => socket,
+        Ok(Err(error)) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+        Err(_) => {
+            let _ = ready.send(Err(anyhow!("timed out connecting to Waku daemon")));
+            return;
+        }
+    };
+    let _ = ready.send(Ok(()));
+    run_client(socket, outgoing, inner).await;
+}
+
+async fn handshake<S>(
+    mut socket: WebSocketStream<S>,
+    hello: &ClientMessage,
+) -> anyhow::Result<WebSocketStream<S>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    socket.send(text_message(hello)?).await?;
+    let response = loop {
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => {
+                break serde_json::from_str::<ServerMessage>(text.as_str())?;
+            }
+            Some(Ok(Message::Close(_))) | None => bail!("Waku daemon closed during handshake"),
+            Some(Ok(_)) => {}
+            Some(Err(error)) => return Err(error.into()),
+        }
+    };
+    match response {
+        ServerMessage::Hello {
+            protocol_version, ..
+        } if protocol_version == PROTOCOL_VERSION => Ok(socket),
+        ServerMessage::Hello {
+            protocol_version, ..
+        } => bail!(
+            "daemon protocol {protocol_version} does not match desktop protocol {PROTOCOL_VERSION}"
+        ),
+        ServerMessage::Rejected { message } => bail!("daemon rejected connection: {message}"),
+        other => bail!("daemon sent an invalid handshake response: {other:?}"),
+    }
+}
+
+async fn run_client<S>(
+    socket: WebSocketStream<S>,
+    outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    inner: &ClientInner,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (sink, stream) = socket.split();
+    tokio::select! {
+        () = write_outgoing(sink, outgoing) => {}
+        () = read_incoming(stream, inner) => {}
+    }
+}
+
+/// Writes queued requests as soon as they arrive. After `KEEPALIVE_INTERVAL`
+/// without anything to send it writes a ping instead, which keeps the
+/// daemon's dead-connection timer fed and lets this side notice a hung
+/// daemon through the missing pong.
+async fn write_outgoing<S>(
+    mut sink: SplitSink<WebSocketStream<S>, Message>,
+    mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let next = match tokio::time::timeout(KEEPALIVE_INTERVAL, outgoing.recv()).await {
+            Ok(Some(next)) => next,
+            Ok(None) => return,
+            Err(_) => {
+                if sink.send(Message::Ping(Default::default())).await.is_err() {
+                    return;
+                }
+                continue;
+            }
+        };
+        let mut next = Some(next);
+        let mut batched = 0;
+        while let Some(item) = next.take() {
+            match item {
                 Outgoing::Message(message) => {
-                    if write_json(&mut socket, &message).is_err() {
-                        break 'connection;
+                    let Ok(frame) = text_message(&message) else {
+                        continue;
+                    };
+                    if sink.feed(frame).await.is_err() {
+                        return;
+                    }
+                    batched += 1;
+                    if batched < MAX_MESSAGES_PER_FLUSH {
+                        next = outgoing.try_recv().ok();
                     }
                 }
                 Outgoing::Shutdown => {
-                    let _ = write_json(&mut socket, &ClientMessage::Shutdown);
-                    let _ = socket.flush();
-                    break 'connection;
+                    let _ = sink
+                        .feed(Message::Text(
+                            serde_json::to_string(&ClientMessage::Shutdown)
+                                .unwrap_or_default()
+                                .into(),
+                        ))
+                        .await;
+                    let _ = sink.flush().await;
+                    return;
                 }
                 Outgoing::Disconnect => {
-                    let _ = socket.close(None);
-                    let _ = socket.flush();
-                    break 'connection;
+                    let _ = sink.close().await;
+                    return;
                 }
             }
         }
-
-        match socket.read() {
-            Ok(Message::Text(text)) => {
-                let Ok(message) = serde_json::from_str::<ServerMessage>(text.as_ref()) else {
-                    continue;
-                };
-                match message {
-                    ServerMessage::Response {
-                        request_id,
-                        outcome,
-                    } => {
-                        if let Some(pending) = inner.pending.lock().remove(&request_id) {
-                            let result = match outcome {
-                                ResponseOutcome::Ok { payload } => Ok(payload),
-                                ResponseOutcome::Error { error } => Err(error),
-                            };
-                            let _ = pending.send(result);
-                        }
-                    }
-                    ServerMessage::Event(event) => {
-                        let should_deliver = {
-                            let mut sequences = inner.last_sequences.lock();
-                            let previous = sequences
-                                .entry((event.session_id, event.runtime_id))
-                                .or_insert(LastSequence {
-                                    epoch: event.epoch,
-                                    sequence: 0,
-                                });
-                            if previous.epoch == event.epoch && event.sequence <= previous.sequence
-                            {
-                                false
-                            } else {
-                                previous.epoch = event.epoch;
-                                previous.sequence = event.sequence;
-                                true
-                            }
-                        };
-                        if should_deliver {
-                            let key = (event.session_id, event.runtime_id);
-                            let sessions = inner.sessions.lock();
-                            if let Some(events) = sessions.get(&key) {
-                                let _ = events.send(event);
-                            } else {
-                                let mut pending = inner.pending_events.lock();
-                                let buffered = pending.entry(key).or_default();
-                                buffered.push_back(event);
-                                while buffered.len() > MAX_BUFFERED_EVENTS_PER_RUNTIME {
-                                    buffered.pop_front();
-                                }
-                            }
-                        }
-                    }
-                    ServerMessage::TaskStateChanged { revision } => {
-                        inner
-                            .task_state_subscribers
-                            .lock()
-                            .retain(|subscriber| subscriber.send(revision).is_ok());
-                    }
-                    ServerMessage::ShuttingDown => break,
-                    ServerMessage::Hello { .. } | ServerMessage::Rejected { .. } => {}
-                }
-            }
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) => {
-                let _ = socket.flush();
-            }
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(error)) if retryable_io(&error) => {}
-            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => break,
-            Err(_) => break,
+        if sink.flush().await.is_err() {
+            return;
         }
     }
+}
 
+/// Delivers daemon messages until the daemon closes the connection, says it
+/// is shutting down, or goes silent for `KEEPALIVE_TIMEOUT` — the daemon
+/// pings when it has nothing to say, so silence means it is hung or gone.
+async fn read_incoming<S>(mut stream: SplitStream<WebSocketStream<S>>, inner: &ClientInner)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let Ok(next) = tokio::time::timeout(KEEPALIVE_TIMEOUT, stream.next()).await else {
+            return;
+        };
+        match next {
+            Some(Ok(Message::Text(text))) => {
+                let Ok(message) = serde_json::from_str::<ServerMessage>(text.as_str()) else {
+                    continue;
+                };
+                if !deliver(message, inner) {
+                    return;
+                }
+            }
+            Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+            // Pings are answered by the WebSocket layer.
+            Some(Ok(_)) => {}
+        }
+    }
+}
+
+/// Routes one daemon message. Returns `false` when the connection should end.
+fn deliver(message: ServerMessage, inner: &ClientInner) -> bool {
+    match message {
+        ServerMessage::Response {
+            request_id,
+            outcome,
+        } => {
+            if let Some(pending) = inner.pending.lock().remove(&request_id) {
+                let result = match outcome {
+                    ResponseOutcome::Ok { payload } => Ok(payload),
+                    ResponseOutcome::Error { error } => Err(error),
+                };
+                let _ = pending.send(result);
+            }
+        }
+        ServerMessage::Event(event) => {
+            let should_deliver = {
+                let mut sequences = inner.last_sequences.lock();
+                let previous = sequences
+                    .entry((event.session_id, event.runtime_id))
+                    .or_insert(LastSequence {
+                        epoch: event.epoch,
+                        sequence: 0,
+                    });
+                if previous.epoch == event.epoch && event.sequence <= previous.sequence {
+                    false
+                } else {
+                    previous.epoch = event.epoch;
+                    previous.sequence = event.sequence;
+                    true
+                }
+            };
+            if should_deliver {
+                let key = (event.session_id, event.runtime_id);
+                let sessions = inner.sessions.lock();
+                if let Some(events) = sessions.get(&key) {
+                    let _ = events.send(event);
+                } else {
+                    let mut pending = inner.pending_events.lock();
+                    let buffered = pending.entry(key).or_default();
+                    buffered.push_back(event);
+                    while buffered.len() > MAX_BUFFERED_EVENTS_PER_RUNTIME {
+                        buffered.pop_front();
+                    }
+                }
+            }
+        }
+        ServerMessage::TaskStateChanged { revision } => {
+            inner
+                .task_state_subscribers
+                .lock()
+                .retain(|subscriber| subscriber.send(revision).is_ok());
+        }
+        ServerMessage::ShuttingDown => return false,
+        ServerMessage::Hello { .. } | ServerMessage::Rejected { .. } => {}
+    }
+    true
+}
+
+fn disconnected(inner: &ClientInner) {
     inner.disconnected.store(true, Ordering::Release);
     let pending = std::mem::take(&mut *inner.pending.lock());
     for (_, response) in pending {
@@ -374,60 +522,8 @@ fn run_client(
     inner.task_state_subscribers.lock().clear();
 }
 
-fn set_client_read_timeout(
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    timeout: Option<Duration>,
-) -> io::Result<()> {
-    match socket.get_mut() {
-        MaybeTlsStream::Plain(stream) => stream.set_read_timeout(timeout),
-        MaybeTlsStream::Rustls(stream) => stream.sock.set_read_timeout(timeout),
-        #[allow(unreachable_patterns)]
-        _ => Ok(()),
-    }
-}
-
-fn retryable_io(error: &io::Error) -> bool {
-    retryable_error(error)
-}
-
-fn retryable_error(error: &(dyn std::error::Error + 'static)) -> bool {
-    if let Some(error) = error.downcast_ref::<io::Error>() {
-        if matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-        ) {
-            return true;
-        }
-        #[cfg(unix)]
-        if error.raw_os_error() == Some(libc::EAGAIN)
-            || error.raw_os_error() == Some(libc::EWOULDBLOCK)
-        {
-            return true;
-        }
-    }
-    error.source().is_some_and(retryable_error)
-}
-
-fn write_json<S: io::Read + io::Write, T: serde::Serialize>(
-    socket: &mut WebSocket<S>,
-    value: &T,
-) -> anyhow::Result<()> {
-    let payload = serde_json::to_string(value)?;
-    socket.send(Message::Text(payload.into()))?;
-    Ok(())
-}
-
-fn read_server_message(
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-) -> anyhow::Result<ServerMessage> {
-    loop {
-        match socket.read()? {
-            Message::Text(text) => return Ok(serde_json::from_str(text.as_ref())?),
-            Message::Ping(_) => socket.flush()?,
-            Message::Close(_) => bail!("Waku daemon closed during handshake"),
-            _ => {}
-        }
-    }
+fn text_message<T: serde::Serialize>(value: &T) -> anyhow::Result<Message> {
+    Ok(Message::Text(serde_json::to_string(value)?.into()))
 }
 
 #[cfg(test)]

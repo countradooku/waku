@@ -1,36 +1,56 @@
+//! The daemon's WebSocket server.
+//!
+//! The transport is evented (#18). One small multi-thread tokio runtime owns
+//! the accept loop, a reader and a writer task per connection, and the
+//! keepalive timers; nothing polls. Backend requests are synchronous (git,
+//! filesystem, SQLite, provider probes) and run on that runtime's blocking
+//! pool, which reuses a bounded set of threads instead of spawning one per
+//! request. Runtime-targeted commands keep their per-session order through an
+//! async mailbox that holds no thread while it waits.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
-use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-use parking_lot::Mutex;
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt as _, StreamExt as _};
+use parking_lot::{Condvar, Mutex};
 use subtle::ConstantTimeEq as _;
-use tungstenite::handshake::server::{
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::{Notify, mpsc, oneshot};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
 };
-use tungstenite::http::{StatusCode, header::ORIGIN};
-use tungstenite::protocol::WebSocketConfig;
-use tungstenite::{Message, WebSocket, accept_hdr_with_config};
+use tokio_tungstenite::tungstenite::http::{StatusCode, header::ORIGIN};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::{self, Message};
 use uuid::Uuid;
 
 use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
-use crate::protocol::MAX_WIRE_MESSAGE_BYTES;
 use crate::protocol::{
-    ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
-    ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireDriverEvent,
+    ClientMessage, Command, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, MAX_WIRE_MESSAGE_BYTES,
+    PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome, ResponsePayload, RpcError,
+    SequencedEvent, ServerMessage, WireDriverEvent,
 };
 
-const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// A socket write that makes no progress for this long means the client is
 /// not reading. Keeping the connection would let its event queue grow without
 /// bound, so it is dropped; clients reconnect and resume from their cursors.
 const SOCKET_WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// The WebSocket upgrade and the client's hello must both arrive within this.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024;
+/// Bytes a connection may send before it has authenticated: the HTTP upgrade
+/// request plus a hello. Anything beyond that is refused unread, so an
+/// unauthenticated peer cannot make the daemon buffer a large message.
+const MAX_PRE_AUTH_BYTES: usize = MAX_HANDSHAKE_MESSAGE_BYTES + 16 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const MAX_REPLAY_EVENTS_PER_SESSION: usize = 2048;
 /// Per-subscriber cap on queued daemon messages. A subscriber that falls this
@@ -48,6 +68,20 @@ const MAX_CACHED_RESPONSES: usize = 2048;
 const MAX_CACHED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const NATIVE_CLIENT_HEADER: &str = "x-waku-client";
 const NATIVE_CLIENT_HEADER_VALUE: &str = "native";
+/// Async workers only move frames between sockets and queues; two keep one
+/// connection's burst from delaying another's reply.
+const TRANSPORT_WORKERS: usize = 2;
+/// Cap on threads running blocking backend work at once (git, filesystem,
+/// SQLite, provider probes). Further requests queue for a free thread.
+const MAX_BLOCKING_THREADS: usize = 64;
+/// An idle blocking thread exits after this, so a burst of requests does not
+/// leave a crowd of parked threads behind.
+const BLOCKING_THREAD_KEEP_ALIVE: Duration = Duration::from_secs(30);
+/// How long [`serve`] waits for in-flight work when it stops.
+const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+/// Queued messages written before one flush, so a burst of events costs one
+/// socket write rather than one per event.
+const MAX_MESSAGES_PER_FLUSH: usize = 64;
 
 #[derive(Clone, Debug, Default)]
 pub struct ServerOptions {
@@ -61,7 +95,92 @@ pub struct ServerOptions {
     pub allow_shutdown: bool,
 }
 
+/// Stops [`serve`]. Triggering it wakes the accept loop and every connection
+/// immediately; nothing polls a flag.
+#[derive(Clone, Default)]
+pub struct ShutdownSignal {
+    inner: Arc<ShutdownState>,
+}
+
+#[derive(Default)]
+struct ShutdownState {
+    triggered: AtomicBool,
+    notify: Notify,
+    lock: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl ShutdownSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn trigger(&self) {
+        if self.inner.triggered.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.inner.notify.notify_waiters();
+        // Taking the lock orders this wakeup after a waiter's check of the
+        // flag, so `wait_timeout` cannot miss it.
+        let _guard = self.inner.lock.lock();
+        self.inner.condvar.notify_all();
+    }
+
+    pub fn is_triggered(&self) -> bool {
+        self.inner.triggered.load(Ordering::Acquire)
+    }
+
+    /// Block a plain thread until the signal fires or `timeout` passes.
+    /// Returns whether it fired.
+    pub fn wait_timeout(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.inner.lock.lock();
+        while !self.is_triggered() {
+            if self
+                .inner
+                .condvar
+                .wait_until(&mut guard, deadline)
+                .timed_out()
+            {
+                return self.is_triggered();
+            }
+        }
+        true
+    }
+
+    /// Block a plain thread until the signal fires.
+    pub fn wait(&self) {
+        let mut guard = self.inner.lock.lock();
+        while !self.is_triggered() {
+            self.inner.condvar.wait(&mut guard);
+        }
+    }
+
+    pub async fn triggered(&self) {
+        loop {
+            let notified = self.inner.notify.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_triggered() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 struct ConnectionPermit(Arc<AtomicUsize>);
+
+impl ConnectionPermit {
+    fn acquire(active: &Arc<AtomicUsize>) -> Option<Self> {
+        active
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_CONNECTIONS).then_some(count + 1)
+            })
+            .ok()
+            .map(|_| Self(active.clone()))
+    }
+}
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
@@ -99,19 +218,29 @@ impl EventSink {
     }
 }
 
+/// A connection's outgoing queue. Hub fan-out and request workers push into
+/// it; the connection's writer task drains it.
+type Outgoing = mpsc::Sender<ServerMessage>;
+
 /// One connected client's delivery state.
 struct Subscriber {
-    messages: Sender<ServerMessage>,
-    /// Signalled when the subscriber falls too far behind and is dropped from
-    /// the hub. The connection polls it and closes, letting the client
-    /// reconnect and resume from its last replayed cursor.
-    kicked: Sender<()>,
+    messages: Outgoing,
+    /// Fired when the subscriber falls too far behind and is dropped from the
+    /// hub. The connection closes, letting the client reconnect and resume
+    /// from its last replayed cursor.
+    kicked: Option<oneshot::Sender<()>>,
 }
 
 impl Subscriber {
-    fn new(messages: Sender<ServerMessage>) -> (Self, Receiver<()>) {
-        let (kicked, kicked_rx) = unbounded();
-        (Self { messages, kicked }, kicked_rx)
+    fn new(messages: Outgoing) -> (Self, oneshot::Receiver<()>) {
+        let (kicked, kicked_rx) = oneshot::channel();
+        (
+            Self {
+                messages,
+                kicked: Some(kicked),
+            },
+            kicked_rx,
+        )
     }
 }
 
@@ -189,18 +318,19 @@ impl Default for Hub {
 
 struct DispatchedRequest {
     request: Request,
-    outgoing: Sender<ServerMessage>,
+    outgoing: Outgoing,
     source_subscriber_id: u64,
 }
 
 struct RuntimeMailbox {
     id: Uuid,
-    sender: Sender<DispatchedRequest>,
+    sender: mpsc::UnboundedSender<DispatchedRequest>,
 }
 
 struct RequestDispatcher {
     backend: Arc<dyn Backend>,
     hub: Arc<Hub>,
+    runtime: tokio::runtime::Handle,
     /// A live provider runtime is an actor owned by the daemon, not by any
     /// particular WebSocket connection. One mailbox per session preserves
     /// lifecycle order across desktop and web clients without serializing
@@ -296,10 +426,9 @@ impl Hub {
                 .map(|cursor| cursor.sequence)
                 .unwrap_or_default();
             for event in events.iter().filter(|event| event.sequence > sequence) {
-                if messages.len() >= MAX_QUEUED_MESSAGES_PER_SUBSCRIBER
-                    || messages
-                        .try_send(ServerMessage::Event(event.clone()))
-                        .is_err()
+                if messages
+                    .try_send(ServerMessage::Event(event.clone()))
+                    .is_err()
                 {
                     return id;
                 }
@@ -323,15 +452,18 @@ impl Hub {
             if Some(subscriber_id) == skip {
                 continue;
             }
-            if subscriber.messages.len() >= MAX_QUEUED_MESSAGES_PER_SUBSCRIBER
-                || subscriber.messages.try_send(message.clone()).is_err()
-            {
-                overwhelmed.push((subscriber_id, subscriber.kicked.clone()));
+            if subscriber.messages.try_send(message.clone()).is_err() {
+                overwhelmed.push(subscriber_id);
             }
         }
-        for (subscriber_id, kicked) in overwhelmed {
-            state.subscribers.remove(&subscriber_id);
-            let _ = kicked.send(());
+        for subscriber_id in overwhelmed {
+            if let Some(kicked) = state
+                .subscribers
+                .remove(&subscriber_id)
+                .and_then(|subscriber| subscriber.kicked)
+            {
+                let _ = kicked.send(());
+            }
         }
     }
 
@@ -428,20 +560,16 @@ impl Hub {
 }
 
 impl RequestDispatcher {
-    fn new(backend: Arc<dyn Backend>, hub: Arc<Hub>) -> Self {
+    fn new(backend: Arc<dyn Backend>, hub: Arc<Hub>, runtime: tokio::runtime::Handle) -> Self {
         Self {
             backend,
             hub,
+            runtime,
             runtime_mailboxes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn dispatch(
-        &self,
-        request: Request,
-        outgoing: Sender<ServerMessage>,
-        source_subscriber_id: u64,
-    ) {
+    fn dispatch(&self, request: Request, outgoing: Outgoing, source_subscriber_id: u64) {
         profile_span!(DEBUG, "dispatch");
         if command_targets_runtime(&request.command) {
             self.dispatch_runtime(request, outgoing, source_subscriber_id);
@@ -450,103 +578,90 @@ impl RequestDispatcher {
         }
     }
 
+    /// Read-only and session-independent requests run concurrently on the
+    /// blocking pool, so a slow probe never delays a hydration.
     fn dispatch_independent(
         &self,
         request: Request,
-        outgoing: Sender<ServerMessage>,
+        outgoing: Outgoing,
         source_subscriber_id: u64,
     ) {
         let backend = self.backend.clone();
         let hub = self.hub.clone();
-        let failed_request_id = request.request_id;
-        let failed_outgoing = outgoing.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name("waku-daemon-request".into())
-            .spawn(move || {
-                handle_request(request, outgoing, source_subscriber_id, backend, hub);
-            })
-        {
-            send_dispatch_error(
-                failed_request_id,
-                failed_outgoing,
-                &self.hub,
-                format!("could not start daemon request worker: {error}"),
-            );
-        }
+        self.runtime.spawn_blocking(move || {
+            handle_request(request, outgoing, source_subscriber_id, backend, hub);
+        });
     }
 
-    fn dispatch_runtime(
-        &self,
-        request: Request,
-        outgoing: Sender<ServerMessage>,
-        source_subscriber_id: u64,
-    ) {
+    fn dispatch_runtime(&self, request: Request, outgoing: Outgoing, source_subscriber_id: u64) {
         let session_id = request.session_id;
-        let failed_request_id = request.request_id;
-        let failed_outgoing = outgoing.clone();
         let mut dispatched = DispatchedRequest {
             request,
             outgoing,
             source_subscriber_id,
         };
-        loop {
-            let mut mailboxes = self.runtime_mailboxes.lock();
-            if let Some(mailbox) = mailboxes.get(&session_id) {
-                match mailbox.sender.send(dispatched) {
-                    Ok(()) => return,
-                    Err(error) => {
-                        dispatched = error.0;
-                        mailboxes.remove(&session_id);
-                        continue;
-                    }
-                }
-            }
-
-            let mailbox_id = Uuid::new_v4();
-            let (sender, requests) = unbounded();
-            sender
-                .send(dispatched)
-                .expect("a new runtime mailbox still has its receiver");
-            mailboxes.insert(
-                session_id,
-                RuntimeMailbox {
-                    id: mailbox_id,
-                    sender,
-                },
-            );
-
-            let backend = self.backend.clone();
-            let hub = self.hub.clone();
-            let mailbox_registry = Arc::downgrade(&self.runtime_mailboxes);
-            let worker = std::thread::Builder::new()
-                .name(format!("waku-daemon-runtime-{session_id}"))
-                .spawn(move || {
-                    run_runtime_mailbox(
-                        session_id,
-                        mailbox_id,
-                        requests,
-                        mailbox_registry,
-                        backend,
-                        hub,
-                    );
-                });
-            if let Err(error) = worker {
-                if mailboxes
-                    .get(&session_id)
-                    .is_some_and(|mailbox| mailbox.id == mailbox_id)
-                {
+        let mut mailboxes = self.runtime_mailboxes.lock();
+        if let Some(mailbox) = mailboxes.get(&session_id) {
+            match mailbox.sender.send(dispatched) {
+                Ok(()) => return,
+                Err(error) => {
+                    // The previous actor exited (its backend call panicked);
+                    // a successor picks the request up.
+                    dispatched = error.0;
                     mailboxes.remove(&session_id);
                 }
-                drop(mailboxes);
-                send_dispatch_error(
-                    failed_request_id,
-                    failed_outgoing,
-                    &self.hub,
-                    format!("could not start runtime worker: {error}"),
-                );
             }
-            return;
         }
+
+        let mailbox_id = Uuid::new_v4();
+        let (sender, requests) = mpsc::unbounded_channel();
+        sender
+            .send(dispatched)
+            .expect("a new runtime mailbox still has its receiver");
+        mailboxes.insert(
+            session_id,
+            RuntimeMailbox {
+                id: mailbox_id,
+                sender,
+            },
+        );
+        drop(mailboxes);
+        self.runtime.spawn(run_runtime_mailbox(
+            session_id,
+            mailbox_id,
+            requests,
+            Arc::downgrade(&self.runtime_mailboxes),
+            self.backend.clone(),
+            self.hub.clone(),
+        ));
+    }
+}
+
+/// Everything a connection task needs from the server.
+struct ServerContext {
+    token: String,
+    dispatcher: Arc<RequestDispatcher>,
+    hub: Arc<Hub>,
+    shutdown: ShutdownSignal,
+    options: ServerOptions,
+    active_connections: Arc<AtomicUsize>,
+}
+
+impl ServerContext {
+    fn spawn_connection<S>(self: &Arc<Self>, stream: S)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let Some(permit) = ConnectionPermit::acquire(&self.active_connections) else {
+            return;
+        };
+        let context = self.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(error) = handle_connection(stream, &context).await {
+                eprintln!("waku-daemon connection ended: {error:#}");
+            }
+        });
     }
 }
 
@@ -554,183 +669,376 @@ pub fn serve(
     listener: TcpListener,
     token: String,
     backend: Arc<dyn Backend>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: ShutdownSignal,
     options: ServerOptions,
 ) -> anyhow::Result<()> {
     listener
         .set_nonblocking(true)
         .context("could not configure Waku daemon listener")?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(TRANSPORT_WORKERS)
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .thread_keep_alive(BLOCKING_THREAD_KEEP_ALIVE)
+        .thread_name("waku-daemon-worker")
+        .enable_all()
+        .build()
+        .context("could not start the Waku daemon runtime")?;
     let hub = Arc::new(Hub::default());
-    let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
-    let options = Arc::new(options);
-    let active_connections = Arc::new(AtomicUsize::new(0));
-    while !shutdown.load(Ordering::Acquire) {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                if active_connections
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                        (active < MAX_CONNECTIONS).then_some(active + 1)
-                    })
-                    .is_err()
-                {
-                    continue;
-                }
-                let connection_permit = ConnectionPermit(active_connections.clone());
-                let token = token.clone();
-                let dispatcher = dispatcher.clone();
-                let hub = hub.clone();
-                let shutdown = shutdown.clone();
-                let options = options.clone();
-                std::thread::Builder::new()
-                    .name("waku-daemon-connection".into())
-                    .spawn(move || {
-                        let _connection_permit = connection_permit;
-                        if let Err(error) =
-                            handle_connection(stream, &token, dispatcher, hub, shutdown, &options)
-                        {
-                            eprintln!("waku-daemon connection ended: {error:#}");
-                        }
-                    })
-                    .context("could not start Waku daemon connection thread")?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(ACCEPT_POLL_INTERVAL);
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error).context("Waku daemon listener failed"),
-        }
-    }
+    let dispatcher = Arc::new(RequestDispatcher::new(
+        backend.clone(),
+        hub.clone(),
+        runtime.handle().clone(),
+    ));
+    let context = Arc::new(ServerContext {
+        token,
+        dispatcher,
+        hub,
+        shutdown,
+        options,
+        active_connections: Arc::new(AtomicUsize::new(0)),
+    });
+    let result = runtime.block_on(accept_tcp(listener, context));
     backend.shutdown();
-    Ok(())
+    // Connections still open are dropped with the runtime, which closes their
+    // sockets so clients see the daemon go away at once.
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_GRACE);
+    result
 }
 
-fn handle_connection(
-    stream: TcpStream,
-    expected_token: &str,
-    dispatcher: Arc<RequestDispatcher>,
-    hub: Arc<Hub>,
-    shutdown: Arc<AtomicBool>,
-    options: &ServerOptions,
-) -> anyhow::Result<()> {
-    // Accepted sockets can inherit the listener's nonblocking flag on some
-    // platforms. The handshake is deliberately blocking; steady-state reads
-    // get their bounded polling behavior from SO_RCVTIMEO below.
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+async fn accept_tcp(listener: TcpListener, context: Arc<ServerContext>) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .context("could not register Waku daemon listener")?;
+    loop {
+        let accepted = tokio::select! {
+            () = context.shutdown.triggered() => return Ok(()),
+            accepted = listener.accept() => accepted,
+        };
+        match accepted {
+            Ok((stream, _)) => {
+                // Replies are small and latency-bound; never wait for Nagle.
+                let _ = stream.set_nodelay(true);
+                context.spawn_connection(stream);
+            }
+            Err(error) => accept_failed(error).await?,
+        }
+    }
+}
+
+/// Transient accept failures are retried; anything else stops the server.
+async fn accept_failed(error: io::Error) -> anyhow::Result<()> {
+    match error.kind() {
+        io::ErrorKind::Interrupted
+        | io::ErrorKind::WouldBlock
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::ConnectionReset => Ok(()),
+        // Out of descriptors: back off briefly instead of spinning, and keep
+        // the daemon (and every live runtime) up.
+        _ if is_descriptor_exhaustion(&error) => {
+            eprintln!("waku-daemon could not accept a connection: {error}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(())
+        }
+        _ => Err(error).context("Waku daemon listener failed"),
+    }
+}
+
+fn is_descriptor_exhaustion(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// How a connection's reader stopped.
+enum ReaderExit {
+    Closed,
+    /// The client asked a desktop-owned daemon to stop.
+    Shutdown,
+}
+
+async fn handle_connection<S>(stream: S, context: &ServerContext) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let budget = Arc::new(AtomicUsize::new(MAX_PRE_AUTH_BYTES));
+    let stream = PreAuthLimit {
+        inner: stream,
+        remaining: budget.clone(),
+    };
     let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_HANDSHAKE_MESSAGE_BYTES))
-        .max_frame_size(Some(MAX_HANDSHAKE_MESSAGE_BYTES));
-    let allowed_origins = options.allowed_origins.clone();
-    let mut socket = accept_hdr_with_config(
-        stream,
-        move |request: &HandshakeRequest, response: HandshakeResponse| {
-            validate_handshake(request, response, &allowed_origins)
-        },
-        Some(config),
-    )
-    .context("WebSocket handshake failed")?;
-    let hello = read_client_message(&mut socket)?;
+        .max_message_size(Some(MAX_WIRE_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_WIRE_MESSAGE_BYTES));
+    let allowed_origins = context.options.allowed_origins.clone();
+    let handshake = async {
+        let mut socket = tokio_tungstenite::accept_hdr_async_with_config(
+            stream,
+            move |request: &HandshakeRequest, response: HandshakeResponse| {
+                validate_handshake(request, response, &allowed_origins)
+            },
+            Some(config),
+        )
+        .await
+        .context("WebSocket handshake failed")?;
+        let hello = read_client_message(&mut socket).await?;
+        anyhow::Ok((socket, hello))
+    };
+    let (mut socket, hello) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+        .await
+        .context("daemon handshake timed out")??;
     let resume_from = match hello {
         ClientMessage::Hello {
             protocol_version,
             token,
             resume_from,
             ..
-        } if protocol_version == PROTOCOL_VERSION && token_matches(expected_token, &token) => {
+        } if protocol_version == PROTOCOL_VERSION && token_matches(&context.token, &token) => {
             resume_from
         }
         ClientMessage::Hello {
             protocol_version, ..
         } if protocol_version != PROTOCOL_VERSION => {
-            write_json(
+            send_now(
                 &mut socket,
                 &ServerMessage::Rejected {
                     message: format!(
                         "protocol {protocol_version} is unsupported; expected {PROTOCOL_VERSION}"
                     ),
                 },
-            )?;
+            )
+            .await?;
             return Ok(());
         }
         ClientMessage::Hello { .. } => {
-            write_json(
+            send_now(
                 &mut socket,
                 &ServerMessage::Rejected {
                     message: "authentication failed".into(),
                 },
-            )?;
+            )
+            .await?;
             return Ok(());
         }
         _ => bail!("first daemon message was not a hello"),
     };
-    write_json(
+    budget.store(usize::MAX, Ordering::Release);
+    send_now(
         &mut socket,
         &ServerMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
         },
-    )?;
-    socket.set_config(|config| {
-        config.max_message_size = Some(MAX_WIRE_MESSAGE_BYTES);
-        config.max_frame_size = Some(MAX_WIRE_MESSAGE_BYTES);
-    });
-    socket
-        .get_mut()
-        .set_read_timeout(Some(SOCKET_POLL_INTERVAL))?;
-    // A client that stops reading must not let its outgoing queue grow at the
-    // daemon's event rate; a write stalled past this timeout drops it.
-    socket
-        .get_mut()
-        .set_write_timeout(Some(SOCKET_WRITE_STALL_TIMEOUT))?;
+    )
+    .await?;
 
-    let (outgoing, outgoing_rx) = bounded(MAX_QUEUED_MESSAGES_PER_SUBSCRIBER);
-    let (subscriber, kicked) = Subscriber::new(outgoing.clone());
-    let subscriber_id = hub.subscribe(&resume_from, subscriber);
+    let (outgoing, outgoing_rx) = mpsc::channel(MAX_QUEUED_MESSAGES_PER_SUBSCRIBER);
+    let (subscriber, mut kicked) = Subscriber::new(outgoing.clone());
+    let subscriber_id = context.hub.subscribe(&resume_from, subscriber);
+    let (sink, stream) = socket.split();
+    let mut writer = tokio::spawn(write_outgoing(sink, outgoing_rx));
+    let exit = tokio::select! {
+        exit = read_incoming(stream, &outgoing, subscriber_id, context) => exit,
+        _ = &mut kicked => Ok(ReaderExit::Closed),
+        () = context.shutdown.triggered() => Ok(ReaderExit::Closed),
+        written = &mut writer => {
+            context.hub.unsubscribe(subscriber_id);
+            return written.unwrap_or(Ok(()));
+        }
+    };
+    context.hub.unsubscribe(subscriber_id);
+    drop(outgoing);
+    if matches!(exit, Ok(ReaderExit::Shutdown)) {
+        // The writer stops right after flushing `ShuttingDown`, so the
+        // desktop sees the acknowledgement before the daemon goes away.
+        let _ = tokio::time::timeout(SOCKET_WRITE_STALL_TIMEOUT, &mut writer).await;
+        context.shutdown.trigger();
+    }
+    writer.abort();
+    exit.map(|_| ())
+}
 
-    'connection: while !shutdown.load(Ordering::Acquire) {
-        if kicked.try_recv().is_ok() {
-            break;
-        }
-        while let Ok(message) = outgoing_rx.try_recv() {
-            if write_json(&mut socket, &message).is_err() {
-                break 'connection;
+type ServerSink<S> = SplitSink<WebSocketStream<PreAuthLimit<S>>, Message>;
+type ServerStream<S> = SplitStream<WebSocketStream<PreAuthLimit<S>>>;
+
+/// Drains the connection's queue onto the socket. Waits on the queue without
+/// a timeout except for keepalive: after `KEEPALIVE_INTERVAL` with nothing to
+/// send it writes a ping, which also keeps the peer's dead-connection timer
+/// fed.
+async fn write_outgoing<S>(
+    mut sink: ServerSink<S>,
+    mut outgoing: mpsc::Receiver<ServerMessage>,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let message = match tokio::time::timeout(KEEPALIVE_INTERVAL, outgoing.recv()).await {
+            Ok(Some(message)) => message,
+            Ok(None) => return Ok(()),
+            Err(_) => {
+                within_stall(sink.send(Message::Ping(Default::default()))).await?;
+                continue;
             }
+        };
+        let mut shutting_down = matches!(message, ServerMessage::ShuttingDown);
+        within_stall(sink.feed(text_message(&message)?)).await?;
+        let mut batched = 1;
+        while !shutting_down && batched < MAX_MESSAGES_PER_FLUSH {
+            let Ok(message) = outgoing.try_recv() else {
+                break;
+            };
+            shutting_down = matches!(message, ServerMessage::ShuttingDown);
+            within_stall(sink.feed(text_message(&message)?)).await?;
+            batched += 1;
         }
-        match socket.read() {
-            Ok(Message::Text(text)) => match serde_json::from_str(text.as_ref()) {
-                Ok(ClientMessage::Request(request)) => {
-                    dispatcher.dispatch(request, outgoing.clone(), subscriber_id);
-                }
-                Ok(ClientMessage::Shutdown) => {
-                    if options.allow_shutdown {
-                        write_json(&mut socket, &ServerMessage::ShuttingDown)?;
-                        shutdown.store(true, Ordering::Release);
-                        break;
-                    }
-                    write_json(
-                        &mut socket,
-                        &ServerMessage::Rejected {
-                            message: "daemon shutdown is managed by its service owner".into(),
-                        },
-                    )?;
-                }
-                Ok(ClientMessage::Hello { .. }) => {}
-                Err(error) => {
-                    eprintln!("waku-daemon ignored invalid message: {error}");
-                }
-            },
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) => {
-                let _ = socket.flush();
-            }
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(error)) if retryable_io(&error) => {}
-            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => break,
-            Err(error) => return Err(error).context("Waku daemon WebSocket failed"),
+        within_stall(sink.flush()).await?;
+        if shutting_down {
+            return Ok(());
         }
     }
-    hub.unsubscribe(subscriber_id);
-    Ok(())
+}
+
+async fn within_stall<T>(
+    write: impl Future<Output = Result<T, tungstenite::Error>>,
+) -> anyhow::Result<T> {
+    tokio::time::timeout(SOCKET_WRITE_STALL_TIMEOUT, write)
+        .await
+        .context("client stopped reading")?
+        .context("Waku daemon WebSocket write failed")
+}
+
+async fn read_incoming<S>(
+    mut stream: ServerStream<S>,
+    outgoing: &Outgoing,
+    subscriber_id: u64,
+    context: &ServerContext,
+) -> anyhow::Result<ReaderExit>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let Ok(next) = tokio::time::timeout(KEEPALIVE_TIMEOUT, stream.next()).await else {
+            bail!(
+                "client sent nothing for {}s, not even a pong",
+                KEEPALIVE_TIMEOUT.as_secs()
+            );
+        };
+        let message = match next {
+            None => return Ok(ReaderExit::Closed),
+            Some(Err(error)) if connection_closed(&error) => return Ok(ReaderExit::Closed),
+            Some(Err(error)) => return Err(error).context("Waku daemon WebSocket failed"),
+            Some(Ok(message)) => message,
+        };
+        let text = match message {
+            Message::Text(text) => text,
+            Message::Close(_) => return Ok(ReaderExit::Closed),
+            // Pings are answered by the WebSocket layer; pongs only need to
+            // arrive to reset the timeout above.
+            _ => continue,
+        };
+        match serde_json::from_str(text.as_str()) {
+            Ok(ClientMessage::Request(request)) => {
+                context
+                    .dispatcher
+                    .dispatch(request, outgoing.clone(), subscriber_id);
+            }
+            Ok(ClientMessage::Shutdown) => {
+                if context.options.allow_shutdown {
+                    let _ = outgoing.send(ServerMessage::ShuttingDown).await;
+                    return Ok(ReaderExit::Shutdown);
+                }
+                let _ = outgoing
+                    .send(ServerMessage::Rejected {
+                        message: "daemon shutdown is managed by its service owner".into(),
+                    })
+                    .await;
+            }
+            Ok(ClientMessage::Hello { .. }) => {}
+            Err(error) => {
+                eprintln!("waku-daemon ignored invalid message: {error}");
+            }
+        }
+    }
+}
+
+fn connection_closed(error: &tungstenite::Error) -> bool {
+    matches!(
+        error,
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed
+    )
+}
+
+/// Caps what a peer can make the daemon read before it has authenticated.
+/// `remaining` is lifted to `usize::MAX` once the hello checks out.
+struct PreAuthLimit<S> {
+    inner: S,
+    remaining: Arc<AtomicUsize>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PreAuthLimit<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let remaining = self.remaining.load(Ordering::Acquire);
+        if remaining == usize::MAX {
+            return Pin::new(&mut self.inner).poll_read(cx, buf);
+        }
+        if remaining == 0 {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "client sent too much before authenticating",
+            )));
+        }
+        let read = if buf.remaining() <= remaining {
+            let before = buf.filled().len();
+            std::task::ready!(Pin::new(&mut self.inner).poll_read(cx, buf))?;
+            buf.filled().len() - before
+        } else {
+            let mut scratch = vec![0; remaining];
+            let mut limited = ReadBuf::new(&mut scratch);
+            std::task::ready!(Pin::new(&mut self.inner).poll_read(cx, &mut limited))?;
+            buf.put_slice(limited.filled());
+            limited.filled().len()
+        };
+        self.remaining.fetch_sub(read, Ordering::AcqRel);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PreAuthLimit<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
 }
 
 fn validate_handshake(
@@ -804,10 +1112,13 @@ fn command_targets_runtime(command: &Command) -> bool {
     )
 }
 
-fn run_runtime_mailbox(
+/// One session's ordered command stream. It runs each command on the
+/// blocking pool and awaits it before taking the next, so it holds no thread
+/// while it waits for work.
+async fn run_runtime_mailbox(
     session_id: Uuid,
     mailbox_id: Uuid,
-    requests: Receiver<DispatchedRequest>,
+    mut requests: mpsc::UnboundedReceiver<DispatchedRequest>,
     mailbox_registry: Weak<Mutex<HashMap<Uuid, RuntimeMailbox>>>,
     backend: Arc<dyn Backend>,
     hub: Arc<Hub>,
@@ -817,9 +1128,9 @@ fn run_runtime_mailbox(
     loop {
         let dispatched = match pending.take() {
             Some(request) => request,
-            None => match requests.recv() {
-                Ok(request) => request,
-                Err(_) => return,
+            None => match requests.recv().await {
+                Some(request) => request,
+                None => return,
             },
         };
         let runtime_id = dispatched.request.runtime_id;
@@ -832,13 +1143,23 @@ fn run_runtime_mailbox(
             Command::CloseSession | Command::CloseTerminal | Command::RemoveSession
         );
         let removes_session = matches!(&dispatched.request.command, Command::RemoveSession);
-        let handled = handle_request(
-            dispatched.request,
-            dispatched.outgoing,
-            dispatched.source_subscriber_id,
-            backend.clone(),
-            hub.clone(),
-        );
+        let worker_backend = backend.clone();
+        let worker_hub = hub.clone();
+        let Ok(handled) = tokio::task::spawn_blocking(move || {
+            handle_request(
+                dispatched.request,
+                dispatched.outgoing,
+                dispatched.source_subscriber_id,
+                worker_backend,
+                worker_hub,
+            )
+        })
+        .await
+        else {
+            // The backend panicked or the server is stopping. Dropping the
+            // receiver makes the next dispatch start a fresh mailbox.
+            return;
+        };
 
         if handled.executed {
             if starts_runtime {
@@ -878,8 +1199,12 @@ fn run_runtime_mailbox(
         }
 
         if active_runtime_id.is_none() {
-            pending =
-                take_queued_request_or_retire(session_id, mailbox_id, &requests, &mailbox_registry);
+            pending = take_queued_request_or_retire(
+                session_id,
+                mailbox_id,
+                &mut requests,
+                &mailbox_registry,
+            );
             if pending.is_none() {
                 return;
             }
@@ -890,7 +1215,7 @@ fn run_runtime_mailbox(
 fn take_queued_request_or_retire(
     session_id: Uuid,
     mailbox_id: Uuid,
-    requests: &Receiver<DispatchedRequest>,
+    requests: &mut mpsc::UnboundedReceiver<DispatchedRequest>,
     mailbox_registry: &Weak<Mutex<HashMap<Uuid, RuntimeMailbox>>>,
 ) -> Option<DispatchedRequest> {
     let Some(mailbox_registry) = mailbox_registry.upgrade() else {
@@ -902,7 +1227,7 @@ fn take_queued_request_or_retire(
     let mut mailboxes = mailbox_registry.lock();
     match requests.try_recv() {
         Ok(request) => Some(request),
-        Err(crossbeam_channel::TryRecvError::Empty) => {
+        Err(mpsc::error::TryRecvError::Empty) => {
             if mailboxes
                 .get(&session_id)
                 .is_some_and(|mailbox| mailbox.id == mailbox_id)
@@ -911,7 +1236,7 @@ fn take_queued_request_or_retire(
             }
             None
         }
-        Err(crossbeam_channel::TryRecvError::Disconnected) => None,
+        Err(mpsc::error::TryRecvError::Disconnected) => None,
     }
 }
 
@@ -927,9 +1252,11 @@ enum TaskCatalogAction {
     Changed,
 }
 
+/// Runs one request on the calling (blocking-pool) thread and queues its
+/// response on the connection that sent it.
 fn handle_request(
     request: Request,
-    outgoing: Sender<ServerMessage>,
+    outgoing: Outgoing,
     source_subscriber_id: u64,
     backend: Arc<dyn Backend>,
     hub: Arc<Hub>,
@@ -989,7 +1316,9 @@ fn handle_request(
         }
     }
     if !notification {
-        let _ = outgoing.send(ServerMessage::Response {
+        // A full queue means the connection is being kicked for falling
+        // behind; waiting here is bounded by its writer draining or closing.
+        let _ = outgoing.blocking_send(ServerMessage::Response {
             request_id,
             outcome: outcome.clone(),
         });
@@ -1010,66 +1339,30 @@ fn task_catalog_action(command: &Command) -> TaskCatalogAction {
     }
 }
 
-fn send_dispatch_error(
-    request_id: Uuid,
-    outgoing: Sender<ServerMessage>,
-    hub: &Arc<Hub>,
-    message: String,
-) {
-    if request_id.is_nil() {
-        return;
-    }
-    let outcome = hub
-        .cached_response(request_id)
-        .unwrap_or_else(|| ResponseOutcome::Error {
-            error: RpcError { message },
-        });
-    hub.cache_response(request_id, outcome.clone());
-    let _ = outgoing.send(ServerMessage::Response {
-        request_id,
-        outcome,
-    });
-}
-
-fn retryable_io(error: &io::Error) -> bool {
-    retryable_error(error)
-}
-
-fn retryable_error(error: &(dyn std::error::Error + 'static)) -> bool {
-    if let Some(error) = error.downcast_ref::<io::Error>() {
-        if matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-        ) {
-            return true;
-        }
-        #[cfg(unix)]
-        if error.raw_os_error() == Some(libc::EAGAIN)
-            || error.raw_os_error() == Some(libc::EWOULDBLOCK)
-        {
-            return true;
-        }
-    }
-    error.source().is_some_and(retryable_error)
-}
-
-fn read_client_message(socket: &mut WebSocket<TcpStream>) -> anyhow::Result<ClientMessage> {
+async fn read_client_message<S>(socket: &mut WebSocketStream<S>) -> anyhow::Result<ClientMessage>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     loop {
-        match socket.read()? {
-            Message::Text(text) => return Ok(serde_json::from_str(text.as_ref())?),
-            Message::Ping(_) => socket.flush()?,
-            Message::Close(_) => bail!("client closed during daemon handshake"),
-            _ => {}
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => return Ok(serde_json::from_str(text.as_str())?),
+            Some(Ok(Message::Close(_))) | None => bail!("client closed during daemon handshake"),
+            Some(Ok(_)) => {}
+            Some(Err(error)) => return Err(error.into()),
         }
     }
 }
 
-fn write_json<S: io::Read + io::Write, T: serde::Serialize>(
-    socket: &mut WebSocket<S>,
-    value: &T,
-) -> anyhow::Result<()> {
-    socket.send(Message::Text(serde_json::to_string(value)?.into()))?;
-    Ok(())
+fn text_message<T: serde::Serialize>(value: &T) -> anyhow::Result<Message> {
+    Ok(Message::Text(serde_json::to_string(value)?.into()))
+}
+
+async fn send_now<S, T>(socket: &mut WebSocketStream<S>, value: &T) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: serde::Serialize,
+{
+    within_stall(socket.send(text_message(value)?)).await
 }
 
 #[cfg(test)]
@@ -1087,10 +1380,57 @@ mod tests {
     use crate::{DaemonSettings, WireDriverStartOptions};
     #[cfg(unix)]
     use base64::Engine as _;
-    use crossbeam_channel::{RecvTimeoutError, bounded};
+    use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
     use serde_json::json;
     use std::path::PathBuf;
     use waku_client::{DaemonClient, DaemonSupervisor};
+
+    /// The receiving end of a connection queue, for driving the hub and the
+    /// dispatcher without a socket.
+    struct TestQueue(mpsc::Receiver<ServerMessage>);
+
+    impl TestQueue {
+        fn try_recv(&mut self) -> Result<ServerMessage, mpsc::error::TryRecvError> {
+            self.0.try_recv()
+        }
+
+        fn recv_timeout(&mut self, timeout: Duration) -> Result<ServerMessage, ()> {
+            let deadline = Instant::now() + timeout;
+            loop {
+                match self.0.try_recv() {
+                    Ok(message) => return Ok(message),
+                    Err(mpsc::error::TryRecvError::Disconnected) => return Err(()),
+                    Err(mpsc::error::TryRecvError::Empty) if Instant::now() >= deadline => {
+                        return Err(());
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            }
+        }
+
+        fn recv(&mut self) -> Result<ServerMessage, ()> {
+            self.recv_timeout(Duration::from_secs(5))
+        }
+    }
+
+    fn test_queue() -> (Outgoing, TestQueue) {
+        test_queue_with_capacity(MAX_QUEUED_MESSAGES_PER_SUBSCRIBER)
+    }
+
+    fn test_queue_with_capacity(capacity: usize) -> (Outgoing, TestQueue) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (sender, TestQueue(receiver))
+    }
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
 
     #[derive(Default)]
     struct TestBackend {
@@ -1166,9 +1506,9 @@ mod tests {
     #[test]
     fn task_state_revisions_notify_other_clients_only() {
         let hub = Hub::default();
-        let (source_tx, source_rx) = unbounded();
+        let (source_tx, mut source_rx) = test_queue();
         let source_id = hub.subscribe(&[], Subscriber::new(source_tx).0);
-        let (observer_tx, observer_rx) = unbounded();
+        let (observer_tx, mut observer_rx) = test_queue();
         hub.subscribe(&[], Subscriber::new(observer_tx).0);
 
         hub.task_state_changed(source_id);
@@ -1184,7 +1524,7 @@ mod tests {
     fn websocket_task_state_changes_reach_another_client() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             serve(
@@ -1308,7 +1648,7 @@ mod tests {
         .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             serve(
@@ -1375,7 +1715,7 @@ mod tests {
     fn websocket_round_trip_sequences_provider_events() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             serve(
@@ -1445,7 +1785,7 @@ mod tests {
     fn late_client_attaches_to_replay_and_live_runtime_events() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             serve(
@@ -1561,7 +1901,7 @@ mod tests {
         let replacement_listener = listener.try_clone().unwrap();
         let address = listener.local_addr().unwrap();
         let backend = Arc::new(TestBackend::default());
-        let first_shutdown = Arc::new(AtomicBool::new(false));
+        let first_shutdown = ShutdownSignal::new();
         let first_server = {
             let backend = backend.clone();
             let shutdown = first_shutdown.clone();
@@ -1604,10 +1944,10 @@ mod tests {
             )
             .unwrap();
 
-        first_shutdown.store(true, Ordering::Release);
+        first_shutdown.trigger();
         first_server.join().unwrap();
 
-        let second_shutdown = Arc::new(AtomicBool::new(false));
+        let second_shutdown = ShutdownSignal::new();
         let second_server = {
             let backend = backend.clone();
             let shutdown = second_shutdown.clone();
@@ -1635,7 +1975,7 @@ mod tests {
             } if attached == runtime_id
         ));
 
-        second_shutdown.store(true, Ordering::Release);
+        second_shutdown.trigger();
         second_server.join().unwrap();
     }
 
@@ -1700,7 +2040,7 @@ mod tests {
         )));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
         let server = std::thread::spawn(move || {
             serve(
@@ -1816,7 +2156,7 @@ mod tests {
 
     #[test]
     fn nil_request_ids_execute_without_responses_or_cache_entries() {
-        let (outgoing, responses) = unbounded();
+        let (outgoing, mut responses) = test_queue();
         let hub = Arc::new(Hub::default());
         let handled = handle_request(
             Request {
@@ -1882,6 +2222,49 @@ mod tests {
     }
 
     #[test]
+    fn unauthenticated_clients_cannot_send_more_than_a_hello() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = ShutdownSignal::new();
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(TestBackend::default()),
+                server_shutdown,
+                ServerOptions::default(),
+            )
+            .unwrap()
+        });
+
+        // A hello far larger than the pre-authentication budget is refused
+        // before the daemon buffers it, so the handshake fails.
+        let oversized = "x".repeat(MAX_PRE_AUTH_BYTES * 2);
+        assert!(DaemonClient::connect(&address.to_string(), oversized).is_err());
+        // An ordinary client is unaffected, and its requests are answered
+        // without the old 25 ms polling delay.
+        let client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let started = Instant::now();
+        for _ in 0..20 {
+            assert!(matches!(
+                client
+                    .request(Uuid::nil(), Uuid::nil(), Command::GetSettings)
+                    .unwrap(),
+                ResponsePayload::Settings { .. }
+            ));
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "20 round trips took {:?}",
+            started.elapsed()
+        );
+
+        shutdown.trigger();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn daemon_tokens_require_an_exact_match() {
         assert!(token_matches("secret", "secret"));
         assert!(!token_matches("secret", "Secret"));
@@ -1894,7 +2277,7 @@ mod tests {
         let session_id = Uuid::new_v4();
         let old_runtime_id = Uuid::new_v4();
         let new_runtime_id = Uuid::new_v4();
-        let (outgoing, events) = unbounded();
+        let (outgoing, mut events) = test_queue();
         hub.subscribe(&[], Subscriber::new(outgoing).0);
 
         hub.begin_runtime(session_id, old_runtime_id);
@@ -1934,7 +2317,7 @@ mod tests {
             .send(WireDriverEvent::new("new-daemon", serde_json::Value::Null))
             .unwrap();
 
-        let (outgoing, events) = unbounded();
+        let (outgoing, mut events) = test_queue();
         hub.subscribe(
             &[ReplayCursor {
                 session_id,
@@ -1958,8 +2341,8 @@ mod tests {
         let session_id = Uuid::new_v4();
         let runtime_id = Uuid::new_v4();
         // Capacity one and no drainer: the second queued message overflows.
-        let (outgoing, events) = bounded(1);
-        let (subscriber, kicked) = Subscriber::new(outgoing);
+        let (outgoing, mut events) = test_queue_with_capacity(1);
+        let (subscriber, mut kicked) = Subscriber::new(outgoing);
         hub.subscribe(&[], subscriber);
         hub.begin_runtime(session_id, runtime_id);
         let sink = hub.event_sink(session_id, runtime_id);
@@ -2027,7 +2410,7 @@ mod tests {
 
     #[test]
     fn slow_background_command_does_not_block_session_hydration() {
-        let (outgoing, response_rx) = unbounded();
+        let (outgoing, mut response_rx) = test_queue();
         let (probe_started, probe_started_rx) = bounded(1);
         let (release_probe, release_probe_rx) = bounded(1);
         let backend: Arc<dyn Backend> = Arc::new(BlockingProbeBackend {
@@ -2035,7 +2418,8 @@ mod tests {
             release_probe: release_probe_rx,
         });
         let hub = Arc::new(Hub::default());
-        let dispatcher = RequestDispatcher::new(backend, hub);
+        let runtime = test_runtime();
+        let dispatcher = RequestDispatcher::new(backend, hub, runtime.handle().clone());
 
         let probe_id = Uuid::new_v4();
         dispatcher.dispatch(
@@ -2117,6 +2501,7 @@ mod tests {
         let other_runtime_id = Uuid::new_v4();
         let (handled, handled_rx) = unbounded();
         let (release_start, release_start_rx) = bounded(1);
+        let runtime = test_runtime();
         let dispatcher = RequestDispatcher::new(
             Arc::new(RuntimeOrderingBackend {
                 blocked_session_id,
@@ -2124,10 +2509,11 @@ mod tests {
                 release_start: release_start_rx,
             }),
             Arc::new(Hub::default()),
+            runtime.handle().clone(),
         );
-        let (start_outgoing, start_responses) = unbounded();
-        let (second_client_outgoing, second_client_responses) = unbounded();
-        let (other_outgoing, other_responses) = unbounded();
+        let (start_outgoing, mut start_responses) = test_queue();
+        let (second_client_outgoing, mut second_client_responses) = test_queue();
+        let (other_outgoing, mut other_responses) = test_queue();
 
         let blocked_start_id = Uuid::new_v4();
         dispatcher.dispatch(

@@ -1,7 +1,6 @@
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow, bail};
@@ -29,19 +28,14 @@ fn main() -> anyhow::Result<()> {
     println!("{}", serde_json::to_string(&ready)?);
     std::io::stdout().flush()?;
 
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = waku_core::ShutdownSignal::new();
     if let Some(parent_pid) = arguments.parent_pid {
         let monitor_shutdown = shutdown.clone();
         std::thread::Builder::new()
             .name("waku-daemon-parent".into())
             .spawn(move || {
-                while !monitor_shutdown.load(Ordering::Acquire) {
-                    if !process_is_alive(parent_pid) {
-                        monitor_shutdown.store(true, Ordering::Release);
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(500));
-                }
+                wait_for_process_exit(parent_pid, &monitor_shutdown);
+                monitor_shutdown.trigger();
             })?;
     }
 
@@ -163,6 +157,95 @@ impl Arguments {
             allowed_origins,
             allow_non_loopback,
         })
+    }
+}
+
+/// How often the portable fallback checks whether the parent is still alive.
+const PARENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Block until `pid` exits or the daemon is already stopping. Where the
+/// kernel can report a process exit (kqueue on macOS, a pidfd on Linux) this
+/// sleeps without waking; elsewhere it polls.
+fn wait_for_process_exit(pid: u32, shutdown: &waku_core::ShutdownSignal) {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if wait_for_exit_event(pid).is_ok() {
+        return;
+    }
+    while !shutdown.wait_timeout(PARENT_POLL_INTERVAL) {
+        if !process_is_alive(pid) {
+            return;
+        }
+    }
+}
+
+/// kqueue's `EVFILT_PROC`/`NOTE_EXIT` fires once when the process exits. A
+/// parent that is already gone fails registration with `ESRCH`.
+#[cfg(target_os = "macos")]
+fn wait_for_exit_event(pid: u32) -> std::io::Result<()> {
+    unsafe {
+        let queue = libc::kqueue();
+        if queue < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut change: libc::kevent = std::mem::zeroed();
+        change.ident = pid as libc::uintptr_t;
+        change.filter = libc::EVFILT_PROC;
+        change.flags = libc::EV_ADD | libc::EV_ONESHOT;
+        change.fflags = libc::NOTE_EXIT;
+        let registered = libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null());
+        if registered < 0 {
+            let error = std::io::Error::last_os_error();
+            libc::close(queue);
+            return if error.raw_os_error() == Some(libc::ESRCH) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        let mut event: libc::kevent = std::mem::zeroed();
+        let result = loop {
+            if libc::kevent(queue, std::ptr::null(), 0, &mut event, 1, std::ptr::null()) > 0 {
+                break Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                break Err(error);
+            }
+        };
+        libc::close(queue);
+        result
+    }
+}
+
+/// A pidfd becomes readable when the process exits (Linux 5.3+).
+#[cfg(target_os = "linux")]
+fn wait_for_exit_event(pid: u32) -> std::io::Result<()> {
+    unsafe {
+        let fd = libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) as libc::c_int;
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ESRCH) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        let mut poll = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = loop {
+            if libc::poll(&mut poll, 1, -1) >= 0 {
+                break Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                break Err(error);
+            }
+        };
+        libc::close(fd);
+        result
     }
 }
 
