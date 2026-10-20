@@ -458,7 +458,9 @@ mod tests {
         fs::write(repo.0.join("nested/file"), "content\n").unwrap();
         let nested = repo.0.join("nested");
         let snapshot = status(&nested).unwrap();
-        assert_eq!(snapshot.repository, repo.0);
+        // `status` reports the canonical root; on Windows that is a verbatim
+        // long-name path while the temp dir may use an 8.3 short name.
+        assert_eq!(snapshot.repository, fs::canonicalize(&repo.0).unwrap());
         assert_eq!(snapshot.files[0].path, "nested/file");
         stage_files(&nested, &["nested/file".into()], true).unwrap();
         assert_eq!(status(&nested).unwrap().files[0].index_status, "A");
