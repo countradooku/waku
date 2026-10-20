@@ -37,6 +37,11 @@ workspace = true
 # subscriber. Off by default, and without it every span compiles to nothing.
 # Pair it with `--profile profiling`. See docs/performance.md.
 profiling = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-tracy"]
+# Frame, per-pane render, stream-commit, save and allocation counters (with a
+# counting global allocator), dumped as JSON to `WAKU_PERF_COUNTERS_OUT` and
+# shown next to the FPS counter. Off by default, and without it every counter
+# compiles to nothing. See docs/performance.md.
+perf-counters = []
 
 [dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }

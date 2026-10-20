@@ -38,6 +38,26 @@ macro_rules! profile_span {
     };
 }
 
+/// Bump a `perf-counters` counter: `perf_count!(frame)` calls
+/// `perf_counters::frame()`, `perf_count!(stream_drain(flag))` passes `flag`.
+/// Without the feature it expands to nothing and its arguments are never
+/// evaluated.
+macro_rules! perf_count {
+    ($counter:ident $(($($arg:expr),*))?) => {
+        #[cfg(feature = "perf-counters")]
+        crate::perf_counters::$counter($($($arg),*)?);
+    };
+}
+
+/// Hold a `perf-counters` guard (`perf_counters::$scope()`) for the rest of
+/// the enclosing block. Without the feature it expands to nothing.
+macro_rules! perf_scope {
+    ($scope:ident) => {
+        #[cfg(feature = "perf-counters")]
+        let _perf_scope = crate::perf_counters::$scope();
+    };
+}
+
 mod analytics;
 mod app;
 mod assets;
@@ -47,6 +67,8 @@ pub mod daemon;
 mod driver;
 mod input;
 mod md;
+#[cfg(feature = "perf-counters")]
+mod perf_counters;
 mod platform;
 #[cfg(feature = "profiling")]
 mod profiling;
@@ -206,6 +228,8 @@ impl WakuApplicationExt for Application {
 pub fn run() {
     #[cfg(feature = "profiling")]
     crate::profiling::init();
+    #[cfg(feature = "perf-counters")]
+    crate::perf_counters::init();
     let daemon = crate::daemon::start_process()
         .unwrap_or_else(|error| panic!("failed to start Waku daemon: {error:#}"));
     gpui_platform::application()

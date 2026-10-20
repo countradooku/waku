@@ -2506,6 +2506,9 @@ impl Waku {
             // is what lands the final position and size on disk.
             cx.on_app_quit(|this, _| {
                 this.save();
+                // After the save, so the final report counts it.
+                #[cfg(feature = "perf-counters")]
+                crate::perf_counters::write_final();
                 async {}
             })
             .detach();
