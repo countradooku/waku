@@ -67,6 +67,12 @@ pub enum ClientMessage {
         client_id: Uuid,
         #[serde(default)]
         resume_from: Vec<ReplayCursor>,
+        /// The client accepts and sends bulk bytes (blob data, uploads) as
+        /// binary WebSocket messages; see [`crate::binary_frame`]. Clients
+        /// that omit it get base64 inside JSON.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        binary_frames: Option<bool>,
     },
     Request(Request),
     Shutdown,
@@ -246,6 +252,17 @@ pub enum Command {
         reference: String,
         path: PathBuf,
     },
+    /// Where a blob lives on the daemon host. A client on the same machine
+    /// (connected over the local socket) reads the file itself instead of
+    /// having its bytes sent (#22).
+    LocateBlob {
+        reference: String,
+    },
+    /// Like [`Self::LocateBlob`], for a file inside a stored attachment.
+    LocateAttachment {
+        reference: String,
+        path: PathBuf,
+    },
     SweepBlobs,
     /// Fork a persisted task through one completed provider turn.
     ///
@@ -342,6 +359,10 @@ pub enum ServerMessage {
     Hello {
         protocol_version: u32,
         daemon_version: String,
+        /// The daemon agreed to binary frames for bulk bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        binary_frames: Option<bool>,
     },
     Rejected {
         message: String,
@@ -446,6 +467,11 @@ pub enum ResponsePayload {
         #[serde(with = "base64_bytes")]
         #[ts(type = "string")]
         bytes: Vec<u8>,
+    },
+    /// A blob or attachment file on the daemon host.
+    BlobLocation {
+        #[ts(type = "string")]
+        path: PathBuf,
     },
     ProviderSessionForked {
         result: ProviderSessionFork,
@@ -587,6 +613,7 @@ mod tests {
                 epoch: Uuid::from_u128(3),
                 sequence: 9,
             }],
+            binary_frames: None,
         };
         let json = serde_json::to_value(message).unwrap();
 

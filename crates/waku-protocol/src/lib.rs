@@ -27,6 +27,7 @@ macro_rules! tr {
 }
 
 pub mod attachments;
+pub mod binary_frame;
 pub mod blob;
 pub mod checkpoint;
 pub mod composer;

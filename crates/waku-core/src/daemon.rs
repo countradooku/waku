@@ -680,6 +680,20 @@ impl Backend for WakuBackend {
             Command::ReadAttachment { reference, path } => Ok(ResponsePayload::BlobData {
                 bytes: self.attachments.read_file(&reference, &path)?,
             }),
+            Command::LocateBlob { reference } => {
+                let path = self
+                    .task_store
+                    .blobs()
+                    .path_for(&reference)
+                    .ok_or_else(|| anyhow!("invalid blob reference"))?;
+                if !path.is_file() {
+                    bail!("blob {reference} does not exist");
+                }
+                Ok(ResponsePayload::BlobLocation { path })
+            }
+            Command::LocateAttachment { reference, path } => Ok(ResponsePayload::BlobLocation {
+                path: self.attachments.locate_file(&reference, &path)?,
+            }),
             Command::SweepBlobs => {
                 self.task_store.blob_sweep()();
                 Ok(ResponsePayload::Ack)
@@ -1796,6 +1810,8 @@ fn handle_driver_command(
         | Command::ImportPathAttachment { .. }
         | Command::ReadBlob { .. }
         | Command::ReadAttachment { .. }
+        | Command::LocateBlob { .. }
+        | Command::LocateAttachment { .. }
         | Command::SweepBlobs
         | Command::ForkSessionFromResponse { .. }
         | Command::RewindSessionToMessage { .. }

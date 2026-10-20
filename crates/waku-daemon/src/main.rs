@@ -16,8 +16,8 @@ fn main() -> anyhow::Result<()> {
     // before any provider or workspace subprocess can inherit the daemon's
     // environment.
     unsafe { std::env::remove_var(DAEMON_TOKEN_ENV) };
-    // Bind before any other thread starts: the local socket briefly narrows
-    // the process umask.
+    // Bind both listeners before printing the ready line, so a client that
+    // connects right after it never finds nothing listening.
     let local = arguments
         .socket
         .as_deref()

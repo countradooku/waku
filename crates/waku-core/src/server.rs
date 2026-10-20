@@ -40,6 +40,7 @@ use crate::protocol::{
     PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome, ResponsePayload, RpcError,
     SequencedEvent, ServerMessage, WireDriverEvent,
 };
+use waku_protocol::binary_frame;
 
 /// A socket write that makes no progress for this long means the client is
 /// not reading. Keeping the connection would let its event queue grow without
@@ -239,6 +240,10 @@ enum Outbound {
     /// The connection's last message: written and flushed, then the writer
     /// stops.
     Final(Frame),
+    /// A message carrying bulk bytes (blob data). The writer sends it as a
+    /// binary message when the client asked for binary frames, and as JSON
+    /// with base64 otherwise (#22).
+    Bulk(Box<ServerMessage>),
 }
 
 /// A connection's outgoing queue. Hub fan-out and request workers push into
@@ -1089,14 +1094,15 @@ where
     let (mut socket, hello) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
         .await
         .context("daemon handshake timed out")??;
-    let resume_from = match hello {
+    let (resume_from, binary_frames) = match hello {
         ClientMessage::Hello {
             protocol_version,
             token,
             resume_from,
+            binary_frames,
             ..
         } if protocol_version == PROTOCOL_VERSION && token_matches(&context.token, &token) => {
-            resume_from
+            (resume_from, binary_frames == Some(true))
         }
         ClientMessage::Hello {
             protocol_version, ..
@@ -1130,6 +1136,7 @@ where
         &ServerMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
+            binary_frames: binary_frames.then_some(true),
         },
     )
     .await?;
@@ -1138,7 +1145,7 @@ where
     let (subscriber, mut kicked) = Subscriber::new(outgoing.clone());
     let subscriber_id = context.hub.subscribe(&resume_from, subscriber);
     let (sink, stream) = socket.split();
-    let mut writer = tokio::spawn(write_outgoing(sink, outgoing_rx));
+    let mut writer = tokio::spawn(write_outgoing(sink, outgoing_rx, binary_frames));
     let exit = tokio::select! {
         exit = read_incoming(stream, &outgoing, subscriber_id, context) => exit,
         _ = &mut kicked => Ok(ReaderExit::Closed),
@@ -1170,6 +1177,7 @@ type ServerStream<S> = SplitStream<WebSocketStream<PreAuthLimit<S>>>;
 async fn write_outgoing<S>(
     mut sink: ServerSink<S>,
     mut outgoing: mpsc::Receiver<Outbound>,
+    binary_frames: bool,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1184,14 +1192,14 @@ where
             }
         };
         let mut shutting_down = matches!(message, Outbound::Final(_));
-        within_stall(sink.feed(outbound_message(message))).await?;
+        within_stall(sink.feed(outbound_message(message, binary_frames)?)).await?;
         let mut batched = 1;
         while !shutting_down && batched < MAX_MESSAGES_PER_FLUSH {
             let Ok(message) = outgoing.try_recv() else {
                 break;
             };
             shutting_down = matches!(message, Outbound::Final(_));
-            within_stall(sink.feed(outbound_message(message))).await?;
+            within_stall(sink.feed(outbound_message(message, binary_frames)?)).await?;
             batched += 1;
         }
         within_stall(sink.flush()).await?;
@@ -1201,10 +1209,16 @@ where
     }
 }
 
-fn outbound_message(outbound: Outbound) -> Message {
-    match outbound {
+fn outbound_message(outbound: Outbound, binary_frames: bool) -> anyhow::Result<Message> {
+    Ok(match outbound {
         Outbound::Text(frame) | Outbound::Final(frame) => Message::Text(frame),
-    }
+        Outbound::Bulk(mut message) if binary_frames => {
+            let body = message.take_bulk().unwrap_or_default();
+            let header = serde_json::to_vec(&message)?;
+            Message::Binary(binary_frame::encode(&header, &body).into())
+        }
+        Outbound::Bulk(message) => text_message(&message)?,
+    })
 }
 
 async fn within_stall<T>(
@@ -1238,14 +1252,27 @@ where
             Some(Err(error)) => return Err(error).context("Waku daemon WebSocket failed"),
             Some(Ok(message)) => message,
         };
-        let text = match message {
-            Message::Text(text) => text,
+        let parsed = match message {
+            Message::Text(text) => serde_json::from_str(text.as_str()),
+            // A request whose bulk bytes (an upload) travel raw (#22).
+            Message::Binary(frame) => match binary_frame::split(&frame) {
+                Some((header, body)) => {
+                    serde_json::from_slice::<ClientMessage>(header).map(|mut message| {
+                        message.put_bulk(body.to_vec());
+                        message
+                    })
+                }
+                None => {
+                    eprintln!("waku-daemon ignored a malformed binary message");
+                    continue;
+                }
+            },
             Message::Close(_) => return Ok(ReaderExit::Closed),
             // Pings are answered by the WebSocket layer; pongs only need to
             // arrive to reset the timeout above.
             _ => continue,
         };
-        match serde_json::from_str(text.as_str()) {
+        match parsed {
             Ok(ClientMessage::Request(request)) => {
                 context
                     .dispatcher
@@ -1586,7 +1613,7 @@ fn handle_request(
     if starts_runtime {
         hub.begin_runtime(session_id, runtime_id);
     }
-    let outcome = match backend.handle(request, hub.event_sink(session_id, runtime_id)) {
+    let mut outcome = match backend.handle(request, hub.event_sink(session_id, runtime_id)) {
         Ok(payload) => ResponseOutcome::Ok { payload },
         Err(error) => ResponseOutcome::Error {
             error: RpcError::from(error),
@@ -1617,23 +1644,29 @@ fn handle_request(
         _ => {}
     }
     if !notification
+        && let ResponseOutcome::Ok {
+            payload: ResponsePayload::BlobData { bytes },
+        } = &mut outcome
+    {
+        // File bytes are bulk data that clients read once: they are not
+        // cached (that would duplicate every open file in daemon memory, and
+        // the request is cheap to re-run), and they go to the writer as is so
+        // a binary-frame client receives them without base64 (#22). The
+        // returned outcome keeps the variant without the bytes.
+        let bytes = std::mem::take(bytes);
+        let _ = outgoing.blocking_send(Outbound::Bulk(Box::new(ServerMessage::Response {
+            request_id,
+            outcome: ResponseOutcome::Ok {
+                payload: ResponsePayload::BlobData { bytes },
+            },
+        })));
+    } else if !notification
         && let Some(frame) = encode(&ResponseFrame {
             request_id,
             outcome: &outcome,
         })
     {
-        // File bytes are bulk data that clients read once; caching a copy
-        // per request would duplicate every open file in daemon memory, and
-        // the request is cheap to re-run if it is ever retried.
-        let bulk = matches!(
-            &outcome,
-            ResponseOutcome::Ok {
-                payload: ResponsePayload::BlobData { .. }
-            }
-        );
-        if !bulk {
-            hub.cache_response(request_id, frame.clone());
-        }
+        hub.cache_response(request_id, frame.clone());
         // A full queue means the connection is being kicked for falling
         // behind; waiting here is bounded by its writer draining or closing.
         let _ = outgoing.blocking_send(Outbound::Text(frame));
@@ -1711,6 +1744,7 @@ mod tests {
             Outbound::Text(frame) | Outbound::Final(frame) => {
                 serde_json::from_str(frame.as_str()).unwrap()
             }
+            Outbound::Bulk(message) => *message,
         }
     }
 
@@ -2738,6 +2772,160 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[1].sequence == pair[0].sequence + 1)
         );
+    }
+
+    /// Stores uploaded blobs in memory and serves them back; `LocateBlob`
+    /// points at a file whose content differs, so a test can tell a local
+    /// disk read from bytes sent over the socket.
+    struct BlobBackend {
+        stored: Mutex<Vec<u8>>,
+        on_disk: PathBuf,
+    }
+
+    impl Backend for BlobBackend {
+        fn handle(&self, request: Request, _: EventSink) -> anyhow::Result<ResponsePayload> {
+            match request.command {
+                Command::StoreBlob { bytes, .. } => {
+                    *self.stored.lock() = bytes;
+                    Ok(ResponsePayload::BlobStored {
+                        reference: "waku-blob:test.png".into(),
+                        path: self.on_disk.clone(),
+                    })
+                }
+                Command::ReadBlob { .. } => Ok(ResponsePayload::BlobData {
+                    bytes: self.stored.lock().clone(),
+                }),
+                Command::LocateBlob { .. } => Ok(ResponsePayload::BlobLocation {
+                    path: self.on_disk.clone(),
+                }),
+                _ => Ok(ResponsePayload::Ack),
+            }
+        }
+    }
+
+    fn serve_blobs(
+        listeners: Listeners,
+        on_disk: PathBuf,
+    ) -> (ShutdownSignal, std::thread::JoinHandle<()>) {
+        let shutdown = ShutdownSignal::new();
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve_listeners(
+                listeners,
+                "secret".into(),
+                Arc::new(BlobBackend {
+                    stored: Mutex::new(Vec::new()),
+                    on_disk,
+                }),
+                server_shutdown,
+                ServerOptions::default(),
+            )
+            .unwrap()
+        });
+        (shutdown, server)
+    }
+
+    #[test]
+    fn blobs_travel_as_binary_frames_over_tcp() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let on_disk = std::env::temp_dir().join(format!("waku-blob-{}", Uuid::new_v4()));
+        std::fs::write(&on_disk, b"on disk").unwrap();
+        let (shutdown, server) = serve_blobs(
+            Listeners {
+                tcp: Some(listener),
+                local: None,
+            },
+            on_disk.clone(),
+        );
+
+        let client = DaemonClient::connect(&address, "secret".into()).unwrap();
+        // Every byte value, 3 MiB: an upload and a download that would be
+        // 4 MiB of base64 each.
+        let bytes = (0..3 * 1024 * 1024).map(|i| i as u8).collect::<Vec<_>>();
+        client
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::StoreBlob {
+                    mime_type: "image/png".into(),
+                    bytes: bytes.clone(),
+                },
+            )
+            .unwrap();
+        let ResponsePayload::BlobData { bytes: read } = client
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::ReadBlob {
+                    reference: "waku-blob:test.png".into(),
+                },
+            )
+            .unwrap()
+        else {
+            panic!("expected blob data");
+        };
+        assert!(read == bytes, "the blob changed in transit");
+        // Over TCP the daemon's files are not assumed to be local.
+        assert!(client.read_reference("waku-blob:test.png", None).unwrap() == bytes);
+
+        shutdown.trigger();
+        server.join().unwrap();
+        std::fs::remove_file(on_disk).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_local_client_reads_blob_files_from_disk() {
+        let root =
+            PathBuf::from("/tmp").join(format!("wk-{}", &Uuid::new_v4().simple().to_string()[..8]));
+        let path = root.join("daemon.sock");
+        let listener = LocalListener::bind(&path).unwrap();
+        let on_disk = root.join("blob.png");
+        std::fs::write(&on_disk, b"on disk").unwrap();
+        let (shutdown, server) = serve_blobs(
+            Listeners {
+                tcp: None,
+                local: Some(listener),
+            },
+            on_disk,
+        );
+
+        let client =
+            DaemonClient::connect(&format!("unix:{}", path.display()), "secret".into()).unwrap();
+        assert_eq!(
+            client.read_reference("waku-blob:test.png", None).unwrap(),
+            b"on disk"
+        );
+
+        shutdown.trigger();
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clients_without_binary_frames_still_get_base64_json() {
+        let message = ServerMessage::Response {
+            request_id: Uuid::from_u128(7),
+            outcome: ResponseOutcome::Ok {
+                payload: ResponsePayload::BlobData {
+                    bytes: vec![0, 1, 2, 255],
+                },
+            },
+        };
+        let Message::Text(text) =
+            outbound_message(Outbound::Bulk(Box::new(message.clone())), false).unwrap()
+        else {
+            panic!("a legacy client must get a text message");
+        };
+        assert!(text.as_str().contains("\"bytes\":\"AAEC/w==\""));
+        let Message::Binary(frame) =
+            outbound_message(Outbound::Bulk(Box::new(message)), true).unwrap()
+        else {
+            panic!("a binary-frame client must get a binary message");
+        };
+        let (_, body) = binary_frame::split(&frame).unwrap();
+        assert_eq!(body, [0, 1, 2, 255]);
     }
 
     #[test]

@@ -53,6 +53,9 @@ struct ClientInner {
     task_state_subscribers: Mutex<Vec<Sender<u64>>>,
     last_sequences: Mutex<HashMap<(Uuid, Uuid), LastSequence>>,
     disconnected: AtomicBool,
+    /// Connected over the local socket or pipe, so the daemon's files are
+    /// on this machine.
+    local: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -98,12 +101,14 @@ impl DaemonClient {
             task_state_subscribers: Mutex::new(Vec::new()),
             last_sequences: Mutex::new(last_sequences),
             disconnected: AtomicBool::new(false),
+            local: matches!(endpoint, Endpoint::Unix(_) | Endpoint::Pipe(_)),
         });
         let hello = ClientMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
             token,
             client_id: Uuid::new_v4(),
             resume_from,
+            binary_frames: Some(true),
         };
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let thread_inner = inner.clone();
@@ -237,6 +242,56 @@ impl DaemonClient {
             .map_err(|_| anyhow!("Waku daemon connection is closed"))
     }
 
+    /// Read a daemon-owned blob (`waku-blob:`), or a file inside a stored
+    /// attachment (`waku-attachment:` plus its `daemon_path`).
+    ///
+    /// Over the local socket the daemon only says where the file is and
+    /// this process reads it from disk (#22). Otherwise, or when that fails
+    /// (an older daemon, a vanished file), the daemon sends the bytes — as a
+    /// binary frame, without base64, when it supports them. This blocks;
+    /// call it off the UI thread.
+    pub fn read_reference(
+        &self,
+        reference: &str,
+        daemon_path: Option<&std::path::Path>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let (locate, read) = if waku_protocol::blob::is_reference(reference) {
+            (
+                Command::LocateBlob {
+                    reference: reference.to_owned(),
+                },
+                Command::ReadBlob {
+                    reference: reference.to_owned(),
+                },
+            )
+        } else if reference.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME) {
+            let path = daemon_path.context("an attachment read needs the file's daemon path")?;
+            (
+                Command::LocateAttachment {
+                    reference: reference.to_owned(),
+                    path: path.to_owned(),
+                },
+                Command::ReadAttachment {
+                    reference: reference.to_owned(),
+                    path: path.to_owned(),
+                },
+            )
+        } else {
+            bail!("{reference:?} is not a daemon blob or attachment reference");
+        };
+        if self.inner.local
+            && let Ok(ResponsePayload::BlobLocation { path }) =
+                self.request(Uuid::nil(), Uuid::nil(), locate)
+            && let Ok(bytes) = std::fs::read(&path)
+        {
+            return Ok(bytes);
+        }
+        match self.request(Uuid::nil(), Uuid::nil(), read)? {
+            ResponsePayload::BlobData { bytes } => Ok(bytes),
+            _ => bail!("Waku daemon returned an invalid blob response"),
+        }
+    }
+
     pub fn last_sequences(&self) -> Vec<ReplayCursor> {
         self.inner
             .last_sequences
@@ -277,7 +332,7 @@ pub fn local_endpoint_address(socket: &str) -> String {
 /// Where a [`DaemonClient`] connects.
 #[derive(Debug, PartialEq)]
 enum Endpoint {
-    /// `host:port`, `ws://…` or `wss://…`, normalized to the `/v1` URL.
+    /// `host:port`, `ws://â¦` or `wss://â¦`, normalized to the `/v1` URL.
     WebSocket(String),
     /// `unix:/path/to/daemon.sock`
     Unix(std::path::PathBuf),
@@ -412,15 +467,15 @@ async fn open_pipe(
 }
 
 async fn run_connected<S>(
-    connect: impl Future<Output = anyhow::Result<WebSocketStream<S>>>,
+    connect: impl Future<Output = anyhow::Result<(WebSocketStream<S>, bool)>>,
     ready: Ready,
     outgoing: mpsc::UnboundedReceiver<Outgoing>,
     inner: &ClientInner,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let socket = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
-        Ok(Ok(socket)) => socket,
+    let (socket, binary_frames) = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+        Ok(Ok(connected)) => connected,
         Ok(Err(error)) => {
             let _ = ready.send(Err(error));
             return;
@@ -431,13 +486,13 @@ async fn run_connected<S>(
         }
     };
     let _ = ready.send(Ok(()));
-    run_client(socket, outgoing, inner).await;
+    run_client(socket, binary_frames, outgoing, inner).await;
 }
 
 async fn handshake<S>(
     mut socket: WebSocketStream<S>,
     hello: &ClientMessage,
-) -> anyhow::Result<WebSocketStream<S>>
+) -> anyhow::Result<(WebSocketStream<S>, bool)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -454,8 +509,10 @@ where
     };
     match response {
         ServerMessage::Hello {
-            protocol_version, ..
-        } if protocol_version == PROTOCOL_VERSION => Ok(socket),
+            protocol_version,
+            binary_frames,
+            ..
+        } if protocol_version == PROTOCOL_VERSION => Ok((socket, binary_frames == Some(true))),
         ServerMessage::Hello {
             protocol_version, ..
         } => bail!(
@@ -468,6 +525,7 @@ where
 
 async fn run_client<S>(
     socket: WebSocketStream<S>,
+    binary_frames: bool,
     outgoing: mpsc::UnboundedReceiver<Outgoing>,
     inner: &ClientInner,
 ) where
@@ -475,7 +533,7 @@ async fn run_client<S>(
 {
     let (sink, stream) = socket.split();
     tokio::select! {
-        () = write_outgoing(sink, outgoing) => {}
+        () = write_outgoing(sink, outgoing, binary_frames) => {}
         () = read_incoming(stream, inner) => {}
     }
 }
@@ -487,6 +545,7 @@ async fn run_client<S>(
 async fn write_outgoing<S>(
     mut sink: SplitSink<WebSocketStream<S>, Message>,
     mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    binary_frames: bool,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -506,7 +565,7 @@ async fn write_outgoing<S>(
         while let Some(item) = next.take() {
             match item {
                 Outgoing::Message(message) => {
-                    let Ok(frame) = text_message(&message) else {
+                    let Ok(frame) = outgoing_message(message, binary_frames) else {
                         continue;
                     };
                     if sink.feed(frame).await.is_err() {
@@ -541,7 +600,7 @@ async fn write_outgoing<S>(
 }
 
 /// Delivers daemon messages until the daemon closes the connection, says it
-/// is shutting down, or goes silent for `KEEPALIVE_TIMEOUT` — the daemon
+/// is shutting down, or goes silent for `KEEPALIVE_TIMEOUT` â the daemon
 /// pings when it has nothing to say, so silence means it is hung or gone.
 async fn read_incoming<S>(mut stream: SplitStream<WebSocketStream<S>>, inner: &ClientInner)
 where
@@ -556,6 +615,19 @@ where
                 let Ok(message) = serde_json::from_str::<ServerMessage>(text.as_str()) else {
                     continue;
                 };
+                if !deliver(message, inner) {
+                    return;
+                }
+            }
+            // Blob data with its bytes raw after a JSON header (#22).
+            Some(Ok(Message::Binary(frame))) => {
+                let Some((header, body)) = waku_protocol::binary_frame::split(&frame) else {
+                    continue;
+                };
+                let Ok(mut message) = serde_json::from_slice::<ServerMessage>(header) else {
+                    continue;
+                };
+                message.put_bulk(body.to_vec());
                 if !deliver(message, inner) {
                     return;
                 }
@@ -641,6 +713,18 @@ fn disconnected(inner: &ClientInner) {
     // `processExited` event emitted by the daemon.
     drop(std::mem::take(&mut *inner.sessions.lock()));
     inner.task_state_subscribers.lock().clear();
+}
+
+/// A request as a WebSocket message: binary with its bulk bytes raw when
+/// the daemon agreed to binary frames and it has any, JSON text otherwise.
+fn outgoing_message(mut message: ClientMessage, binary_frames: bool) -> anyhow::Result<Message> {
+    if binary_frames && let Some(body) = message.take_bulk() {
+        let header = serde_json::to_vec(&message)?;
+        return Ok(Message::Binary(
+            waku_protocol::binary_frame::encode(&header, &body).into(),
+        ));
+    }
+    text_message(&message)
 }
 
 fn text_message<T: serde::Serialize>(value: &T) -> anyhow::Result<Message> {

@@ -98,15 +98,11 @@ impl LocalListener {
                 path.display()
             );
         }
-        // The socket is created with the process umask; make it private from
-        // the first instant rather than chmod-ing a world-connectable file.
-        // SAFETY: `umask` cannot fail. The daemon binds before it starts any
-        // thread that creates files, so the temporary mask affects nothing
-        // else.
-        let previous = unsafe { libc::umask(0o177) };
-        let bound = std::os::unix::net::UnixListener::bind(&path);
-        unsafe { libc::umask(previous) };
-        let listener = bound
+        // The socket is created with the process umask and tightened to 0600
+        // right after. In between it is already unreachable for other users:
+        // its directory is 0700. (A process-wide `umask` would race with
+        // other threads creating files, so it is not narrowed here.)
+        let listener = std::os::unix::net::UnixListener::bind(&path)
             .with_context(|| format!("could not bind the daemon socket {}", path.display()))?;
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
