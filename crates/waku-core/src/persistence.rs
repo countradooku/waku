@@ -670,7 +670,7 @@ fn live_attachment_references(connection: &Connection) -> io::Result<HashSet<Str
 
 fn live_references(connection: &Connection, scheme: &str) -> io::Result<HashSet<String>> {
     let mut statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT data FROM session_details
              UNION ALL
              SELECT attachments FROM messages WHERE attachments != '[]'",
@@ -772,7 +772,7 @@ fn search_session_messages(
     )
     .map_err(to_io_error)?;
     let mut statement = connection
-        .prepare(
+        .prepare_cached(
             "WITH ranked AS (
                  SELECT messages.session_id,
                         messages.role,
@@ -850,11 +850,8 @@ pub fn apply_migrations(connection: &Connection) -> io::Result<usize> {
     let mut applied = 0;
     for (tag, sql) in MIGRATIONS {
         let already_applied: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM migrations WHERE tag = ?1)",
-                params![tag],
-                |row| row.get(0),
-            )
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM migrations WHERE tag = ?1)")
+            .and_then(|mut statement| statement.query_row(params![tag], |row| row.get(0)))
             .map_err(to_io_error)?;
         if already_applied {
             continue;
@@ -864,10 +861,10 @@ pub fn apply_migrations(connection: &Connection) -> io::Result<usize> {
             .execute_batch(sql)
             .map_err(|error| io::Error::other(format!("migration {tag} failed: {error}")))?;
         transaction
-            .execute(
-                "INSERT INTO migrations(tag, applied_at) VALUES(?1, ?2)",
-                params![tag, crate::model::unix_time() as i64],
-            )
+            .prepare_cached("INSERT INTO migrations(tag, applied_at) VALUES(?1, ?2)")
+            .and_then(|mut statement| {
+                statement.execute(params![tag, crate::model::unix_time() as i64])
+            })
             .map_err(to_io_error)?;
         transaction.commit().map_err(to_io_error)?;
         applied += 1;
@@ -875,8 +872,128 @@ pub fn apply_migrations(connection: &Connection) -> io::Result<usize> {
     Ok(applied)
 }
 
+/// Saves waiting for the writer thread before a caller blocks on enqueueing.
+const WRITE_QUEUE_DEPTH: usize = 4;
+/// Statements the writer and reader connections keep prepared. Every
+/// statement this module runs repeatedly fits, so none is re-parsed.
+const STATEMENT_CACHE_CAPACITY: usize = 32;
+
+/// One statement of a save, with owned parameters so it can cross to the
+/// writer thread.
+struct WriteOp {
+    sql: &'static str,
+    params: Vec<rusqlite::types::Value>,
+}
+
+impl WriteOp {
+    fn new(sql: &'static str, params: Vec<rusqlite::types::Value>) -> Self {
+        Self { sql, params }
+    }
+}
+
+struct WriteJob {
+    ops: Vec<WriteOp>,
+    done: crossbeam_channel::Sender<io::Result<()>>,
+}
+
+/// The dedicated SQLite writer (#28). It owns the write connection and runs
+/// each save as one transaction of cached statements. Saves reach it through
+/// a bounded queue, so a burst of saves applies backpressure instead of
+/// piling up. [`Writer::commit`] waits for the transaction, so a save is
+/// durable when [`StateStore::save`] returns, as before.
+struct Writer {
+    jobs: Option<crossbeam_channel::Sender<WriteJob>>,
+    /// `total_changes` of the write connection after its last commit; tests
+    /// count rows written with it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    rows_written: Arc<std::sync::atomic::AtomicU64>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Writer {
+    fn start(path: &Path) -> io::Result<Self> {
+        let connection = open_connection(path)?;
+        let (jobs, queue) = crossbeam_channel::bounded::<WriteJob>(WRITE_QUEUE_DEPTH);
+        let rows_written = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let rows = rows_written.clone();
+        let thread = std::thread::Builder::new()
+            .name("waku-sqlite-writer".into())
+            .spawn(move || {
+                let mut connection = connection;
+                while let Ok(job) = queue.recv() {
+                    let result = apply_write(&mut connection, job.ops).map_err(to_io_error);
+                    rows.store(
+                        connection.total_changes(),
+                        std::sync::atomic::Ordering::Release,
+                    );
+                    let _ = job.done.send(result);
+                }
+            })?;
+        Ok(Self {
+            jobs: Some(jobs),
+            rows_written,
+            thread: Some(thread),
+        })
+    }
+
+    fn commit(&self, ops: Vec<WriteOp>) -> io::Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let (done, result) = crossbeam_channel::bounded(1);
+        self.jobs
+            .as_ref()
+            .ok_or_else(|| io::Error::other("the SQLite writer has stopped"))?
+            .send(WriteJob { ops, done })
+            .map_err(|_| io::Error::other("the SQLite writer has stopped"))?;
+        result
+            .recv()
+            .map_err(|_| io::Error::other("the SQLite writer stopped mid-save"))?
+    }
+
+    /// Rows inserted, updated or deleted by this writer so far.
+    #[cfg(test)]
+    fn rows_written(&self) -> u64 {
+        self.rows_written.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        drop(self.jobs.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn apply_write(connection: &mut Connection, ops: Vec<WriteOp>) -> rusqlite::Result<()> {
+    let transaction = connection.transaction()?;
+    for op in ops {
+        transaction
+            .prepare_cached(op.sql)?
+            .execute(rusqlite::params_from_iter(op.params))?;
+    }
+    transaction.commit()
+}
+
+/// A connection with the store's pragmas and statement cache, without
+/// running migrations (the store's first connection does that).
+fn open_connection(path: &Path) -> io::Result<Connection> {
+    let connection = Connection::open(path).map_err(to_io_error)?;
+    // WAL keeps a streaming save from blocking on readers, and NORMAL
+    // sync is the right durability trade for per-second UI state.
+    connection
+        .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+        .map_err(to_io_error)?;
+    connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+    Ok(connection)
+}
+
 struct Storage {
+    /// Reads (list load, hydration). Writes go through [`Self::writer`].
     connection: Connection,
+    writer: Writer,
     /// Sessions known to have a row. Used to spot deletions and to catch a
     /// session that became persistable without being marked dirty.
     persisted_sessions: HashSet<Uuid>,
@@ -996,14 +1113,24 @@ impl StateStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let connection = Connection::open(&self.path).map_err(to_io_error)?;
-        // WAL keeps a streaming save from blocking on readers, and NORMAL
-        // sync is the right durability trade for per-second UI state.
-        connection
-            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
-            .map_err(to_io_error)?;
+        let connection = open_connection(&self.path)?;
         apply_migrations(&connection)?;
         Ok(connection)
+    }
+
+    /// The read connection (migrated) plus the writer thread, with nothing
+    /// known about previously written rows.
+    fn open_storage(&self) -> io::Result<Storage> {
+        let connection = self.open()?;
+        Ok(Storage {
+            connection,
+            writer: Writer::start(&self.path)?,
+            persisted_sessions: HashSet::new(),
+            written_messages: HashMap::new(),
+            saved_projects: 0,
+            saved_app_settings: 0,
+            saved_app_state: 0,
+        })
     }
 
     pub fn load_or_fresh(&self, cwd: PathBuf) -> PersistedState {
@@ -1117,7 +1244,7 @@ impl StateStore {
         }
 
         let mut projects = connection
-            .prepare("SELECT id, name, path, created_at FROM projects ORDER BY position")
+            .prepare_cached("SELECT id, name, path, created_at FROM projects ORDER BY position")
             .map_err(to_io_error)?;
         state.projects = projects
             .query_map([], |row| {
@@ -1145,7 +1272,7 @@ impl StateStore {
         // fetched per session by `hydrate`, so startup cost does not grow with
         // how much history exists.
         let mut sessions = connection
-            .prepare(
+            .prepare_cached(
                 "SELECT id, project_id, title, auto_title, provider, model, status,
                         created_at, updated_at, last_reply_at
                  FROM sessions ORDER BY updated_at",
@@ -1195,6 +1322,7 @@ impl StateStore {
 
         *self.storage.lock() = Some(Storage {
             connection,
+            writer: Writer::start(&self.path)?,
             persisted_sessions,
             // A fresh connection has written nothing yet. Sessions loaded here
             // are skeletons anyway, so the first save of one is a full write.
@@ -1225,25 +1353,18 @@ impl StateStore {
         }
         let mut guard = self.storage.lock();
         if guard.is_none() {
-            *guard = Some(Storage {
-                connection: self.open()?,
-                persisted_sessions: HashSet::new(),
-                written_messages: HashMap::new(),
-                saved_projects: 0,
-                saved_app_settings: 0,
-                saved_app_state: 0,
-            });
+            *guard = Some(self.open_storage()?);
         }
         let connection = &guard.as_ref().expect("storage opened above").connection;
         let id = session.id.to_string();
 
         let data: Option<String> = connection
-            .query_row(
-                "SELECT data FROM session_details WHERE session_id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()
+            .prepare_cached("SELECT data FROM session_details WHERE session_id = ?1")
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![id], |row| row.get(0))
+                    .optional()
+            })
             .map_err(to_io_error)?;
         // A session with no row has nothing stored to load; it is already whole.
         let Some(data) = data else {
@@ -1264,7 +1385,7 @@ impl StateStore {
         session.runtime_event_cursor = stored.runtime_event_cursor;
 
         let mut statement = connection
-            .prepare(
+            .prepare_cached(
                 "SELECT id, turn_id, role, content, display_content, attachments,
                         created_at, streaming
                  FROM messages WHERE session_id = ?1 ORDER BY position",
@@ -1309,14 +1430,7 @@ impl StateStore {
 
         let mut guard = self.storage.lock();
         if guard.is_none() {
-            *guard = Some(Storage {
-                connection: self.open()?,
-                persisted_sessions: HashSet::new(),
-                written_messages: HashMap::new(),
-                saved_projects: 0,
-                saved_app_settings: 0,
-                saved_app_state: 0,
-            });
+            *guard = Some(self.open_storage()?);
         }
         let storage = guard.as_mut().expect("storage opened above");
 
@@ -1338,44 +1452,41 @@ impl StateStore {
             }
         }
 
-        let transaction = storage
-            .connection
-            .unchecked_transaction()
-            .map_err(to_io_error)?;
+        use rusqlite::types::Value;
 
+        // The save is built here as owned statements and committed by the
+        // writer thread in one transaction. What this connection believes is
+        // on disk changes only after that commit succeeds, so a failed save
+        // is retried in full next time rather than skipped for good.
+        let mut ops = Vec::new();
         let projects = serde_json::to_string(&state.projects).map_err(to_io_error)?;
         let projects_fingerprint = fingerprint(&projects);
-        if projects_fingerprint != storage.saved_projects {
-            transaction
-                .execute("DELETE FROM projects", [])
-                .map_err(to_io_error)?;
+        let projects_changed = projects_fingerprint != storage.saved_projects;
+        if projects_changed {
+            ops.push(WriteOp::new("DELETE FROM projects", Vec::new()));
             for (position, project) in state.projects.iter().enumerate() {
-                transaction
-                    .execute(
-                        INSERT_PROJECT,
-                        params![
-                            project.id.to_string(),
-                            project.name,
-                            project.path.to_string_lossy(),
-                            position as i64,
-                            project.created_at as i64
-                        ],
-                    )
-                    .map_err(to_io_error)?;
+                ops.push(WriteOp::new(
+                    INSERT_PROJECT,
+                    vec![
+                        Value::Text(project.id.to_string()),
+                        Value::Text(project.name.clone()),
+                        Value::Text(project.path.to_string_lossy().into_owned()),
+                        Value::Integer(position as i64),
+                        Value::Integer(project.created_at as i64),
+                    ],
+                ));
             }
-            storage.saved_projects = projects_fingerprint;
         }
 
         // Only sessions the app reported as changed are written. A draft that
         // has not started yet owns no row, so it counts as removed until it does.
         let mut live = HashSet::with_capacity(state.sessions.len());
-        // Applied only after the commit below, so a transaction that rolls back
-        // does not leave this connection believing rows it never wrote are on
-        // disk — which would make the next save skip them for good.
+        let mut persisted = Vec::new();
         let mut written_messages = Vec::new();
+        let dirty_sessions = &state.dirty_sessions;
         for session in state
             .sessions
-            .iter()
+            .iter_mut()
             .filter(|session| session.has_started())
         {
             live.insert(session.id);
@@ -1384,41 +1495,32 @@ impl StateStore {
             // an inactive sidebar row was renamed), so update only those and
             // leave the detail and message rows untouched.
             if !session.detail_loaded {
-                if state.dirty_sessions.contains(&session.id) {
-                    transaction
-                        .execute(
-                            UPSERT_SESSION,
-                            rusqlite::params_from_iter(session_params(session)),
-                        )
-                        .map_err(to_io_error)?;
-                    storage.persisted_sessions.insert(session.id);
+                if dirty_sessions.contains(&session.id) {
+                    ops.push(WriteOp::new(UPSERT_SESSION, session_params(session)));
+                    persisted.push(session.id);
                 }
                 continue;
             }
-            if !state.dirty_sessions.contains(&session.id)
+            if !dirty_sessions.contains(&session.id)
                 && storage.persisted_sessions.contains(&session.id)
             {
                 continue;
             }
             let data = session_data(session)?;
-            transaction
-                .execute(
-                    UPSERT_SESSION,
-                    rusqlite::params_from_iter(session_params(session)),
-                )
-                .map_err(to_io_error)?;
-            transaction
-                .execute(UPSERT_SESSION_DETAIL, params![session.id.to_string(), data])
-                .map_err(to_io_error)?;
+            ops.push(WriteOp::new(UPSERT_SESSION, session_params(session)));
+            ops.push(WriteOp::new(
+                UPSERT_SESSION_DETAIL,
+                vec![Value::Text(session.id.to_string()), Value::Text(data)],
+            ));
             written_messages.push((
                 session.id,
                 write_messages(
-                    &transaction,
+                    &mut ops,
                     session,
                     storage.written_messages.get(&session.id).unwrap_or(&EMPTY),
                 )?,
             ));
-            storage.persisted_sessions.insert(session.id);
+            persisted.push(session.id);
         }
 
         let removed = storage
@@ -1427,26 +1529,32 @@ impl StateStore {
             .copied()
             .filter(|id| !live.contains(id))
             .collect::<Vec<_>>();
-        for id in removed {
+        for id in &removed {
             let key = id.to_string();
-            transaction
-                .execute("DELETE FROM sessions WHERE id = ?1", params![key])
-                .map_err(to_io_error)?;
-            transaction
-                .execute(
-                    "DELETE FROM session_details WHERE session_id = ?1",
-                    params![key],
-                )
-                .map_err(to_io_error)?;
-            transaction
-                .execute("DELETE FROM messages WHERE session_id = ?1", params![key])
-                .map_err(to_io_error)?;
+            ops.push(WriteOp::new(
+                "DELETE FROM sessions WHERE id = ?1",
+                vec![Value::Text(key.clone())],
+            ));
+            ops.push(WriteOp::new(
+                "DELETE FROM session_details WHERE session_id = ?1",
+                vec![Value::Text(key.clone())],
+            ));
+            ops.push(WriteOp::new(
+                "DELETE FROM messages WHERE session_id = ?1",
+                vec![Value::Text(key)],
+            ));
+        }
+
+        storage.writer.commit(ops)?;
+        // Now that the rows are durable, and not before.
+        if projects_changed {
+            storage.saved_projects = projects_fingerprint;
+        }
+        storage.persisted_sessions.extend(persisted);
+        for id in removed {
             storage.persisted_sessions.remove(&id);
             storage.written_messages.remove(&id);
         }
-
-        transaction.commit().map_err(to_io_error)?;
-        // Now that the rows are durable, and not before.
         for (session_id, fingerprints) in written_messages {
             storage.written_messages.insert(session_id, fingerprints);
         }
@@ -1593,12 +1701,23 @@ fn message_from_row(row: MessageColumns) -> Option<Message> {
 ///
 /// They are rows in `messages` instead, so there is no copy in `data` that
 /// could go stale.
-fn session_data(session: &AgentSession) -> io::Result<String> {
-    let mut value = serde_json::to_value(session).map_err(to_io_error)?;
-    if let Some(object) = value.as_object_mut() {
-        object.remove("messages");
+///
+/// The messages are moved out for the duration of the serialization rather
+/// than serialized into a `Value` tree and dropped: that detour used to copy
+/// every message body on every save. With them taken, the session writes
+/// `"messages":[]`, which is cut from the text. No field before `messages`
+/// can contain that sequence (a string would escape its quotes), so the
+/// first match is the session's own field.
+fn session_data(session: &mut AgentSession) -> io::Result<String> {
+    const EMPTY_MESSAGES: &str = ",\"messages\":[]";
+    let messages = std::mem::take(&mut session.messages);
+    let serialized = serde_json::to_string(session);
+    session.messages = messages;
+    let mut data = serialized.map_err(to_io_error)?;
+    if let Some(at) = data.find(EMPTY_MESSAGES) {
+        data.replace_range(at..at + EMPTY_MESSAGES.len(), "");
     }
-    serde_json::to_string(&value).map_err(to_io_error)
+    Ok(data)
 }
 
 const UPSERT_MESSAGE: &str = "INSERT INTO messages(
@@ -1633,7 +1752,7 @@ const UPSERT_MESSAGE: &str = "INSERT INTO messages(
 /// map to remember for next time; the caller installs it only once the
 /// transaction commits, so a rolled-back write is not recorded as done.
 fn write_messages(
-    transaction: &Connection,
+    ops: &mut Vec<WriteOp>,
     session: &AgentSession,
     written: &HashMap<Uuid, u64>,
 ) -> io::Result<HashMap<Uuid, u64>> {
@@ -1651,103 +1770,152 @@ fn write_messages(
         } else {
             serde_json::to_string(&message.attachments).map_err(to_io_error)?
         };
-        transaction
-            .execute(
-                UPSERT_MESSAGE,
-                rusqlite::params_from_iter([
-                    Value::Text(message.id.to_string()),
-                    Value::Text(session_id.clone()),
-                    message
-                        .turn_id
-                        .map_or(Value::Null, |id| Value::Text(id.to_string())),
-                    Value::Integer(position as i64),
-                    Value::Text(tag_of(message.role)),
-                    Value::Text(message.content.clone()),
-                    message
-                        .display_content
-                        .clone()
-                        .map_or(Value::Null, Value::Text),
-                    Value::Text(attachments),
-                    Value::Integer(message.created_at as i64),
-                    Value::Integer(i64::from(message.streaming)),
-                ]),
-            )
-            .map_err(to_io_error)?;
+        ops.push(WriteOp::new(
+            UPSERT_MESSAGE,
+            vec![
+                Value::Text(message.id.to_string()),
+                Value::Text(session_id.clone()),
+                message
+                    .turn_id
+                    .map_or(Value::Null, |id| Value::Text(id.to_string())),
+                Value::Integer(position as i64),
+                Value::Text(role_tag(message.role).to_owned()),
+                Value::Text(message.content.clone()),
+                message
+                    .display_content
+                    .clone()
+                    .map_or(Value::Null, Value::Text),
+                Value::Text(attachments),
+                Value::Integer(message.created_at as i64),
+                Value::Integer(i64::from(message.streaming)),
+            ],
+        ));
     }
-    transaction
-        .execute(
-            "DELETE FROM messages WHERE session_id = ?1 AND position >= ?2",
-            params![session_id, session.messages.len() as i64],
-        )
-        .map_err(to_io_error)?;
+    ops.push(WriteOp::new(
+        "DELETE FROM messages WHERE session_id = ?1 AND position >= ?2",
+        vec![
+            Value::Text(session_id),
+            Value::Integer(session.messages.len() as i64),
+        ],
+    ));
     Ok(current)
 }
+
+/// The `role` column's spelling, the same string the JSON uses (checked by
+/// a test), without a `serde_json` round trip per message.
+fn role_tag(role: MessageRole) -> &'static str {
+    match role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::System => "system",
+    }
+}
+
+/// Stand-in for "this connection has written nothing for that session yet".
+static EMPTY: std::sync::LazyLock<HashMap<Uuid, u64>> = std::sync::LazyLock::new(HashMap::new);
 
 /// Fingerprint of every column [`write_messages`] stores for a message.
 ///
 /// Covers the body as well as the metadata: an edit that preserves length —
 /// a typo fix — has to be caught, so length and position alone will not do.
-/// Folded a word at a time because this runs over the whole transcript on
-/// every save, which is what [`fingerprint`]'s byte-at-a-time loop is too slow
-/// for.
-/// Stand-in for "this connection has written nothing for that session yet".
-static EMPTY: std::sync::LazyLock<HashMap<Uuid, u64>> = std::sync::LazyLock::new(HashMap::new);
-
+/// The fingerprints live only in this process's memory (they are compared
+/// with what this store last wrote), so the function can change freely.
 fn message_fingerprint(message: &Message, position: usize) -> u64 {
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut fold = |value: u64| {
-        hash ^= value;
-        hash = hash.wrapping_mul(PRIME).rotate_left(23);
-    };
-
-    fold(position as u64);
-    fold(message.created_at);
-    fold(u64::from(message.streaming));
-    fold(fingerprint(&tag_of(message.role)));
+    let mut hash = Fold::new();
+    hash.fold(position as u64);
+    hash.fold(message.created_at);
+    hash.fold(u64::from(message.streaming));
+    hash.fold(message.role as u64);
     let (high, low) = message.id.as_u64_pair();
-    fold(high);
-    fold(low);
+    hash.fold(high);
+    hash.fold(low);
     match message.turn_id {
         Some(turn_id) => {
             let (high, low) = turn_id.as_u64_pair();
-            fold(high);
-            fold(low);
+            hash.fold(high);
+            hash.fold(low);
         }
         // Distinct from a turn id that happens to be zero.
-        None => fold(u64::MAX),
+        None => hash.fold(u64::MAX),
     }
-
-    let bytes = message.content.as_bytes();
-    let (chunks, remainder) = bytes.as_chunks::<8>();
-    for chunk in chunks {
-        fold(u64::from_le_bytes(*chunk));
+    hash.fold(hash_bytes(message.content.as_bytes()));
+    match &message.display_content {
+        Some(display_content) => {
+            hash.fold(1);
+            hash.fold(hash_bytes(display_content.as_bytes()));
+        }
+        None => hash.fold(0),
     }
-    let mut tail = [0u8; 8];
-    tail[..remainder.len()].copy_from_slice(remainder);
-    fold(u64::from_le_bytes(tail));
-    fold(bytes.len() as u64);
-    if let Some(display_content) = &message.display_content {
-        fold(1);
-        fold(fingerprint(display_content));
-    } else {
-        fold(0);
-    }
-    fold(message.attachments.len() as u64);
+    hash.fold(message.attachments.len() as u64);
     for attachment in &message.attachments {
-        fold(fingerprint(&attachment.path.to_string_lossy()));
-        fold(fingerprint(&attachment.mention));
-        fold(fingerprint(&attachment.name));
-        fold(u64::from(attachment.is_dir));
-        fold(u64::from(attachment.is_image));
-        if let Some(reference) = &attachment.blob_reference {
-            fold(1);
-            fold(fingerprint(reference));
-        } else {
-            fold(0);
+        hash.fold(hash_bytes(attachment.path.as_os_str().as_encoded_bytes()));
+        hash.fold(hash_bytes(attachment.mention.as_bytes()));
+        hash.fold(hash_bytes(attachment.name.as_bytes()));
+        hash.fold(u64::from(attachment.is_dir));
+        hash.fold(u64::from(attachment.is_image));
+        match &attachment.blob_reference {
+            Some(reference) => {
+                hash.fold(1);
+                hash.fold(hash_bytes(reference.as_bytes()));
+            }
+            None => hash.fold(0),
         }
     }
-    hash
+    hash.finish()
+}
+
+/// A word-at-a-time FNV-style fold.
+struct Fold(u64);
+
+impl Fold {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn fold(&mut self, value: u64) {
+        self.0 = (self.0 ^ value).wrapping_mul(Self::PRIME).rotate_left(23);
+    }
+
+    fn finish(self) -> u64 {
+        self.0
+    }
+}
+
+/// Hash of a byte string, four words per step in independent lanes.
+///
+/// This runs over every message body of a saved session, so throughput
+/// matters: one dependent multiply per 8 bytes (the previous fold) is bound
+/// by multiply latency, while four lanes keep the multiplier busy. The
+/// length is folded in, so a body and its zero-padded extension differ.
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut lanes = [
+        Fold(0xcbf2_9ce4_8422_2325),
+        Fold(0x9e37_79b9_7f4a_7c15),
+        Fold(0xc2b2_ae3d_27d4_eb4f),
+        Fold(0x1656_67b1_9e37_79f9),
+    ];
+    let (blocks, rest) = bytes.as_chunks::<32>();
+    for block in blocks {
+        let (words, _) = block.as_chunks::<8>();
+        for (lane, word) in lanes.iter_mut().zip(words) {
+            lane.fold(u64::from_le_bytes(*word));
+        }
+    }
+    let (words, tail) = rest.as_chunks::<8>();
+    for (lane, word) in lanes.iter_mut().zip(words) {
+        lane.fold(u64::from_le_bytes(*word));
+    }
+    let mut last = [0u8; 8];
+    last[..tail.len()].copy_from_slice(tail);
+    let mut hash = Fold::new();
+    for lane in lanes {
+        hash.fold(lane.finish());
+    }
+    hash.fold(u64::from_le_bytes(last));
+    hash.fold(bytes.len() as u64);
+    hash.finish()
 }
 
 /// Columns the sidebar sorts and filters on are stored alongside the JSON so
@@ -2333,14 +2501,52 @@ mod tests {
     }
 
     /// Rows this store's connection has inserted, updated or deleted.
+    #[test]
+    fn role_column_spelling_matches_the_json() {
+        for role in [
+            MessageRole::User,
+            MessageRole::Assistant,
+            MessageRole::System,
+        ] {
+            assert_eq!(role_tag(role), tag_of(role));
+        }
+    }
+
+    #[test]
+    fn body_hash_sees_every_byte_and_the_length() {
+        let body = "x".repeat(100);
+        let base = hash_bytes(body.as_bytes());
+        for index in [0, 31, 32, 63, 64, 95, 96, 99] {
+            let mut edited = body.clone().into_bytes();
+            edited[index] = b'y';
+            assert_ne!(hash_bytes(&edited), base, "byte {index}");
+        }
+        assert_ne!(hash_bytes(b"ab"), hash_bytes(b"ab\0"));
+    }
+
+    #[test]
+    fn session_detail_json_omits_only_the_messages_field() {
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let session = &mut state.sessions[0];
+        session.title = "a title with \"messages\":[] in it".into();
+        session.begin_turn("Ask");
+        session.push_message(MessageRole::Assistant, "reply");
+        let messages = session.messages.len();
+        let data = session_data(session).unwrap();
+        assert_eq!(session.messages.len(), messages, "messages are put back");
+        let value = serde_json::from_str::<serde_json::Value>(&data).unwrap();
+        assert!(value.get("messages").is_none());
+        assert_eq!(value["title"], "a title with \"messages\":[] in it");
+    }
+
     fn rows_written(store: &StateStore) -> u64 {
         store
             .storage
             .lock()
             .as_ref()
             .expect("the store has saved at least once")
-            .connection
-            .total_changes()
+            .writer
+            .rows_written()
     }
 
     /// A streaming turn saves once a second, and every one of those saves used
