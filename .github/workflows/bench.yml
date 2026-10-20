@@ -1,0 +1,93 @@
+name: Benchmarks
+
+# Same-runner A/B regression gate (#10). Builds the pull request's base and
+# merge commits on one runner, runs their Criterion benches in alternating
+# rounds and fails when a median slowed by more than 10% beyond the measured
+# noise. See scripts/bench/compare.sh to run the same comparison locally.
+
+on:
+  pull_request:
+    paths:
+      - "src/md/**"
+      - "src/terminal.rs"
+      - "src/review_diff.rs"
+      - "src/bench_support.rs"
+      - "crates/**"
+      - "benches/**"
+      - "scripts/bench/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/bench.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: Compare against base
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          # The base commit has to be present to build it in a worktree.
+          fetch-depth: 0
+
+      - name: Free disk space
+        # Two optimized builds of the GPUI app do not fit next to the
+        # preinstalled SDKs.
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            clang \
+            cmake \
+            libfontconfig-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxi-dev \
+            libxtst-dev \
+            libxkbcommon-x11-dev \
+            pkg-config
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-ubuntu-24.04-rust-1.96.0-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            bench-ubuntu-24.04-rust-1.96.0-cargo-
+
+      - name: Compare benchmarks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BENCH_ROUNDS: "3"
+          BENCH_THRESHOLD: "0.10"
+        run: scripts/bench/compare.sh "$BASE_SHA" HEAD
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-report
+          path: |
+            target/bench-compare/report.md
+            target/bench-compare/run-*.log
+          if-no-files-found: ignore

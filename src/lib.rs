@@ -31,6 +31,8 @@ macro_rules! tr_cow {
 mod analytics;
 mod app;
 mod assets;
+#[doc(hidden)]
+pub mod bench_support;
 mod browser;
 mod computer_use;
 pub mod daemon;
