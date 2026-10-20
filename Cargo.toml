@@ -110,6 +110,16 @@ tracing-tracy = { version = "0.12", optional = true, default-features = false, f
 gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = [
   "test-support",
 ] }
+# Microbenchmarks (`benches/`, `scripts/bench/compare.sh`). Criterion rather
+# than divan because the CI regression gate compares the `estimates.json` it
+# writes per benchmark; plots and rayon are not needed.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+# Window-free microbenchmarks over the markdown, review-diff and terminal hot
+# paths, reached through `waku::bench_support`.
+[[bench]]
+name = "desktop"
+harness = false
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -240,6 +250,14 @@ strip = true
 inherits = "release"
 debug = "line-tables-only"
 strip = false
+
+# Benchmarks only need an optimized build that is compared against itself: the
+# CI gate builds base and head on one runner, so the release profile's single
+# codegen unit and thin LTO would multiply that build time without making the
+# comparison any fairer.
+[profile.bench]
+lto = false
+codegen-units = 16
 
 # Keep debug assertions and incremental builds for app code, but do not run
 # GPUI's text shaping and Taffy layout hot paths completely unoptimized.

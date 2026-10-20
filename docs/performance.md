@@ -285,6 +285,47 @@ cargo run --profile profiling --features profiling
   (`debug = "line-tables-only"`, `strip = false`), so `sample` output is
   symbolized too.
 
+### Microbenchmarks and the CI gate
+
+Criterion benches cover the window-free hot paths. Their inputs are generated
+from fixed seeds (`benches/support/fixtures.rs`).
+
+- `benches/desktop.rs` (`waku`, through `waku::bench_support`):
+  - `IncrementalParser::append` over 20k streamed tokens;
+  - `flatten` of a 3,000-line paragraph;
+  - code runs and `highlight::tokenize` on a 3,000-line block;
+  - `review_diff::parse_collected` on a 10k-line patch;
+  - the terminal snapshot of a 200×60 grid.
+- `crates/waku-protocol/benches/wire.rs`: encode and decode of 10k sequenced
+  events.
+- `crates/waku-core/benches/persistence.rs`: the daemon's `StateStore::save`
+  for a 2k-message session, both the first write and the streaming re-save.
+
+`tests/md_stream_linear.rs` asserts that streaming is linear. It counts
+allocations, which is deterministic, so it does not depend on timing.
+
+```sh
+cargo bench --workspace --bench '*'              # everything
+cargo bench -p waku --bench desktop -- md/       # one group
+scripts/bench/compare.sh main .                  # A/B: main vs working tree
+BENCH_FILTER=terminal/ BENCH_ROUNDS=2 scripts/bench/compare.sh HEAD~1 HEAD
+```
+
+Use `--bench '*'` rather than `--benches`. The latter also runs the libtest
+harnesses, which reject Criterion's flags.
+
+The `Benchmarks` workflow (`.github/workflows/bench.yml`) runs
+`compare.sh <base sha> HEAD` on pull requests that touch `src/md`,
+`src/terminal.rs`, `src/review_diff.rs`, `crates/`, or the benches themselves.
+It builds both revisions on the same runner and runs them in alternating
+rounds (three by default). It then takes the median of each benchmark's
+per-round Criterion medians. A benchmark fails the job only when both hold:
+
+- its median is more than 10% slower;
+- the slowdown is larger than the spread between that runner's own rounds.
+
+The report is written to the job summary.
+
 ## Known floor and next levers
 
 With both cadences enforced, a streaming frame still rebuilds every visible

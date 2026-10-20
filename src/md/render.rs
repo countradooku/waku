@@ -1778,7 +1778,12 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
 /// `TextRun`s that tile `code` exactly, colored by the lexer. Every run shares
 /// one font, so the shaped width of a line is identical with or without
 /// highlighting — the property that makes coloring safe to defer.
-fn code_runs(code: &str, lang: Option<Lang>, code_font: &Font, palette: &Palette) -> Vec<TextRun> {
+pub(crate) fn code_runs(
+    code: &str,
+    lang: Option<Lang>,
+    code_font: &Font,
+    palette: &Palette,
+) -> Vec<TextRun> {
     let plain = palette.secondary;
     let mut runs: Vec<TextRun> = Vec::new();
     let push = |runs: &mut Vec<TextRun>, len: usize, color: Hsla| {
@@ -2114,7 +2119,7 @@ mod tests {
             .expect("code block renderer");
         let body = &source[start + 1..];
         let end = body
-            .find("\nfn code_runs(")
+            .find("\npub(crate) fn code_runs(")
             .expect("code block renderer end");
         let body = &body[..end];
 

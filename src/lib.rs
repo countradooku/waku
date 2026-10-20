@@ -61,6 +61,8 @@ macro_rules! perf_scope {
 mod analytics;
 mod app;
 mod assets;
+#[doc(hidden)]
+pub mod bench_support;
 mod browser;
 mod computer_use;
 pub mod daemon;
