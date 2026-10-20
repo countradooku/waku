@@ -713,12 +713,13 @@ fn settling_an_anchored_turn_splices_without_resetting_its_prompt() {
 
 #[test]
 fn only_later_user_messages_start_followup_turns() {
-    let messages = vec![
+    let messages = [
         Message::new(MessageRole::User, "first"),
         Message::new(MessageRole::Assistant, "answer"),
         Message::new(MessageRole::User, "follow-up"),
         Message::new(MessageRole::Assistant, "answer"),
-    ];
+    ]
+    .map(std::sync::Arc::new);
     assert!(!message_starts_followup_turn(&messages, 0));
     assert!(!message_starts_followup_turn(&messages, 1));
     assert!(message_starts_followup_turn(&messages, 2));
@@ -1317,18 +1318,18 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
         // `update_activity` re-anchors the block it is still appending to, so
         // the anchor cannot be treated as fixed at insertion.
         ("an existing block re-anchored", |session| {
-            session.transcript_blocks[0].after_message = 2;
+            session.transcript_blocks.make_mut(0).after_message = 2;
         }),
         ("a turn returning to running", |session| {
             session.turns[0].status = TurnStatus::Running;
         }),
         ("a message reassigned to no turn", |session| {
-            session.messages[1].turn_id = None;
+            session.messages.make_mut(1).turn_id = None;
         }),
         // A blank part is work, not answer, so where the answer starts — and
         // with it everything the fold swallows — turns on the content itself.
         ("the final text part left blank", |session| {
-            session.messages[2].content.clear();
+            session.messages.make_mut(2).content.clear();
         }),
     ];
 
@@ -1351,7 +1352,11 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
     // The point of the guard: streamed text lands in an existing message
     // without moving a single row, and must not trigger a refold.
     let mut streamed = base.clone();
-    streamed.messages[2].content.push_str(" Let me know.");
+    streamed
+        .messages
+        .make_mut(2)
+        .content
+        .push_str(" Let me know.");
     assert_eq!(
         transcript_rows_fingerprint(&streamed, &settled),
         baseline_fingerprint,
@@ -1516,7 +1521,7 @@ fn assistant_response_footer_is_owned_by_the_terminal_part_and_copies_the_visibl
     session.push_message(MessageRole::Assistant, "First half of the answer.");
     session.push_message(MessageRole::Assistant, "Second half of the answer.");
     session.finish_active_turn(TurnStatus::Completed);
-    session.messages[3].created_at = 100;
+    session.messages.make_mut(3).created_at = 100;
     session.turns.last_mut().unwrap().completed_at = Some(200);
 
     assert_eq!(assistant_response_footer_index(&session, 1), Some(3));
@@ -1610,7 +1615,7 @@ fn unkeyed_assistant_message_keeps_a_standalone_footer() {
     session
         .messages
         .push(Message::new(MessageRole::Assistant, "Standalone response."));
-    session.messages[0].created_at = 300;
+    session.messages.make_mut(0).created_at = 300;
 
     assert_eq!(assistant_response_footer_index(&session, 0), Some(0));
     assert_eq!(

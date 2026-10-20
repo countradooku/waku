@@ -31,7 +31,7 @@ use crate::i18n::AppLanguage;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{
     AgentSession, FavoriteModel, Message, MessageAttachment, MessageRole, Project, ProviderKind,
-    RuntimeMode, SessionWorkspace,
+    RuntimeMode, SessionWorkspace, SharedVec,
 };
 use crate::theme::ThemePreference;
 pub use waku_protocol::persistence::{
@@ -1555,8 +1555,8 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         context_usage: None,
         runtime_event_cursor: None,
         provider_session_id: None,
-        messages: Vec::new(),
-        transcript_blocks: Vec::new(),
+        messages: SharedVec::new(),
+        transcript_blocks: SharedVec::new(),
         turns: Vec::new(),
         queued_messages: Vec::new(),
         detail_loaded: false,
@@ -2387,7 +2387,7 @@ mod tests {
         let edited = original.chars().rev().collect::<String>();
         assert_eq!(edited.len(), original.len());
         assert_ne!(edited, original);
-        session.messages[3].content = edited.clone();
+        session.messages.make_mut(3).content = edited.clone();
         store.save(&mut state).unwrap();
         assert_eq!(
             rows_written(&store) - before,
@@ -3221,7 +3221,7 @@ mod tests {
         // Nothing outside the message list changes, so the session JSON is
         // identical; only the message row differs.
         let id = state.sessions[0].id;
-        state.session_mut(id).unwrap().messages[0].content = "after".into();
+        state.session_mut(id).unwrap().messages.make_mut(0).content = "after".into();
         store.save(&mut state).unwrap();
 
         assert_eq!(

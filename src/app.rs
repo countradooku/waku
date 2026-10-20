@@ -2503,13 +2503,21 @@ impl Waku {
             .detach();
 
             // Window-frame changes are only mirrored in memory; the quit save
-            // is what lands the final position and size on disk.
-            cx.on_app_quit(|this, _| {
+            // is what lands the final position and size on disk. Saves are
+            // debounced on a background writer, so quit flushes it with a full
+            // sync off the UI thread; GPUI waits briefly for the future.
+            cx.on_app_quit(|this, cx| {
                 this.save();
                 // After the save, so the final report counts it.
                 #[cfg(feature = "perf-counters")]
                 crate::perf_counters::write_final();
-                async {}
+                let flush = this
+                    .store
+                    .app_files_flush(waku_client::persistence::Durability::Full);
+                let flush = cx.background_executor().spawn(async move { flush() });
+                async move {
+                    let _ = flush.await;
+                }
             })
             .detach();
 

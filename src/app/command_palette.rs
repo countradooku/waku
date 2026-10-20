@@ -1435,7 +1435,7 @@ impl Waku {
         session.created_at = created_at;
         session.updated_at = updated_at;
         session.last_reply_at = has_history.then_some(updated_at);
-        session.messages = history.messages;
+        session.messages = history.messages.into();
         session.turns = history.turns;
         let session_id = session.id;
         self.state.push_session(session);

@@ -1594,9 +1594,9 @@ impl Waku {
             .or_else(|| self.model_for_session(session))
     }
 
-    pub(super) fn selected_transcript_blocks(&self) -> &[TranscriptBlock] {
+    pub(super) fn selected_transcript_blocks(&self) -> &[Arc<TranscriptBlock>] {
         self.selected_session()
-            .map(|session| session.transcript_blocks.as_slice())
+            .map(|session| &session.transcript_blocks[..])
             .unwrap_or(&[])
     }
 
