@@ -21,6 +21,7 @@ pub mod ids;
 pub mod orchestrator;
 pub mod projection;
 pub mod store;
+pub mod streams;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use command::{AnyCommand, CommandError, InternalCommand, LockKey};

@@ -12,3 +12,4 @@ mod idempotency;
 mod migrations;
 mod rebuild;
 mod serialization;
+mod streams;
