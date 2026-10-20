@@ -35,11 +35,17 @@ pub fn session_id(timeline: &str) -> Uuid {
     Rng::new(seed).uuid()
 }
 
+/// The id of the `index`th history session (`--history-sessions`).
+pub fn history_session_id(index: usize) -> Uuid {
+    Rng::new(0x6869_7374_u32.wrapping_add(index as u32)).uuid()
+}
+
 pub fn build(
     project_path: PathBuf,
     timelines: &[String],
     provider: ProviderKind,
     history_turns: usize,
+    history_sessions: usize,
 ) -> Fixture {
     let project = Project {
         id: PROJECT_ID,
@@ -105,9 +111,11 @@ pub fn build(
         sessions.push(session);
     }
     if history_turns > 0 {
-        let mut session = history_session(project.id, provider, history_turns);
-        session.model.clone_from(&model);
-        sessions.push(session);
+        for index in 0..history_sessions.max(1) {
+            let mut session = history_session(project.id, provider, history_turns, index);
+            session.model.clone_from(&model);
+            sessions.push(session);
+        }
     }
     Fixture {
         project,
@@ -117,13 +125,24 @@ pub fn build(
 }
 
 /// A long, settled conversation in the seed script's shapes, for transcripts
-/// that must already be long when a timeline starts streaming.
-fn history_session(project_id: Uuid, provider: ProviderKind, turns: usize) -> AgentSession {
-    let mut rng = Rng::new(20_260_806);
+/// that must already be long when a timeline starts streaming. Session 0 keeps
+/// the id and content it had before `--history-sessions` existed; each later
+/// one gets its own id, content seed and an older timestamp.
+fn history_session(
+    project_id: Uuid,
+    provider: ProviderKind,
+    turns: usize,
+    index: usize,
+) -> AgentSession {
+    let mut rng = Rng::new(20_260_806_u32.wrapping_add(index as u32));
     let mut session = AgentSession::new(project_id, provider);
-    session.id = Rng::new(0x6869_7374).uuid();
-    session.title = format!("Bench · history ({turns} turns)");
-    let mut clock = BASE_TIME - turns as u64 * 60;
+    session.id = history_session_id(index);
+    session.title = if index == 0 {
+        format!("Bench · history ({turns} turns)")
+    } else {
+        format!("Bench · history {} ({turns} turns)", index + 1)
+    };
+    let mut clock = BASE_TIME - turns as u64 * 60 - index as u64 * 86_400;
     session.created_at = clock;
     for turn_index in 0..turns {
         let turn_id = rng.uuid();
@@ -233,8 +252,8 @@ mod tests {
     #[test]
     fn fixture_ids_and_content_are_stable() {
         let names = vec!["prose".to_owned(), "burst".to_owned()];
-        let a = build(PathBuf::from("/tmp/p"), &names, ProviderKind::Codex, 5);
-        let b = build(PathBuf::from("/tmp/p"), &names, ProviderKind::Codex, 5);
+        let a = build(PathBuf::from("/tmp/p"), &names, ProviderKind::Codex, 5, 1);
+        let b = build(PathBuf::from("/tmp/p"), &names, ProviderKind::Codex, 5, 1);
         assert_eq!(a.sessions.len(), 3);
         for (left, right) in a.sessions.iter().zip(&b.sessions) {
             assert_eq!(left.id, right.id);
@@ -248,5 +267,31 @@ mod tests {
         assert_ne!(session_id("prose"), session_id("burst"));
         assert_eq!(a.sessions[2].turns.len(), 5);
         assert_eq!(a.sessions[2].messages.len(), 10);
+        assert_eq!(a.sessions[2].id, history_session_id(0));
+    }
+
+    #[test]
+    fn history_sessions_are_distinct_and_the_first_is_unchanged() {
+        let names = vec!["prose".to_owned()];
+        let one = build(PathBuf::from("/tmp/p"), &names, ProviderKind::Codex, 4, 1);
+        let three = build(PathBuf::from("/tmp/p"), &names, ProviderKind::Codex, 4, 3);
+        assert_eq!(three.sessions.len(), 4);
+        let first = &three.sessions[1];
+        assert_eq!(first.id, one.sessions[1].id);
+        assert_eq!(
+            first.messages[1].content,
+            one.sessions[1].messages[1].content
+        );
+        let ids = three
+            .sessions
+            .iter()
+            .map(|session| session.id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), 4);
+        assert_ne!(
+            three.sessions[2].messages[1].content,
+            first.messages[1].content
+        );
+        assert!(three.sessions[3].created_at < three.sessions[2].created_at);
     }
 }

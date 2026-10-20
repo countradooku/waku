@@ -19,6 +19,10 @@ path = "src/bin/fake-codex.rs"
 name = "fake-claude"
 path = "src/bin/fake-claude.rs"
 
+[[bin]]
+name = "rpc-latency"
+path = "src/bin/rpc-latency.rs"
+
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
@@ -34,12 +38,11 @@ uuid = { version = "1.18", features = ["v4", "serde"] }
 # cannot tell the two apart on the wire.
 waku-core = { path = "../waku-core" }
 waku-protocol = { path = "../waku-protocol" }
+# `--autoplay` and `rpc-latency` talk to a daemon the way the desktop does.
+waku-client = { path = "../waku-client" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[dev-dependencies]
-waku-client = { path = "../waku-client" }
 
 [lints]
 workspace = true

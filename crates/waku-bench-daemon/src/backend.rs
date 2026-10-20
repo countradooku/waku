@@ -19,7 +19,7 @@ use uuid::Uuid;
 use waku_core::daemon::WakuBackend;
 use waku_core::model::{DriverEvent, ProviderKind, ProviderProbe, ProviderResumeCursor};
 use waku_core::{Backend, Command, EventSink, Request, ResponsePayload};
-use waku_protocol::{decode_enum, event_to_wire};
+use waku_protocol::{WorkspaceOperation, WorkspaceResult, decode_enum, event_to_wire};
 
 use crate::replay::{self, Rate, ReplayStats};
 use crate::timeline::Timeline;
@@ -53,6 +53,9 @@ pub struct BenchBackend {
     inner: WakuBackend,
     settings: BenchSettings,
     runtimes: Mutex<HashMap<Uuid, Runtime>>,
+    /// `--autoplay`: told once when a client attaches to this session's
+    /// running runtime, i.e. when the desktop starts mirroring it.
+    attach_watch: Mutex<Option<(Uuid, crossbeam_channel::Sender<()>)>>,
     stats: Arc<Mutex<Vec<ReplayStats>>>,
     finished: Arc<AtomicUsize>,
     shutdown: Arc<AtomicBool>,
@@ -64,10 +67,19 @@ impl BenchBackend {
             inner,
             settings,
             runtimes: Mutex::new(HashMap::new()),
+            attach_watch: Mutex::new(None),
             stats: Arc::new(Mutex::new(Vec::new())),
             finished: Arc::new(AtomicUsize::new(0)),
             shutdown,
         }
+    }
+
+    /// A channel that fires once, the first time a client attaches to
+    /// `session_id`'s running runtime. Replaces any earlier watch.
+    pub fn watch_attach(&self, session_id: Uuid) -> crossbeam_channel::Receiver<()> {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        *self.attach_watch.lock() = Some((session_id, sender));
+        receiver
     }
 
     /// Statistics for every replay so far, in completion order.
@@ -220,14 +232,27 @@ impl Backend for BenchBackend {
                     supports_steer: false,
                 })
             }
-            Command::AttachSession => Ok(ResponsePayload::SessionRuntime {
-                runtime_id: self
+            Command::AttachSession => {
+                let runtime_id = self
                     .runtimes
                     .lock()
                     .get(&session_id)
-                    .map(|runtime| runtime.runtime_id),
-                supports_steer: false,
-            }),
+                    .map(|runtime| runtime.runtime_id);
+                if runtime_id.is_some() {
+                    let mut watch = self.attach_watch.lock();
+                    if watch
+                        .as_ref()
+                        .is_some_and(|(watched, _)| *watched == session_id)
+                        && let Some((_, attached)) = watch.take()
+                    {
+                        let _ = attached.try_send(());
+                    }
+                }
+                Ok(ResponsePayload::SessionRuntime {
+                    runtime_id,
+                    supports_steer: false,
+                })
+            }
             Command::Prompt {
                 prompt,
                 turn_id,
@@ -307,6 +332,29 @@ impl Backend for BenchBackend {
             Command::LoadSkills { .. } => Ok(ResponsePayload::SkillsCatalog {
                 catalog: Default::default(),
             }),
+            Command::Workspace {
+                operation:
+                    WorkspaceOperation::DiscoverSlashCommands {
+                        provider,
+                        project_root,
+                        ..
+                    },
+            } => {
+                // The real lookup runs the provider CLI found on the login
+                // PATH (`codex app-server` for its skill list), which would
+                // start a real provider. Point it at the reported binary,
+                // which never exists, so only the file-based layers load.
+                let absent = self.settings.binary_dir.join(provider.command());
+                Ok(ResponsePayload::Workspace {
+                    result: WorkspaceResult::SlashCommands {
+                        commands: waku_core::composer_complete::discover_slash_commands(
+                            *provider,
+                            project_root,
+                            Some(&absent.to_string_lossy()),
+                        ),
+                    },
+                })
+            }
             _ => self.inner.handle(request, events),
         }
     }

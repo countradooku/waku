@@ -3,6 +3,7 @@
 //! ```text
 //! waku-bench-daemon [serve] [--timeline NAME|PATH] [--rate FACTOR|max] [--loops N]
 //!                   [--listen ADDR] [--provider codex|claude] [--history-turns N]
+//!                   [--history-sessions N] [--autoplay[=DELAY_MS]]
 //!                   [--exit-after N] [--state-dir DIR] [--project DIR]
 //! waku-bench-daemon generate [--out DIR] [--check]
 //! waku-bench-daemon list
@@ -15,10 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow, bail};
-use waku_bench_daemon::generate;
 use waku_bench_daemon::replay::{Rate, ReplayStats};
 use waku_bench_daemon::server::{BenchOptions, BenchServer};
 use waku_bench_daemon::timeline::{BUILTIN_NAMES, Timeline};
+use waku_bench_daemon::{autoplay, generate};
 use waku_protocol::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, decode_enum};
 
 const USAGE: &str = "\
@@ -37,6 +38,12 @@ serve options:
   --listen ADDR         address to listen on (default: 127.0.0.1:0)
   --provider NAME       provider of the fixture sessions: codex or claude (default: codex)
   --history-turns N     add a settled session with N turns of history (default: 0)
+  --history-sessions N  add N such sessions instead of one (default: 1)
+  --autoplay[=MS]       start the --timeline session's runtime now and replay the
+                        timeline MS ms (default 1500) after a desktop attaches
+                        to it, as a second client's prompt would. The desktop
+                        must have that session selected (its id is printed
+                        as WAKU_BENCH_SESSION_ID).
   --exit-after N        stop after N replays and print the summary
   --state-dir DIR       throwaway database location (default: a temp directory)
   --project DIR         project directory listed in the fixture
@@ -142,6 +149,8 @@ fn serve_command(mut arguments: impl Iterator<Item = String>) -> anyhow::Result<
     let mut listen = "127.0.0.1:0".to_owned();
     let mut provider = "codex".to_owned();
     let mut history_turns = 0;
+    let mut history_sessions = 1;
+    let mut autoplay = None;
     let mut exit_after = None;
     let mut state_dir = None;
     let mut project_dir = None;
@@ -163,6 +172,14 @@ fn serve_command(mut arguments: impl Iterator<Item = String>) -> anyhow::Result<
                 history_turns = value(&mut arguments, "--history-turns")?
                     .parse()
                     .context("--history-turns must be an integer")?;
+            }
+            "--history-sessions" => {
+                history_sessions = value(&mut arguments, "--history-sessions")?
+                    .parse()
+                    .context("--history-sessions must be an integer")?;
+            }
+            flag if flag == "--autoplay" || flag.starts_with("--autoplay=") => {
+                autoplay = autoplay::parse_flag(flag)?;
             }
             "--exit-after" => {
                 exit_after = Some(
@@ -207,7 +224,9 @@ fn serve_command(mut arguments: impl Iterator<Item = String>) -> anyhow::Result<
         loops,
         provider,
         history_turns,
+        history_sessions,
         exit_after,
+        autoplay,
         state_dir,
         project_dir,
         allow_shutdown: true,
@@ -217,6 +236,12 @@ fn serve_command(mut arguments: impl Iterator<Item = String>) -> anyhow::Result<
     // Machine-readable lines first, for runners that read stdout.
     println!("{DAEMON_ADDRESS_ENV}={}", server.address);
     println!("{DAEMON_TOKEN_ENV}={}", server.token);
+    // Ids a runner needs to preselect sessions in the desktop's state.json.
+    println!("WAKU_BENCH_PROJECT_ID={}", server.project_id);
+    println!("WAKU_BENCH_SESSION_ID={}", server.default_session);
+    if let Some(session_id) = server.history_session {
+        println!("WAKU_BENCH_HISTORY_SESSION_ID={session_id}");
+    }
     std::io::stdout().flush()?;
     eprintln!(
         "waku-bench-daemon listening on {} · default timeline {default_timeline} · rate {rate} · loops {loops}",

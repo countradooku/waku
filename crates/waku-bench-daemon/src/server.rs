@@ -6,12 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use waku_core::model::ProviderKind;
 use waku_core::persistence::StateStore;
 use waku_core::{DaemonSettingsStore, ServerOptions};
 
+use crate::autoplay::{Autoplay, AutoplayOptions};
 use crate::backend::{BenchBackend, BenchSettings};
 use crate::fixture;
 use crate::replay::{Rate, ReplayStats};
@@ -30,7 +32,13 @@ pub struct BenchOptions {
     pub loops: u32,
     pub provider: ProviderKind,
     pub history_turns: usize,
+    /// How many history sessions of `history_turns` turns to add (at least
+    /// one when `history_turns` is non-zero).
+    pub history_sessions: usize,
     pub exit_after: Option<usize>,
+    /// `--autoplay`: replay the default timeline in its session this long
+    /// after a desktop attaches to it. See [`crate::autoplay`].
+    pub autoplay: Option<Duration>,
     /// Throwaway daemon database and settings. Recreated on every start.
     pub state_dir: PathBuf,
     /// Project directory listed in the fixture; defaults to one inside
@@ -45,9 +53,17 @@ pub struct BenchServer {
     pub address: SocketAddr,
     pub token: String,
     pub state_dir: PathBuf,
+    pub project_id: uuid::Uuid,
+    /// The default timeline's session.
+    pub default_session: uuid::Uuid,
+    /// The first `--history-turns` session, if any.
+    pub history_session: Option<uuid::Uuid>,
+    /// The session `--autoplay` replays into, when enabled.
+    pub autoplay_session: Option<uuid::Uuid>,
     shutdown: Arc<AtomicBool>,
     backend: Arc<BenchBackend>,
     thread: Option<JoinHandle<anyhow::Result<()>>>,
+    autoplay: Option<Autoplay>,
 }
 
 impl BenchServer {
@@ -73,7 +89,13 @@ impl BenchServer {
             .iter()
             .map(|timeline| timeline.name.clone())
             .collect::<Vec<_>>();
-        let fixture = fixture::build(project_dir, &names, options.provider, options.history_turns);
+        let fixture = fixture::build(
+            project_dir.clone(),
+            &names,
+            options.provider,
+            options.history_turns,
+            options.history_sessions,
+        );
         let state_path = options.state_dir.join("app.db");
         fixture::seed(&state_path, &fixture)?;
 
@@ -93,11 +115,13 @@ impl BenchServer {
         }
         let bin_dir = options.state_dir.join("bin");
         let shutdown = Arc::new(AtomicBool::new(false));
+        let default_session = fixture::session_id(&options.default_timeline);
+        let autoplay_session = options.autoplay.map(|_| default_session);
         let backend = Arc::new(BenchBackend::new(
             inner,
             BenchSettings {
                 timelines,
-                default_timeline: options.default_timeline,
+                default_timeline: options.default_timeline.clone(),
                 session_timelines: fixture.bindings.into_iter().collect(),
                 rate: options.rate,
                 loops: options.loops,
@@ -128,14 +152,35 @@ impl BenchServer {
                     },
                 )
             })?;
-        Ok(Self {
+        let mut server = Self {
             address,
-            token: options.token,
+            token: options.token.clone(),
             state_dir: options.state_dir,
-            shutdown,
+            project_id: fixture::PROJECT_ID,
+            default_session,
+            history_session: (options.history_turns > 0).then(|| fixture::history_session_id(0)),
+            autoplay_session,
+            shutdown: shutdown.clone(),
             backend,
             thread: Some(thread),
-        })
+            autoplay: None,
+        };
+        if let (Some(delay), Some(session_id)) = (options.autoplay, autoplay_session) {
+            server.autoplay = Some(Autoplay::start(
+                &address.to_string(),
+                options.token,
+                &server.backend,
+                shutdown,
+                AutoplayOptions {
+                    session_id,
+                    prompt: options.default_timeline,
+                    provider: options.provider,
+                    cwd: project_dir,
+                    delay,
+                },
+            )?);
+        }
+        Ok(server)
     }
 
     pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
@@ -155,6 +200,12 @@ impl BenchServer {
                 .map_err(|_| anyhow::anyhow!("bench daemon server thread panicked"))?,
             None => Ok(()),
         };
+        // The server sets the flag on every exit path; the autoplay thread
+        // watches it.
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(autoplay) = self.autoplay.take() {
+            let _ = autoplay.thread.join();
+        }
         result?;
         Ok(self.backend.stats())
     }
@@ -170,6 +221,9 @@ impl Drop for BenchServer {
         self.shutdown.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+        if let Some(autoplay) = self.autoplay.take() {
+            let _ = autoplay.thread.join();
         }
     }
 }

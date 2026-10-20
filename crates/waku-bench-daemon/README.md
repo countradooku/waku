@@ -30,6 +30,7 @@ Only the provider runtime is replaced:
 | `loadSkills` | Returns an empty catalog. |
 | `probeComputerPermissions` | Returns the defaults. |
 | `loadUsageHistory`, `rollback`, `fork`, `loadProviderSession`, `forkProviderSession` | Return an error. |
+| `workspace.discoverSlashCommands` | Loads only the file-based command and skill layers. The real lookup runs the provider CLI it finds on the login `PATH` (`codex app-server` for its skill list), so the bench points it at the reported binary, which never exists. |
 
 Nothing reaches the network, and no provider process is spawned.
 
@@ -52,11 +53,37 @@ WAKU_DAEMON_ADDRESS=127.0.0.1:53412 WAKU_DAEMON_TOKEN=… <path to waku>
 | `--listen ADDR` | Default `127.0.0.1:0`. |
 | `--provider codex\|claude` | The provider of the fixture sessions. |
 | `--history-turns N` | Adds a settled session with N turns of history, in the seed script's shapes. |
+| `--history-sessions N` | Adds N such sessions instead of one (memory scenarios). The first keeps the id and content it always had. |
+| `--autoplay[=MS]` | Replays the `--timeline` session's timeline MS ms (default 1500) after a desktop attaches to it, with no UI input. See below. |
 | `--exit-after N` | Stops after N replays. |
 | `--state-dir DIR` | The throwaway database. It is wiped on every start, and the daemon refuses to wipe a directory it did not create. |
 | `--project DIR` | The project directory listed in the fixture. |
 
 `$WAKU_DAEMON_TOKEN` supplies the token if it is set; otherwise one is generated.
+
+Besides the address and token, stdout carries `WAKU_BENCH_PROJECT_ID`, `WAKU_BENCH_SESSION_ID` (the `--timeline` session) and, with `--history-turns`, `WAKU_BENCH_HISTORY_SESSION_ID` (the first history session), so a runner can preselect a session in the desktop's `state.json`.
+
+### Autoplay (#9)
+
+`--autoplay` makes a run need no clicks or typing. The bench daemon acts as a second client of itself, the way the web client or a second desktop drives a shared daemon:
+
+1. Before it prints the address, an internal `waku-client` connection sends `start` for the `--timeline` session. The server's hub records that runtime exactly as it records a desktop-started one.
+2. The desktop launches with that session selected, which a runner arranges by writing `selected_project` / `selected_session` into the desktop's `state.json`. For every selected session that has started, the desktop asks `attachSession`. The answer names the running runtime, so the desktop subscribes through its ordinary attach path (`attach_remote`).
+3. That `attachSession` is the signal that the desktop can render the stream. After the delay, the internal client sends `prompt` with the timeline's name. The backend publishes `promptSubmitted` first, which the desktop adopts as a user message and a running turn, then replays the timeline. Rows, pump commits and saves are the same as for a prompt typed into the desktop's composer. Only the composer itself is not exercised.
+4. The internal client then disconnects, so the daemon serializes the stream for the desktop's socket only.
+
+The daemon logs `waku-bench-daemon: autoplay prompt sent` when it prompts and `<timeline> replay finished` when the replay ends. `scripts/bench/harness.py` times its windows from those two lines.
+
+### `rpc-latency`
+
+`rpc-latency` connects with `waku-client` and measures sequential round trips: 1,000 each, after 50 warm-up requests, of `getSettings` (the transport floor), `hydrateSession` of a two-message session, `workspace.listProjectFiles` over a 500-file project (the composer's `@` file search) and `searchSessionMessages`. It seeds that project and session with `saveTaskState`, so point it only at a disposable daemon:
+
+```sh
+HOME="$(mktemp -d)" WAKU_DAEMON_TOKEN=t target/release/waku-daemon   # prints {"address":…}
+target/release/rpc-latency --address 127.0.0.1:PORT --token t --out rpc.json
+```
+
+It prints p50/p95/p99, mean and max per request and writes them as JSON (`waku.rpc-latency/1`, microseconds).
 
 The daemon prints a summary on exit, with one row per replay: events, payload bytes, scheduled time, elapsed time, events/s, the worst lag behind schedule, and whether it was canceled. It exits on any of:
 - Ctrl-C or SIGTERM;
@@ -150,15 +177,16 @@ The translations are approximations. Ids, timestamps and token counts are synthe
 ### Tests
 
 - `tests/fake_codex.rs` and `tests/fake_claude.rs` spawn the binaries and drive them through their protocols. They assert the framing, the event order, the fields T3's schemas require, interrupts, title generation and the CLI probes.
+- `tests/autoplay.rs` checks that `--autoplay` waits for an attach, honors its delay and delivers `promptSubmitted` plus the whole timeline to a client that only attached.
 - `tests/real_drivers.rs` starts the real `WakuBackend` behind `waku_core::serve`. It points Waku's own Codex and Claude drivers at the fakes, through the private-directory symlink and config mechanism, and asserts the resulting `DriverEvent`s:
   - the text, reasoning, command output, edit diff, image URL, usage and completion;
   - for `burst`, `reasoning-fast` and `code-wall`, text and reasoning byte-identical to the timeline.
 
 ### Still to verify end to end (#9)
 
-These tests never launch a GUI. The bench runner still has to show the following:
+These tests never launch a GUI. `scripts/bench/baseline.sh` now drives the real desktop through every timeline against `waku-bench-daemon` (see `docs/fork/bench/baseline.md`). Still open:
 
-- the desktop renders each timeline identically across runs against `waku-bench-daemon`;
+- that the desktop renders each timeline identically across runs (the runs agree on counters, but nothing compares frames);
 - T3 Code drives both fakes through its real adapters (Effect schemas, Agent SDK spawn path and probes);
 - Waku and T3 show the same visible transcript;
 - no network traffic occurs during a run. Disable T3's provider update checks and isolate `HOME` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR`.
