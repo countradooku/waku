@@ -6,12 +6,13 @@ description = "A fast, native control plane for local coding agents"
 license = "GPL-3.0-only"
 
 [workspace]
-members = ["crates/waku-client", "crates/waku-core", "crates/waku-daemon", "crates/waku-protocol", "crates/waku-ts-stub", "crates/waku-computer-use", "crates/waku-bench-daemon"]
+members = ["crates/waku-client", "crates/waku-core", "crates/waku-daemon", "crates/waku-orchestrator", "crates/waku-protocol", "crates/waku-ts-stub", "crates/waku-computer-use", "crates/waku-bench-daemon"]
 default-members = [
   ".",
   "crates/waku-client",
   "crates/waku-core",
   "crates/waku-daemon",
+  "crates/waku-orchestrator",
   "crates/waku-protocol",
   "crates/waku-computer-use",
 ]
