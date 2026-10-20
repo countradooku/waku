@@ -47,6 +47,9 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["h
 url = "2"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 # The orchestrator's effect ports are implemented here (RFC 0001).
+# Protocol v8 orchestration streams and methods (#54, #56, #57). The
+# orchestrator is not the daemon's source of truth until #55; it is opened
+# only behind `WAKU_V8_ORCHESTRATOR` (see `v8::orchestration`).
 waku-orchestrator = { path = "../waku-orchestrator" }
 waku-protocol = { path = "../waku-protocol" }
 

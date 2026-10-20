@@ -16,3 +16,21 @@ export {
 } from "./client";
 export { encodeDataFrame, encodeMsgFrame, FrameError, parseFrame, type Frame, type FrameLimits } from "./frame";
 export * as msgpack from "./msgpack";
+export {
+  applyCommandOutputItem,
+  applyDelta,
+  applyShellItem,
+  applyThreadEvent,
+  applyThreadItem,
+  applyThreadSnapshot,
+  createCommandOutputState,
+  createShellState,
+  createThreadState,
+  mergeHistoryPage,
+  orderedTurnItems,
+  threadProjectionOf,
+  type CollectionName,
+  type CommandOutputState,
+  type ShellState,
+  type ThreadState,
+} from "./projection";

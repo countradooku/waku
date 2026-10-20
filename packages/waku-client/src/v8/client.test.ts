@@ -221,6 +221,35 @@ describe("V8Client", () => {
     client.close();
   });
 
+  test("sequence streams advance their cursor with every event and resume from it", async () => {
+    const store = "00000000-0000-4000-8000-000000000002";
+    const threadId = "00000000-0000-4000-8000-0000000000aa";
+    const { url, peers } = daemon((peer, message) => {
+      if (message.type !== "subscribe") return;
+      if (message.after) return;
+      peer.send({
+        type: "items",
+        channel: message.channel,
+        items: [
+          { type: "synchronized", cursor: { type: "sequence", store, seq: 10 } },
+          { type: "event", seq: 12, event: { type: "galaxy.updated" } },
+          { type: "delta", itemId: threadId, channel: "text", rev: 1, text: "x" },
+        ],
+      });
+      peer.send({ type: "end", channel: message.channel, reason: { type: "overflow" } });
+    });
+    const client = await connect(url);
+    const items: T.ThreadItem[] = [];
+    const subscription = client.subscribe("thread", { threadId }, { item: (item) => items.push(item) });
+    await until(() => peers[0]!.received.filter((message) => message.type === "subscribe").length === 2);
+    expect(items.map((item) => item.type)).toEqual(["synchronized", "event", "delta"]);
+    // Deltas are unsequenced: the cursor stays at the last event.
+    expect(subscription.cursor).toEqual({ type: "sequence", store, seq: 12 });
+    const resumed = peers[0]!.received.filter((message) => message.type === "subscribe")[1]!;
+    expect(resumed.after).toEqual({ type: "sequence", store, seq: 12 });
+    client.close();
+  });
+
   test("DATA frames are delivered and their credit returned", async () => {
     const { url, peers } = daemon((peer, message) => {
       if (message.type !== "subscribe") return;

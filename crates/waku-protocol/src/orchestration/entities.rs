@@ -18,6 +18,7 @@ fn is_false(value: &bool) -> bool {
 // Project
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: ProjectId,
@@ -58,6 +59,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadLineage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,6 +80,7 @@ impl ThreadLineage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -108,6 +111,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LimitRecovery {
     pub run_id: RunId,
@@ -120,6 +124,7 @@ pub struct LimitRecovery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TitleRegeneration {
     pub request_id: CommandId,
@@ -127,6 +132,7 @@ pub struct TitleRegeneration {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RollbackState {
     pub request_id: CommandId,
@@ -139,6 +145,7 @@ pub struct RollbackState {
 
 /// A user-visible conversation. It survives provider exits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AppThread {
     pub id: ThreadId,
@@ -256,6 +263,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CancelledBackgroundWork {
     pub kind: BackgroundWorkKind,
@@ -264,6 +272,7 @@ pub struct CancelledBackgroundWork {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PlanRef {
     pub thread_id: ThreadId,
@@ -290,6 +299,7 @@ open_enum! {
 
 /// (P3) The delegated-task completion cohort of a parent run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DelegatedCompletionCohort {
     pub disposition: CohortDisposition,
@@ -300,6 +310,7 @@ pub struct DelegatedCompletionCohort {
 
 /// A counted, user-visible turn. Only its root node completes it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
     pub id: RunId,
@@ -379,6 +390,7 @@ impl AttemptStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunAttempt {
     pub id: RunAttemptId,
@@ -434,6 +446,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionNode {
     pub id: NodeId,
@@ -501,6 +514,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionDelivery {
     pub state: DeliveryState,
@@ -509,6 +523,7 @@ pub struct CompletionDelivery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Subagent {
     pub id: NodeId,
@@ -564,6 +579,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSession {
     pub id: ProviderSessionId,
@@ -598,6 +614,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderThreadFork {
     pub provider_thread_id: ProviderThreadId,
@@ -617,6 +634,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PendingBackgroundTask {
     pub kind: PendingTaskKind,
@@ -630,6 +648,7 @@ pub struct PendingBackgroundTask {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct NativeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -644,6 +663,7 @@ pub struct NativeMetadata {
 
 /// A provider-native conversation handle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderThread {
     pub id: ProviderThreadId,
@@ -693,6 +713,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderTurn {
     pub id: ProviderTurnId,
@@ -744,6 +765,7 @@ open_enum! {
 
 /// How a request can be answered.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -764,6 +786,7 @@ pub enum ResponseCapability {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeRequest {
     pub id: RuntimeRequestId,
@@ -799,6 +822,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     pub id: MessageId,
@@ -840,6 +864,7 @@ open_enum! {
 
 /// The variant part of a [`Plan`], nested under `kind` (R22).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -869,6 +894,7 @@ impl PlanKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
     pub id: PlanId,
@@ -894,6 +920,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CheckpointScope {
     pub id: CheckpointScopeId,
@@ -924,6 +951,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Checkpoint {
     pub id: CheckpointId,
@@ -971,6 +999,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ContextPoint {
     pub thread_id: ThreadId,
@@ -987,6 +1016,7 @@ pub struct ContextPoint {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -1013,6 +1043,7 @@ pub enum TransferResolution {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ContextTransfer {
     pub id: ContextTransferId,
@@ -1060,6 +1091,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HandoffHistory {
     pub messages: u32,
@@ -1080,6 +1112,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HandoffDelivery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1090,6 +1123,7 @@ pub struct HandoffDelivery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ContextHandoff {
     pub id: ContextHandoffId,

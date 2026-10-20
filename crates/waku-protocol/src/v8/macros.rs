@@ -9,8 +9,10 @@
 //!   manifest the schema exporter writes.
 //! - [`streams!`] does the same for subscriptions: `StreamSpec`,
 //!   `StreamItem` and [`StreamDef`](super::api::StreamDef).
-//! - [`commands!`] declares an open union of orchestration commands with a
-//!   scope per command; the command set itself is #54's.
+//! - [`commands!`] declares an open union of commands with a scope per
+//!   command. `orchestration.dispatch` carries RFC 0001's own `Command`
+//!   instead (one definition for daemon and clients, R17), so the macro is
+//!   kept for later command sets.
 //!
 //! Each macro also emits, behind the `schema` feature, the function that
 //! registers its types with the JSON Schema generator, so the manifest in
@@ -420,8 +422,8 @@ macro_rules! streams {
 /// the static scope each needs (RFC 0003 §5.3). Each line is
 /// `"name" => Variant(Body), scope = Scope;`.
 ///
-/// The command set belongs to #54 (`orchestration.dispatch`); until it lands
-/// the macro is exercised by its tests only.
+/// `orchestration.dispatch` uses `crate::orchestration::Command` directly, so
+/// the macro is exercised by its tests only for now.
 #[allow(unused_macros)]
 macro_rules! commands {
     (

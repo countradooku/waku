@@ -14,9 +14,17 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
+use waku_protocol::orchestration::{
+    AppThread, Command, CommandId, DomainEvent, Project, Run, ThreadId, TurnItem, TurnItemId,
+};
 use waku_protocol::v8::codec::{Encoding, from_slice, from_slice_seed, to_vec};
 use waku_protocol::v8::frame;
 use waku_protocol::v8::message::Routes;
+use waku_protocol::v8::orchestration::{
+    CommandOutputItem, CommandOutputSpec, DeltaChannel, DispatchCommand, DispatchParams,
+    DispatchResult, HistoryPage, HistoryPageParams, ShellItem, ShellLocation, ShellSpec,
+    ThreadActivity, ThreadItem, ThreadProjection, ThreadRow, ThreadSnapshot, ThreadSpec,
+};
 use waku_protocol::v8::*;
 
 enum Sample {
@@ -34,8 +42,22 @@ const BLOB: &str = "waku-blob:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd1
 /// The call ids and channels the samples use, for decoding replies and items.
 fn routes() -> Routes {
     Routes {
-        calls: [(1, "settings.get"), (2, "projects.list"), (3, "files.read")].into(),
-        channels: [(1, "settings"), (2, "blobDownload")].into(),
+        calls: [
+            (1, "settings.get"),
+            (2, "projects.list"),
+            (3, "files.read"),
+            (4, "orchestration.dispatch"),
+            (5, "threads.historyPage"),
+        ]
+        .into(),
+        channels: [
+            (1, "settings"),
+            (2, "blobDownload"),
+            (3, "thread"),
+            (4, "shell"),
+            (5, "commandOutput"),
+        ]
+        .into(),
     }
 }
 
@@ -54,7 +76,272 @@ fn settings() -> Settings {
     }
 }
 
+const THREAD: Uuid = Uuid::from_u128(0x7e8e_ad00_0000_4000_8000_0000_0000_0004);
+const ITEM: Uuid = Uuid::from_u128(0x17e3_0000_0000_4000_8000_0000_0000_0005);
+
+fn thread() -> AppThread {
+    serde_json::from_value(serde_json::json!({
+        "id": THREAD,
+        "projectId": PROJECT,
+        "createdBy": "user",
+        "creationSource": "desktop",
+        "title": "Fix the flaky test",
+        "titleSource": "user",
+        "modelSelection": { "instance": "codex", "model": "gpt-5" },
+        "runtimeMode": "full_access",
+        "interactionMode": "default",
+        "historyOrigin": "native",
+        "lineage": { "rootThreadId": THREAD },
+        "createdAt": 1_760_000_000_000_i64,
+        "updatedAt": 1_760_000_100_000_i64,
+        "lastReplyAt": 1_760_000_100_000_i64,
+    }))
+    .unwrap()
+}
+
+fn run() -> Run {
+    serde_json::from_value(serde_json::json!({
+        "id": Uuid::from_u128(0x2),
+        "threadId": THREAD,
+        "ordinal": 3,
+        "modelSelection": { "instance": "codex" },
+        "userMessageId": Uuid::from_u128(0x3),
+        "status": "completed",
+        "requestedAt": 1_760_000_000_000_i64,
+        "completedAt": 1_760_000_090_000_i64,
+    }))
+    .unwrap()
+}
+
+/// A command execution as streams carry it: output omitted.
+fn command_item() -> TurnItem {
+    serde_json::from_value(serde_json::json!({
+        "id": ITEM,
+        "threadId": THREAD,
+        "runId": Uuid::from_u128(0x2),
+        "position": (3_u64 << 24) | 1,
+        "status": "completed",
+        "updatedAt": 1_760_000_090_000_i64,
+        "kind": {
+            "type": "command_execution",
+            "input": "cargo test",
+            "outputOmitted": true,
+            "outputIndicatesFailure": true,
+            "exitCode": 101,
+        },
+    }))
+    .unwrap()
+}
+
+fn answer_item() -> TurnItem {
+    serde_json::from_value(serde_json::json!({
+        "id": Uuid::from_u128(0x6),
+        "threadId": THREAD,
+        "runId": Uuid::from_u128(0x2),
+        "position": (3_u64 << 24) | 2,
+        "status": "running",
+        "streamRev": 4,
+        "updatedAt": 1_760_000_090_000_i64,
+        "kind": {
+            "type": "assistant_message",
+            "messageId": Uuid::from_u128(0x7),
+            "text": "The test races on",
+            "streaming": true,
+        },
+    }))
+    .unwrap()
+}
+
+fn sequence(seq: u64) -> StreamCursor {
+    StreamCursor::Sequence { store: STORE, seq }
+}
+
+fn orchestration_samples() -> Vec<(&'static str, Sample)> {
+    use Sample::{Client, Server};
+    let row = ThreadRow {
+        thread: thread(),
+        activity: ThreadActivity::Working,
+        pending_request_count: 0,
+        queued_run_count: 1,
+    };
+    let project: Project = serde_json::from_value(serde_json::json!({
+        "id": PROJECT,
+        "name": "waku",
+        "path": "/Users/dev/waku",
+        "orderKey": "a0",
+        "createdAt": 1_760_000_000_000_i64,
+        "updatedAt": 1_760_000_000_000_i64,
+    }))
+    .unwrap();
+    let mut projection = ThreadProjection::new(thread());
+    projection.runs = vec![run()];
+    projection.turn_items = vec![command_item(), answer_item()];
+    vec![
+        (
+            "client_call_orchestration_dispatch",
+            Client(ClientMessage::Call {
+                id: 4,
+                method: Method::OrchestrationDispatch(DispatchParams {
+                    command_id: CommandId::new("rename:7e8ead00").unwrap(),
+                    command: DispatchCommand(Command::ThreadRename {
+                        thread_id: ThreadId(THREAD),
+                        title: "Fix the flaky test".into(),
+                    }),
+                }),
+            }),
+        ),
+        (
+            "server_reply_orchestration_dispatch",
+            Server(ServerMessage::Reply(Reply::ok(
+                4,
+                MethodResult::OrchestrationDispatch(DispatchResult {
+                    sequence: 1_042,
+                    duplicate: false,
+                }),
+            ))),
+        ),
+        (
+            "client_call_threads_history_page",
+            Client(ClientMessage::Call {
+                id: 5,
+                method: Method::ThreadsHistoryPage(HistoryPageParams {
+                    thread_id: ThreadId(THREAD),
+                    cursor: "h1.7e8ead0000004000800000000000004.3000001".into(),
+                }),
+            }),
+        ),
+        (
+            "server_reply_threads_history_page",
+            Server(ServerMessage::Reply(Reply::ok(
+                5,
+                MethodResult::ThreadsHistoryPage(HistoryPage {
+                    items: vec![command_item()],
+                    runs: vec![run()],
+                    next: None,
+                }),
+            ))),
+        ),
+        (
+            "client_subscribe_thread",
+            Client(ClientMessage::Subscribe(Subscribe {
+                channel: 3,
+                stream: StreamSpec::Thread(ThreadSpec {
+                    thread_id: ThreadId(THREAD),
+                    compact_turn_items: true,
+                }),
+                after: Some(sequence(1_000)),
+                window: None,
+            })),
+        ),
+        (
+            "server_items_thread",
+            Server(ServerMessage::Items {
+                channel: 3,
+                items: vec![
+                    StreamItem::Thread(ThreadItem::Snapshot(ThreadSnapshot {
+                        cursor: sequence(1_040),
+                        projection,
+                        history: Some("h1.7e8ead0000004000800000000000004.3000001".into()),
+                        has_more_history: true,
+                        budget_exceeded: false,
+                    })),
+                    StreamItem::Thread(ThreadItem::Synchronized {
+                        cursor: sequence(1_040),
+                    }),
+                    StreamItem::Thread(ThreadItem::Event {
+                        seq: 1_041,
+                        event: DomainEvent::TurnItemUpdated(answer_item()),
+                    }),
+                    StreamItem::Thread(ThreadItem::Delta {
+                        item_id: TurnItemId(Uuid::from_u128(0x6)),
+                        channel: DeltaChannel::Text,
+                        rev: 5,
+                        text: " the shared temp dir.".into(),
+                    }),
+                ],
+            }),
+        ),
+        (
+            "client_subscribe_shell",
+            Client(ClientMessage::Subscribe(Subscribe {
+                channel: 4,
+                stream: StreamSpec::Shell(ShellSpec::default()),
+                after: None,
+                window: None,
+            })),
+        ),
+        (
+            "server_items_shell",
+            Server(ServerMessage::Items {
+                channel: 4,
+                items: vec![
+                    StreamItem::Shell(ShellItem::Snapshot {
+                        cursor: sequence(1_040),
+                        projects: vec![project.clone()],
+                        threads: vec![row.clone()],
+                        complete: true,
+                    }),
+                    StreamItem::Shell(ShellItem::Synchronized {
+                        cursor: sequence(1_040),
+                    }),
+                    StreamItem::Shell(ShellItem::ThreadUpdated {
+                        seq: 1_042,
+                        row,
+                        location: ShellLocation::Archived,
+                    }),
+                    StreamItem::Shell(ShellItem::ProjectUpdated {
+                        seq: 1_043,
+                        row: project,
+                    }),
+                    StreamItem::Shell(ShellItem::ThreadRemoved {
+                        seq: 1_044,
+                        thread_id: ThreadId(THREAD),
+                    }),
+                ],
+            }),
+        ),
+        (
+            "client_subscribe_command_output",
+            Client(ClientMessage::Subscribe(Subscribe {
+                channel: 5,
+                stream: StreamSpec::CommandOutput(CommandOutputSpec {
+                    thread_id: ThreadId(THREAD),
+                    item_id: TurnItemId(ITEM),
+                }),
+                after: None,
+                window: None,
+            })),
+        ),
+        (
+            "server_items_command_output",
+            Server(ServerMessage::Items {
+                channel: 5,
+                items: vec![
+                    StreamItem::CommandOutput(CommandOutputItem::Replace {
+                        text: "running 3 tests\n".into(),
+                        truncated: false,
+                        running: true,
+                    }),
+                    StreamItem::CommandOutput(CommandOutputItem::Append {
+                        text: "test a ... ok\n".into(),
+                    }),
+                    StreamItem::CommandOutput(CommandOutputItem::Finished {
+                        exit_code: Some(101),
+                        truncated: false,
+                    }),
+                ],
+            }),
+        ),
+    ]
+}
+
 fn samples() -> Vec<(&'static str, Sample)> {
+    let mut samples = base_samples();
+    samples.extend(orchestration_samples());
+    samples
+}
+
+fn base_samples() -> Vec<(&'static str, Sample)> {
     use Sample::{Client, Server};
     vec![
         (

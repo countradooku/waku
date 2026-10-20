@@ -13,6 +13,16 @@ function normalizeMap(value: any, normalize: (item: any) => any): any {
   return value;
 }
 
+export function normalizeAppThread(value: any): T.AppThread {
+  if (value["forkedFrom"] != null) value["forkedFrom"] = normalizeForkOrigin(value["forkedFrom"]);
+  return value;
+}
+
+export function normalizeArchivedPage(value: any): T.ArchivedPage {
+  if (value["rows"] != null) value["rows"] = value["rows"].map((item: any) => normalizeThreadRow(item));
+  return value;
+}
+
 export function normalizeBlobDownloadItem(value: any): T.BlobDownloadItem {
   switch (value?.type) {
     case "meta": {
@@ -57,6 +67,163 @@ export function normalizeClientMessage(value: any): T.ClientMessage {
   }
 }
 
+export function normalizeCommand(value: any): T.Command {
+  switch (value?.type) {
+    case "project.create": {
+      return value;
+    }
+    case "project.rename": {
+      return value;
+    }
+    case "project.reorder": {
+      return value;
+    }
+    case "project.remove": {
+      return value;
+    }
+    case "thread.create": {
+      if (value["workspace"] != null) value["workspace"] = normalizeWorkspaceStrategy(value["workspace"]);
+      return value;
+    }
+    case "thread.archive": {
+      return value;
+    }
+    case "thread.unarchive": {
+      return value;
+    }
+    case "thread.delete": {
+      return value;
+    }
+    case "thread.settle": {
+      return value;
+    }
+    case "thread.unsettle": {
+      return value;
+    }
+    case "thread.auto_settle.set": {
+      return value;
+    }
+    case "thread.snooze": {
+      return value;
+    }
+    case "thread.unsnooze": {
+      return value;
+    }
+    case "thread.pin": {
+      return value;
+    }
+    case "thread.unpin": {
+      return value;
+    }
+    case "thread.pin.reorder": {
+      return value;
+    }
+    case "thread.active.reorder": {
+      return value;
+    }
+    case "thread.visit": {
+      return value;
+    }
+    case "thread.mark_unread": {
+      return value;
+    }
+    case "thread.rename": {
+      return value;
+    }
+    case "thread.title.regenerate": {
+      return value;
+    }
+    case "thread.workspace.set": {
+      return value;
+    }
+    case "thread.runtime_mode.set": {
+      return value;
+    }
+    case "thread.interaction_mode.set": {
+      return value;
+    }
+    case "thread.model_selection.set": {
+      return value;
+    }
+    case "thread.limit_recovery.set": {
+      return value;
+    }
+    case "message.dispatch": {
+      if (value["mode"] != null) value["mode"] = normalizeDispatchMode(value["mode"]);
+      return value;
+    }
+    case "run.interrupt": {
+      return value;
+    }
+    case "prepared_run.retry": {
+      return value;
+    }
+    case "queue.resume": {
+      return value;
+    }
+    case "queued_run.cancel": {
+      return value;
+    }
+    case "queued_run.reorder": {
+      return value;
+    }
+    case "queued_run.edit": {
+      return value;
+    }
+    case "queued_run.promote_to_steer": {
+      return value;
+    }
+    case "runtime_request.respond": {
+      if (value["response"] != null) value["response"] = normalizeRuntimeResponse(value["response"]);
+      return value;
+    }
+    case "user_input.dismiss": {
+      return value;
+    }
+    case "subagent.stop": {
+      return value;
+    }
+    case "checkpoint.rollback": {
+      return value;
+    }
+    case "provider_session.detach": {
+      return value;
+    }
+    case "thread.fork": {
+      return value;
+    }
+    case "thread.merge_back": {
+      return value;
+    }
+    case "provider.switch": {
+      return value;
+    }
+    default:
+      return value;
+  }
+}
+
+export function normalizeCommandOutputItem(value: any): T.CommandOutputItem {
+  switch (value?.type) {
+    case "replace": {
+      return value;
+    }
+    case "append": {
+      return value;
+    }
+    case "finished": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.CommandOutputItem;
+  }
+}
+
+export function normalizeContextTransfer(value: any): T.ContextTransfer {
+  if (value["resolution"] != null) value["resolution"] = normalizeTransferResolution(value["resolution"]);
+  return value;
+}
+
 export function normalizeCredential(value: any): T.Credential {
   switch (value?.type) {
     case "local": {
@@ -70,6 +237,99 @@ export function normalizeCredential(value: any): T.Credential {
     }
     default:
       return { type: "unknown", rawType: String(value?.type) } as T.Credential;
+  }
+}
+
+export function normalizeDispatchCommand(value: any): T.DispatchCommand {
+  return normalizeCommand(value);
+}
+
+export function normalizeDispatchMode(value: any): T.DispatchMode {
+  switch (value?.type) {
+    case "auto": {
+      return value;
+    }
+    case "start_immediately": {
+      return value;
+    }
+    case "queue_after_active": {
+      return value;
+    }
+    case "steer_active": {
+      return value;
+    }
+    case "restart_active": {
+      return value;
+    }
+    case "defer_start": {
+      if (value["workspace"] != null) value["workspace"] = normalizeWorkspaceStrategy(value["workspace"]);
+      return value;
+    }
+    default:
+      return value;
+  }
+}
+
+export function normalizeDispatchParams(value: any): T.DispatchParams {
+  if (value["command"] != null) value["command"] = normalizeDispatchCommand(value["command"]);
+  return value;
+}
+
+export function normalizeDomainEvent(value: any): T.DomainEvent {
+  switch (value?.type) {
+    case "project.updated": {
+      return value;
+    }
+    case "thread.updated": {
+      return normalizeThreadUpdate(value) as T.DomainEvent;
+    }
+    case "run.updated": {
+      return normalizeRun(value) as T.DomainEvent;
+    }
+    case "run_attempt.updated": {
+      return value;
+    }
+    case "node.updated": {
+      return value;
+    }
+    case "subagent.updated": {
+      return value;
+    }
+    case "provider_session.updated": {
+      return value;
+    }
+    case "provider_thread.updated": {
+      return value;
+    }
+    case "provider_turn.updated": {
+      return value;
+    }
+    case "runtime_request.updated": {
+      return normalizeRuntimeRequest(value) as T.DomainEvent;
+    }
+    case "message.updated": {
+      return normalizeMessage(value) as T.DomainEvent;
+    }
+    case "plan.updated": {
+      return normalizePlan(value) as T.DomainEvent;
+    }
+    case "turn_item.updated": {
+      return normalizeTurnItem(value) as T.DomainEvent;
+    }
+    case "checkpoint_scope.updated": {
+      return value;
+    }
+    case "checkpoint.updated": {
+      return value;
+    }
+    case "context_transfer.updated": {
+      return normalizeContextTransfer(value) as T.DomainEvent;
+    }
+    case "context_handoff.updated": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.DomainEvent;
   }
 }
 
@@ -152,8 +412,35 @@ export function normalizeFilesReadParams(value: any): T.FilesReadParams {
   return value;
 }
 
+export function normalizeForkOrigin(value: any): T.ForkOrigin {
+  switch (value?.type) {
+    case "run": {
+      return value;
+    }
+    case "node": {
+      return value;
+    }
+    case "provider_thread": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.ForkOrigin;
+  }
+}
+
 export function normalizeHello(value: any): T.Hello {
   if (value["credential"] != null) value["credential"] = normalizeCredential(value["credential"]);
+  return value;
+}
+
+export function normalizeHistoryPage(value: any): T.HistoryPage {
+  if (value["items"] != null) value["items"] = value["items"].map((item: any) => normalizeTurnItem(item));
+  if (value["runs"] != null) value["runs"] = value["runs"].map((item: any) => normalizeRun(item));
+  return value;
+}
+
+export function normalizeMessage(value: any): T.Message {
+  if (value["notification"] != null) value["notification"] = normalizeNotification(value["notification"]);
   return value;
 }
 
@@ -170,6 +457,70 @@ export function normalizeNotice(value: any): T.Notice {
   }
 }
 
+export function normalizeNotification(value: any): T.Notification {
+  if (value["source"] != null) value["source"] = normalizeNotificationSource(value["source"]);
+  return value;
+}
+
+export function normalizeNotificationSource(value: any): T.NotificationSource {
+  switch (value?.type) {
+    case "delegated_task": {
+      return value;
+    }
+    case "subagent": {
+      return value;
+    }
+    case "command": {
+      return value;
+    }
+    case "monitor": {
+      return value;
+    }
+    case "system": {
+      return value;
+    }
+    case "background_task": {
+      return value;
+    }
+    default:
+      return { type: "background_task" } as T.NotificationSource;
+  }
+}
+
+export function normalizePlan(value: any): T.Plan {
+  if (value["kind"] != null) value["kind"] = normalizePlanKind(value["kind"]);
+  return value;
+}
+
+export function normalizePlanKind(value: any): T.PlanKind {
+  switch (value?.type) {
+    case "proposed_plan": {
+      return value;
+    }
+    case "todo_list": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.PlanKind;
+  }
+}
+
+export function normalizeResponseCapability(value: any): T.ResponseCapability {
+  switch (value?.type) {
+    case "live": {
+      return value;
+    }
+    case "message": {
+      return value;
+    }
+    case "not_resumable": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.ResponseCapability;
+  }
+}
+
 export function normalizeRootRef(value: any): T.RootRef {
   switch (value?.type) {
     case "project": {
@@ -183,6 +534,33 @@ export function normalizeRootRef(value: any): T.RootRef {
     }
     default:
       return { type: "unknown", rawType: String(value?.type) } as T.RootRef;
+  }
+}
+
+export function normalizeRun(value: any): T.Run {
+  if (value["workspacePreparation"] != null) value["workspacePreparation"] = normalizeWorkspaceStrategy(value["workspacePreparation"]);
+  return value;
+}
+
+export function normalizeRuntimeRequest(value: any): T.RuntimeRequest {
+  if (value["response"] != null) value["response"] = normalizeRuntimeResponse(value["response"]);
+  if (value["responseCapability"] != null) value["responseCapability"] = normalizeResponseCapability(value["responseCapability"]);
+  return value;
+}
+
+export function normalizeRuntimeResponse(value: any): T.RuntimeResponse {
+  switch (value?.type) {
+    case "approval": {
+      return value;
+    }
+    case "user_input": {
+      return value;
+    }
+    case "dismiss": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.RuntimeResponse;
   }
 }
 
@@ -239,6 +617,35 @@ export function normalizeSettingsItem(value: any): T.SettingsItem {
   }
 }
 
+export function normalizeShellItem(value: any): T.ShellItem {
+  switch (value?.type) {
+    case "snapshot": {
+      if (value["cursor"] != null) value["cursor"] = normalizeStreamCursor(value["cursor"]);
+      if (value["threads"] != null) value["threads"] = value["threads"].map((item: any) => normalizeThreadRow(item));
+      return value;
+    }
+    case "projectUpdated": {
+      return value;
+    }
+    case "projectRemoved": {
+      return value;
+    }
+    case "threadUpdated": {
+      if (value["row"] != null) value["row"] = normalizeThreadRow(value["row"]);
+      return value;
+    }
+    case "threadRemoved": {
+      return value;
+    }
+    case "synchronized": {
+      if (value["cursor"] != null) value["cursor"] = normalizeStreamCursor(value["cursor"]);
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.ShellItem;
+  }
+}
+
 export function normalizeStreamCursor(value: any): T.StreamCursor {
   switch (value?.type) {
     case "sequence": {
@@ -263,6 +670,15 @@ export function normalizeStreamSpec(value: any): T.StreamSpec {
     case "blobDownload": {
       return value;
     }
+    case "shell": {
+      return value;
+    }
+    case "thread": {
+      return value;
+    }
+    case "commandOutput": {
+      return value;
+    }
     default:
       return { type: "unknown", rawType: String(value?.type) } as T.StreamSpec;
   }
@@ -274,15 +690,222 @@ export function normalizeSubscribe(value: any): T.Subscribe {
   return value;
 }
 
+export function normalizeThreadItem(value: any): T.ThreadItem {
+  switch (value?.type) {
+    case "snapshot": {
+      return normalizeThreadSnapshot(value) as T.ThreadItem;
+    }
+    case "event": {
+      if (value["event"] != null) value["event"] = normalizeDomainEvent(value["event"]);
+      return value;
+    }
+    case "delta": {
+      return value;
+    }
+    case "synchronized": {
+      if (value["cursor"] != null) value["cursor"] = normalizeStreamCursor(value["cursor"]);
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.ThreadItem;
+  }
+}
+
+export function normalizeThreadProjection(value: any): T.ThreadProjection {
+  if (value["contextTransfers"] != null) value["contextTransfers"] = value["contextTransfers"].map((item: any) => normalizeContextTransfer(item));
+  if (value["messages"] != null) value["messages"] = value["messages"].map((item: any) => normalizeMessage(item));
+  if (value["plans"] != null) value["plans"] = value["plans"].map((item: any) => normalizePlan(item));
+  if (value["runs"] != null) value["runs"] = value["runs"].map((item: any) => normalizeRun(item));
+  if (value["runtimeRequests"] != null) value["runtimeRequests"] = value["runtimeRequests"].map((item: any) => normalizeRuntimeRequest(item));
+  if (value["thread"] != null) value["thread"] = normalizeAppThread(value["thread"]);
+  if (value["turnItems"] != null) value["turnItems"] = value["turnItems"].map((item: any) => normalizeTurnItem(item));
+  return value;
+}
+
+export function normalizeThreadRow(value: any): T.ThreadRow {
+  if (value["thread"] != null) value["thread"] = normalizeAppThread(value["thread"]);
+  return value;
+}
+
+export function normalizeThreadSnapshot(value: any): T.ThreadSnapshot {
+  if (value["cursor"] != null) value["cursor"] = normalizeStreamCursor(value["cursor"]);
+  if (value["projection"] != null) value["projection"] = normalizeThreadProjection(value["projection"]);
+  return value;
+}
+
+export function normalizeThreadUpdate(value: any): T.ThreadUpdate {
+  if (value["thread"] != null) value["thread"] = normalizeAppThread(value["thread"]);
+  return value;
+}
+
+export function normalizeToolIcon(value: any): T.ToolIcon {
+  switch (value?.type) {
+    case "website": {
+      return value;
+    }
+    case "native_app": {
+      return value;
+    }
+    case "themed_logo": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.ToolIcon;
+  }
+}
+
+export function normalizeToolPresentation(value: any): T.ToolPresentation {
+  if (value["icon"] != null) value["icon"] = normalizeToolIcon(value["icon"]);
+  if (value["source"] != null) value["source"] = normalizeToolSource(value["source"]);
+  return value;
+}
+
+export function normalizeToolSource(value: any): T.ToolSource {
+  if (value["icon"] != null) value["icon"] = normalizeToolIcon(value["icon"]);
+  return value;
+}
+
+export function normalizeTransferResolution(value: any): T.TransferResolution {
+  switch (value?.type) {
+    case "native_fork": {
+      return value;
+    }
+    case "portable_context": {
+      return value;
+    }
+    case "delta_context": {
+      return value;
+    }
+    case "fork_delta_context": {
+      return value;
+    }
+    case "checkpoint_context": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.TransferResolution;
+  }
+}
+
+export function normalizeTurnItem(value: any): T.TurnItem {
+  if (value["kind"] != null) value["kind"] = normalizeTurnItemKind(value["kind"]);
+  if (value["tool"] != null) value["tool"] = normalizeToolPresentation(value["tool"]);
+  return value;
+}
+
+export function normalizeTurnItemKind(value: any): T.TurnItemKind {
+  switch (value?.type) {
+    case "notification": {
+      return normalizeNotification(value) as T.TurnItemKind;
+    }
+    case "user_message": {
+      return value;
+    }
+    case "assistant_message": {
+      return value;
+    }
+    case "reasoning": {
+      return value;
+    }
+    case "proposed_plan": {
+      return value;
+    }
+    case "todo_list": {
+      return value;
+    }
+    case "user_input_request": {
+      return value;
+    }
+    case "file_change": {
+      return value;
+    }
+    case "command_execution": {
+      return value;
+    }
+    case "file_search": {
+      return value;
+    }
+    case "web_search": {
+      return value;
+    }
+    case "approval_request": {
+      return value;
+    }
+    case "checkpoint": {
+      return value;
+    }
+    case "run_interrupt_request": {
+      return value;
+    }
+    case "run_interrupt_result": {
+      return value;
+    }
+    case "system_notice": {
+      return value;
+    }
+    case "error": {
+      return value;
+    }
+    case "compaction": {
+      return value;
+    }
+    case "handoff": {
+      return value;
+    }
+    case "fork": {
+      if (value["source"] != null) value["source"] = normalizeForkOrigin(value["source"]);
+      return value;
+    }
+    case "thread_created": {
+      return value;
+    }
+    case "secret_request": {
+      return value;
+    }
+    case "subagent": {
+      return value;
+    }
+    case "dynamic_tool": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.TurnItemKind;
+  }
+}
+
+export function normalizeWorkspaceStrategy(value: any): T.WorkspaceStrategy {
+  switch (value?.type) {
+    case "root": {
+      return value;
+    }
+    case "existing_worktree": {
+      return value;
+    }
+    case "new_worktree": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.WorkspaceStrategy;
+  }
+}
+
 /** Normalizes a reply's `ok` by the method of its call. */
 export const resultNormalizers: { readonly [M in MethodName]: (value: any) => MethodResultOf<M> } = {
   "settings.get": (value: any) => value,
   "projects.list": (value: any) => value,
   "files.read": (value: any) => value,
+  "orchestration.dispatch": (value: any) => value,
+  "threads.snapshot": (value: any) => normalizeThreadSnapshot(value),
+  "threads.historyPage": (value: any) => normalizeHistoryPage(value),
+  "threads.turnItem": (value: any) => normalizeTurnItem(value),
+  "threads.archived": (value: any) => normalizeArchivedPage(value),
 };
 
 /** Normalizes one item by the stream of its subscription. */
 export const itemNormalizers: { readonly [S in StreamName]: (value: any) => StreamItemOf<S> } = {
   settings: (value: any) => normalizeSettingsItem(value),
   blobDownload: (value: any) => normalizeBlobDownloadItem(value),
+  shell: (value: any) => normalizeShellItem(value),
+  thread: (value: any) => normalizeThreadItem(value),
+  commandOutput: (value: any) => normalizeCommandOutputItem(value),
 };

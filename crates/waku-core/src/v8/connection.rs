@@ -26,14 +26,15 @@ use tokio::task::AbortHandle;
 use waku_protocol::v8::codec::{self, encode_items_envelope};
 use waku_protocol::v8::frame::FrameLimits;
 use waku_protocol::v8::{
-    ClientMessage, Credential, DEFAULT_DATA_WINDOW, Encoding, End, EndReason, Error, ErrorCode,
-    ErrorDetails, GoodbyeCode, Hello, LIVE_BUDGET_BYTES, LIVE_BUDGET_ITEMS, Limits, Method,
-    ProtocolVersion, RejectCode, Rejected, Reply, Scope, ServerMessage, SessionInfo, StreamCursor,
-    StreamSpec, Subscribe, WRITE_STALL_MS, Welcome,
+    ClientKind, ClientMessage, Credential, DEFAULT_DATA_WINDOW, Encoding, End, EndReason, Error,
+    ErrorCode, ErrorDetails, GoodbyeCode, Hello, LIVE_BUDGET_BYTES, LIVE_BUDGET_ITEMS, Limits,
+    Method, MethodResult, ProtocolVersion, RejectCode, Rejected, Reply, Scope, ServerMessage,
+    SessionInfo, StreamCursor, StreamSpec, Subscribe, WRITE_STALL_MS, Welcome,
 };
 
+use super::orchestration::HubMessage;
 use super::transport::{FrameReader, FrameWriter, Incoming, Outgoing, ReadError};
-use super::{V8Context, methods, streams};
+use super::{V8Context, methods, orchestration, streams};
 
 /// Frames written before the writer flushes even with more queued.
 const MAX_FRAMES_PER_FLUSH: usize = 64;
@@ -65,6 +66,8 @@ pub(crate) struct Conn {
     pub(crate) encoding: Encoding,
     pub(crate) limits: Limits,
     pub(crate) scopes: Vec<Scope>,
+    /// From `hello`; the creation source of dispatched commands.
+    pub(crate) client_kind: ClientKind,
     budget: Budget,
     state: Mutex<State>,
     wake: Notify,
@@ -114,6 +117,9 @@ struct Channel {
     /// DATA chunks of this channel still in the data queue.
     pending_data: usize,
     task: Option<AbortHandle>,
+    /// The hub queue of a `thread` or `shell` stream, for read-your-writes
+    /// barriers.
+    barrier: Option<tokio::sync::mpsc::WeakSender<HubMessage>>,
 }
 
 pub(crate) enum Next {
@@ -139,12 +145,14 @@ impl Conn {
         encoding: Encoding,
         limits: Limits,
         scopes: Vec<Scope>,
+        client_kind: ClientKind,
         budget: Budget,
     ) -> Self {
         Self {
             encoding,
             limits,
             scopes,
+            client_kind,
             budget,
             state: Mutex::new(State {
                 next_nonce: 1,
@@ -317,9 +325,20 @@ impl Conn {
                 credit_wake: Arc::new(Notify::new()),
                 pending_data: 0,
                 task: None,
+                barrier: None,
             },
         );
         Ok(())
+    }
+
+    /// The hub queues of this connection's `thread` and `shell` streams.
+    pub(crate) fn barriers(&self) -> Vec<tokio::sync::mpsc::WeakSender<HubMessage>> {
+        self.state
+            .lock()
+            .channels
+            .values()
+            .filter_map(|channel| channel.barrier.clone())
+            .collect()
     }
 
     pub(crate) fn set_channel_task(&self, channel: u32, task: AbortHandle) {
@@ -458,6 +477,14 @@ pub(crate) struct StreamSink {
 impl StreamSink {
     pub(crate) fn encoding(&self) -> Encoding {
         self.conn.encoding
+    }
+
+    /// Lets `orchestration.dispatch` on this connection wait for this
+    /// stream (read-your-writes).
+    pub(crate) fn register_barrier(&self, sender: tokio::sync::mpsc::WeakSender<HubMessage>) {
+        if let Some(open) = self.conn.state.lock().channels.get_mut(&self.channel) {
+            open.barrier = Some(sender);
+        }
     }
 
     pub(crate) fn max_data_chunk(&self) -> usize {
@@ -787,7 +814,13 @@ pub(crate) async fn serve<S>(
     )
     .await;
 
-    let conn = Arc::new(Conn::new(encoding, limits, scopes, context.budget));
+    let conn = Arc::new(Conn::new(
+        encoding,
+        limits,
+        scopes,
+        hello.client.kind.clone(),
+        context.budget,
+    ));
     let mut writer_task = tokio::spawn(run_writer(conn.clone(), writer));
     tokio::select! {
         () = read_loop(&mut reader, &conn, &context) => {}
@@ -973,12 +1006,24 @@ fn handle_call(conn: &Arc<Conn>, context: &Arc<V8Context>, id: u32, method: Meth
     let task_conn = conn.clone();
     let task_context = context.clone();
     let task = tokio::spawn(async move {
-        let outcome =
-            tokio::task::spawn_blocking(move || methods::handle(&task_context, method)).await;
-        let reply = match outcome {
-            Ok(Ok(result)) => Reply::ok(id, result),
-            Ok(Err(error)) => Reply::error(id, error),
-            Err(_) => Reply::error(id, Error::new(ErrorCode::Internal, "the call failed")),
+        let reply = match method {
+            // Async: it waits for this connection's streams after the commit.
+            Method::OrchestrationDispatch(params) => {
+                match orchestration::dispatch(&task_conn, &task_context, params).await {
+                    Ok(result) => Reply::ok(id, MethodResult::OrchestrationDispatch(result)),
+                    Err(error) => Reply::error(id, error),
+                }
+            }
+            method => {
+                let outcome =
+                    tokio::task::spawn_blocking(move || methods::handle(&task_context, method))
+                        .await;
+                match outcome {
+                    Ok(Ok(result)) => Reply::ok(id, result),
+                    Ok(Err(error)) => Reply::error(id, error),
+                    Err(_) => Reply::error(id, Error::new(ErrorCode::Internal, "the call failed")),
+                }
+            }
         };
         if task_conn.finish_call(id) {
             task_conn.push_reply(reply);
@@ -1041,6 +1086,15 @@ fn handle_subscribe(conn: &Arc<Conn>, context: &Arc<V8Context>, subscribe: Subsc
     let task = match stream {
         StreamSpec::Settings(_) => tokio::spawn(streams::settings(sink, context, after)),
         StreamSpec::BlobDownload(spec) => tokio::spawn(streams::blob_download(sink, context, spec)),
+        StreamSpec::Shell(spec) => {
+            tokio::spawn(orchestration::shell_stream(sink, context, spec, after))
+        }
+        StreamSpec::Thread(spec) => {
+            tokio::spawn(orchestration::thread_stream(sink, context, spec, after))
+        }
+        StreamSpec::CommandOutput(spec) => {
+            tokio::spawn(orchestration::command_output_stream(sink, context, spec))
+        }
         StreamSpec::Unknown => return true,
     };
     conn.set_channel_task(channel, task.abort_handle());
@@ -1058,6 +1112,7 @@ mod tests {
             Encoding::MessagePack,
             Limits::default(),
             vec![Scope::Admin],
+            ClientKind::Desktop,
             budget,
         ))
     }

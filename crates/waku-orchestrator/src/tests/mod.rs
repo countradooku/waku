@@ -15,3 +15,4 @@ mod migrations;
 mod rebuild;
 mod search;
 mod serialization;
+mod streams;

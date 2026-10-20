@@ -4,7 +4,8 @@
 //! The schema walk catches what survives into the wire shape: `Value`
 //! (an unconstrained schema), `untagged` (an `anyOf` that is not an
 //! `Option`), closed string enums, open unions without an `unknown`
-//! fallback, and newtype variants of primitives. `flatten` and `HashMap`
+//! fallback (or an `x-waku-fallback` variant, or `x-waku-closed` for unions
+//! only clients send), and newtype variants of primitives. `flatten` and `HashMap`
 //! leave no trace a schema can tell apart from a nested struct or a
 //! `BTreeMap`, so the sources of `waku_protocol::v8` are scanned for them
 //! (and for the other forbidden attributes) as well.
@@ -142,7 +143,13 @@ fn walk(schema: &Value, path: &str, definitions: &Map<String, Value>, problems: 
         }
     }
     if let Some(variants) = object.get("oneOf").and_then(Value::as_array) {
-        let mut has_unknown = false;
+        // A union only clients send may be closed: the daemon refuses an
+        // unknown tag (`badRequest`) instead of decoding it.
+        let closed = object.get("x-waku-closed") == Some(&Value::Bool(true));
+        // A union may fall back to one of its own variants instead of
+        // `Unknown` (the weakest reading, RFC 0001 amendments).
+        let fallback = object.get("x-waku-fallback").and_then(Value::as_str);
+        let mut has_unknown = closed;
         for (index, variant) in variants.iter().enumerate() {
             let variant_path = format!("{path}/oneOf/{index}");
             let tag = variant
@@ -153,6 +160,7 @@ fn walk(schema: &Value, path: &str, definitions: &Map<String, Value>, problems: 
                     "{variant_path}: union variant without a `type` tag (only internally tagged enums are allowed)"
                 )),
                 Some(tag) if tag.eq_ignore_ascii_case("unknown") => has_unknown = true,
+                Some(tag) if Some(tag) == fallback => has_unknown = true,
                 Some(_) => {}
             }
             if variant.get("$ref").is_some() && !is_object(variant, definitions) {
@@ -328,6 +336,23 @@ mod tests {
             "{joined}"
         );
         assert!(!joined.contains("$defs/Good"), "{joined}");
+    }
+
+    #[test]
+    fn closed_and_fallback_unions_are_accepted() {
+        let tagged = |tag: &str| json!({ "type": "object", "properties": { "type": { "type": "string", "const": tag } } });
+        let problems = lint(json!({
+            "Command": { "oneOf": [tagged("a"), tagged("b")], "x-waku-closed": true },
+            "Source": { "oneOf": [tagged("a"), tagged("fallback")], "x-waku-fallback": "fallback" },
+            "Wrong": { "oneOf": [tagged("a")], "x-waku-fallback": "missing" },
+        }));
+        let joined = problems.join("\n");
+        assert!(!joined.contains("$defs/Command"), "{joined}");
+        assert!(!joined.contains("$defs/Source"), "{joined}");
+        assert!(
+            joined.contains("$defs/Wrong: open union without"),
+            "{joined}"
+        );
     }
 
     #[test]

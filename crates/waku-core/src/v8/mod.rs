@@ -8,11 +8,13 @@
 //!   client with an HTTP upgrade, so the first four bytes tell them apart.
 //!
 //! Methods start as adapters over the existing [`Backend`]; orchestration
-//! (`orchestration.dispatch`, the `shell` and `thread` streams) lands with
-//! #54 on the event store.
+//! (`orchestration.dispatch`, the `threads.*` reads, the `shell`, `thread`
+//! and `commandOutput` streams) is served from an orchestrator when one is
+//! attached ([`orchestration`], #54, #56, #57).
 
 mod connection;
 mod methods;
+pub mod orchestration;
 mod streams;
 mod transport;
 
@@ -46,6 +48,10 @@ pub(crate) struct V8Context {
     pub(crate) budget: Budget,
     pub(crate) hello_deadline: Duration,
     pub(crate) environment: EnvironmentInfo,
+    /// The event store behind orchestration methods and streams; `None`
+    /// until #55 makes it the daemon's source of truth (or
+    /// `WAKU_V8_ORCHESTRATOR` opens one).
+    pub(crate) orchestration: Option<Arc<orchestration::Orchestration>>,
 }
 
 impl V8Context {
@@ -64,14 +70,29 @@ impl V8Context {
             budget: Budget::default(),
             hello_deadline: Duration::from_millis(u64::from(HELLO_DEADLINE_MS)),
             environment: environment(),
+            orchestration: None,
         }
+    }
+
+    /// Serves orchestration from `orchestration`; stream cursors then carry
+    /// its event store's identity.
+    pub(crate) fn with_orchestration(
+        mut self,
+        orchestration: Option<Arc<orchestration::Orchestration>>,
+    ) -> Self {
+        if let Some(orchestration) = &orchestration {
+            self.environment.store_id = orchestration.store_id();
+        }
+        self.orchestration = orchestration;
+        self
     }
 }
 
 fn environment() -> EnvironmentInfo {
     EnvironmentInfo {
-        // TODO(#54): the persistent environment id and the event store's id
-        // (RFC 0001). Until then cursors never span daemon restarts.
+        // TODO(#55): the persistent environment id. The event store's id
+        // replaces `store_id` when an orchestrator is attached
+        // (`with_orchestration`).
         id: process_id(),
         name: host_name(),
         host_os: std::env::consts::OS.into(),
@@ -313,5 +334,7 @@ pub(crate) async fn serve_websocket<S>(
     connection::serve(reader, writer, context, authenticated).await;
 }
 
+#[cfg(all(test, unix))]
+mod orchestration_tests;
 #[cfg(all(test, unix))]
 mod tests;

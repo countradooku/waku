@@ -45,6 +45,28 @@ macro_rules! open_enum {
                 formatter.write_str(self.as_str())
             }
         }
+
+        /// A string enum whose unknown values decode instead of failing
+        /// (`x-waku-open`), as RFC 0003 §1.1 requires.
+        #[cfg(feature = "schema")]
+        impl ::schemars::JsonSchema for $name {
+            fn schema_name() -> ::std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn json_schema(_: &mut ::schemars::SchemaGenerator) -> ::schemars::Schema {
+                let known: ::std::vec::Vec<&'static str> = Self::ALL
+                    .iter()
+                    .map(|value| value.as_str())
+                    .filter(|value| *value != "unknown")
+                    .collect();
+                ::schemars::json_schema!({
+                    "type": "string",
+                    "enum": known,
+                    "x-waku-open": true,
+                })
+            }
+        }
     };
     (
         $(#[$meta:meta])*
@@ -82,6 +104,28 @@ macro_rules! open_enum {
                 formatter.write_str(self.as_str())
             }
         }
+
+        /// A string enum whose unknown values decode instead of failing
+        /// (`x-waku-open`), as RFC 0003 §1.1 requires.
+        #[cfg(feature = "schema")]
+        impl ::schemars::JsonSchema for $name {
+            fn schema_name() -> ::std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn json_schema(_: &mut ::schemars::SchemaGenerator) -> ::schemars::Schema {
+                let known: ::std::vec::Vec<&'static str> = Self::ALL
+                    .iter()
+                    .map(|value| value.as_str())
+                    .filter(|value| *value != "unknown")
+                    .collect();
+                ::schemars::json_schema!({
+                    "type": "string",
+                    "enum": known,
+                    "x-waku-open": true,
+                })
+            }
+        }
     };
 }
 
@@ -94,6 +138,7 @@ macro_rules! uuid_ids {
                 Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord,
                 ::serde::Serialize, ::serde::Deserialize, crate::ts::TS,
             )]
+            #[cfg_attr(feature = "schema", derive(::schemars::JsonSchema))]
             #[serde(transparent)]
             pub struct $name(pub ::uuid::Uuid);
 

@@ -12,6 +12,18 @@ export interface Streams {
     spec: T.BlobDownloadSpec;
     item: T.BlobDownloadItem;
   };
+  shell: {
+    spec: T.ShellSpec;
+    item: T.ShellItem;
+  };
+  thread: {
+    spec: T.ThreadSpec;
+    item: T.ThreadItem;
+  };
+  commandOutput: {
+    spec: T.CommandOutputSpec;
+    item: T.CommandOutputItem;
+  };
 }
 
 export type StreamName = keyof Streams;
@@ -29,4 +41,7 @@ export interface StreamInfo {
 export const STREAMS: { readonly [S in StreamName]: StreamInfo } = {
   settings: { scope: "read", cursor: "revision", data: false },
   blobDownload: { scope: "read", cursor: "offset", data: true },
+  shell: { scope: "read", cursor: "sequence", data: false },
+  thread: { scope: "read", cursor: "sequence", data: false },
+  commandOutput: { scope: "read", cursor: "none", data: false },
 };

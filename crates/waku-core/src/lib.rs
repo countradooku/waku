@@ -92,4 +92,5 @@ pub use server::{
     Backend, EventSink, Listeners, ServerOptions, ShutdownSignal, serve, serve_listeners,
 };
 pub use settings::{DaemonSettings, DaemonSettingsStore};
+pub use v8::orchestration::{ORCHESTRATOR_ENV, Orchestration};
 pub use workspace::{WorkspaceOperation, WorkspaceResult};

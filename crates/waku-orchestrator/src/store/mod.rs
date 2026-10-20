@@ -88,6 +88,10 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(what: &str, json: &str) -> 
 /// a background WAL checkpointer.
 pub struct Store {
     path: PathBuf,
+    /// Identifies this event log (RFC 0003 §4 `StreamCursor::sequence`):
+    /// random when the file is created, so a cursor of another (or a
+    /// recreated) database never resumes here.
+    store_id: uuid::Uuid,
     writer: Mutex<Connection>,
     readers: ReadPool,
     checkpointer: Checkpointer,
@@ -172,12 +176,14 @@ impl Store {
         set_pragma(&writer, "auto_vacuum", "INCREMENTAL")?;
         set_pragma(&writer, "journal_mode", "WAL")?;
         apply_migrations(&mut writer)?;
+        let store_id = ensure_store_id(&writer)?;
         set_pragma(&writer, "wal_autocheckpoint", "0")?;
         let readers = (0..read_connections.max(1))
             .map(|_| open_reader(path))
             .collect::<StoreResult<Vec<_>>>()?;
         Ok(Self {
             path: path.to_owned(),
+            store_id,
             writer: Mutex::new(writer),
             readers: ReadPool {
                 connections: readers.into_iter().map(Mutex::new).collect(),
@@ -189,6 +195,11 @@ impl Store {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The identity of this event log; stream cursors carry it.
+    pub fn store_id(&self) -> uuid::Uuid {
+        self.store_id
     }
 
     /// Tells the checkpointer the WAL grew.
@@ -224,6 +235,27 @@ impl ReadPool {
         let index = self.next.fetch_add(1, Ordering::Relaxed) % self.connections.len();
         read(&self.connections[index].lock())
     }
+}
+
+/// Reads the store identity, creating it on first open. Like the migration
+/// ledger it lives outside the numbered migrations: it describes the file,
+/// not the schema.
+fn ensure_store_id(connection: &Connection) -> StoreResult<uuid::Uuid> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS store_identity (
+           singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+           store_id   TEXT    NOT NULL,
+           created_at INTEGER NOT NULL
+         ) STRICT;",
+    )?;
+    connection.execute(
+        "INSERT OR IGNORE INTO store_identity (singleton, store_id, created_at) VALUES (1, ?1, ?2)",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), now_millis()],
+    )?;
+    let text: String =
+        connection.query_row("SELECT store_id FROM store_identity", [], |row| row.get(0))?;
+    uuid::Uuid::parse_str(&text)
+        .map_err(|error| StoreError::Corrupt(format!("store_identity: {error}")))
 }
 
 fn configure(connection: &Connection) -> StoreResult<()> {

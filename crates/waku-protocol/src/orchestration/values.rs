@@ -82,6 +82,7 @@ open_enum! {
 /// A provider-native id with its strength. App ids are primary; this is a
 /// reference only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderRef {
     pub driver: DriverKind,
@@ -111,6 +112,7 @@ impl ProviderRef {
 
 /// The provider, model and per-model options of a thread or run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSelection {
     pub instance: ProviderInstanceId,
@@ -164,6 +166,7 @@ open_enum! {
 
 /// Where a thread's next run works.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -202,6 +205,7 @@ open_enum! {
 
 /// A normalized provider or preparation failure.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderFailure {
     pub class: FailureClass,
@@ -245,6 +249,7 @@ impl ProviderFailure {
 
 /// Token accounting as the provider reports it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
     pub used: u64,
@@ -266,6 +271,7 @@ pub struct TokenUsage {
 /// A file attached to a message. Mirrors `model::MessageAttachment` with
 /// camelCase field names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
     /// Absolute path on the daemon host, handed to the provider.
@@ -285,6 +291,7 @@ pub struct Attachment {
 /// A composer context record (a file, a selection, a terminal excerpt…).
 /// The record body is opaque to the orchestrator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ContextRecord {
     pub context_id: String,
@@ -299,6 +306,7 @@ pub struct ContextRecord {
 /// One option of an approval request. `id` is the provider's own option id,
 /// kept through normalization (RFC 0002).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionOption {
     pub id: String,
@@ -308,6 +316,7 @@ pub struct PermissionOption {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputOption {
     pub label: String,
@@ -316,6 +325,7 @@ pub struct UserInputOption {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQuestion {
     pub id: String,
@@ -328,6 +338,7 @@ pub struct UserInputQuestion {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputAnswer {
     pub question_id: String,
@@ -347,6 +358,7 @@ open_enum! {
 
 /// A provider-persisted objective (Codex and Claude `/goal`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadGoal {
     pub objective: String,
@@ -361,6 +373,7 @@ pub struct ThreadGoal {
 
 /// How full the provider's context window is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsage {
     pub tokens: u64,
@@ -371,6 +384,11 @@ pub struct ContextUsage {
 /// Where a background-work notification came from. As in T3, an unknown
 /// source decodes as `BackgroundTask` (RFC 0001 "Turn items").
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema",
+    schemars(extend("x-waku-fallback" = "background_task"))
+)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -405,6 +423,7 @@ open_enum! {
 
 /// A background-work notification carried by a message or a turn item.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Notification {
     pub source: NotificationSource,
@@ -423,6 +442,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PlanStep {
     pub id: String,
@@ -432,6 +452,7 @@ pub struct PlanStep {
 
 /// One file of a checkpoint diff summary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CheckpointFile {
     pub path: String,
@@ -443,6 +464,7 @@ pub struct CheckpointFile {
 
 /// How a run continues an earlier one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunContinuation {
     pub kind: ContinuationKind,
@@ -459,6 +481,7 @@ open_enum! {
 
 /// An inclusive range of app run ordinals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunOrdinalRange {
     pub first: u32,
@@ -467,6 +490,7 @@ pub struct RunOrdinalRange {
 
 /// A user's answer to a runtime request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",

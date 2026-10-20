@@ -16,6 +16,26 @@ export interface Methods {
     params: T.FilesReadParams;
     result: T.FileContent;
   };
+  "orchestration.dispatch": {
+    params: T.DispatchParams;
+    result: T.DispatchResult;
+  };
+  "threads.snapshot": {
+    params: T.ThreadSnapshotParams;
+    result: T.ThreadSnapshot;
+  };
+  "threads.historyPage": {
+    params: T.HistoryPageParams;
+    result: T.HistoryPage;
+  };
+  "threads.turnItem": {
+    params: T.TurnItemParams;
+    result: T.TurnItem;
+  };
+  "threads.archived": {
+    params: T.ArchivedParams;
+    result: T.ArchivedPage;
+  };
 }
 
 export type MethodName = keyof Methods;
@@ -33,4 +53,9 @@ export const METHODS: { readonly [M in MethodName]: MethodInfo } = {
   "settings.get": { scope: "read", opId: false },
   "projects.list": { scope: "read", opId: false },
   "files.read": { scope: "files:read", opId: false },
+  "orchestration.dispatch": { scope: "read", opId: false },
+  "threads.snapshot": { scope: "read", opId: false },
+  "threads.historyPage": { scope: "read", opId: false },
+  "threads.turnItem": { scope: "read", opId: false },
+  "threads.archived": { scope: "read", opId: false },
 };

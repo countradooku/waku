@@ -671,6 +671,11 @@ impl Orchestrator {
         &self.store
     }
 
+    /// The identity of the event log, for stream cursors (RFC 0003 §4).
+    pub fn store_id(&self) -> uuid::Uuid {
+        self.store.store_id()
+    }
+
     pub fn clock(&self) -> &Arc<dyn Clock> {
         &self.clock
     }

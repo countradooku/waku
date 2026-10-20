@@ -11,6 +11,7 @@ use super::values::{RefStrength, RuntimeMode};
 use crate::ts::TS;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct Capabilities {
     pub sessions: SessionCaps,
@@ -29,6 +30,7 @@ pub struct Capabilities {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct SessionCaps {
     pub multiple_threads_per_session: bool,
@@ -39,6 +41,7 @@ pub struct SessionCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct ThreadCaps {
     pub create_empty_thread: bool,
@@ -51,6 +54,7 @@ pub struct ThreadCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct TurnCaps {
     pub native_turn_id: bool,
@@ -66,6 +70,7 @@ pub struct TurnCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct StreamingCaps {
     pub assistant_text: bool,
@@ -76,6 +81,7 @@ pub struct StreamingCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct ToolCaps {
     pub tool_item_ids: bool,
@@ -87,6 +93,7 @@ pub struct ToolCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct ApprovalCaps {
     pub command: bool,
@@ -100,6 +107,7 @@ pub struct ApprovalCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct PlanningCaps {
     pub emits_plan_updated: bool,
@@ -110,6 +118,7 @@ pub struct PlanningCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct SubagentCaps {
     pub supported: bool,
@@ -121,6 +130,7 @@ pub struct SubagentCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct ContextCaps {
     pub accepts_system_context: bool,
@@ -138,6 +148,7 @@ pub struct ContextCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct CheckpointCaps {
     pub app_can_checkpoint_filesystem: bool,
@@ -148,6 +159,7 @@ pub struct CheckpointCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct IdentityCaps {
     pub thread_ids: RefStrength,
@@ -157,6 +169,7 @@ pub struct IdentityCaps {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct RuntimePolicyCaps {
     pub enforcement: Enforcement,
@@ -184,6 +197,7 @@ open_enum! {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct ExtraCaps {
     pub native_image_input: bool,

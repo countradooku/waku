@@ -35,6 +35,7 @@ use tokio_tungstenite::tungstenite::{self, Message};
 use uuid::Uuid;
 
 use waku_protocol::v8::frame::{PrefaceCheck, check_preface};
+use waku_protocol::v8::orchestration::{ShellItem, ThreadItem};
 pub use waku_protocol::v8::*;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -753,7 +754,7 @@ where
 }
 
 /// The cursor an item advances its subscription to.
-fn item_cursor(item: &StreamItem) -> Option<StreamCursor> {
+fn item_cursor(item: &StreamItem, previous: Option<&StreamCursor>) -> Option<StreamCursor> {
     match item {
         StreamItem::Settings(SettingsItem::Snapshot { revision, .. })
         | StreamItem::Settings(SettingsItem::Updated { revision, .. }) => {
@@ -762,6 +763,27 @@ fn item_cursor(item: &StreamItem) -> Option<StreamCursor> {
             })
         }
         StreamItem::Settings(SettingsItem::Synchronized { cursor }) => Some(cursor.clone()),
+        // Shell and thread items carry the sequence of the event store whose
+        // id the snapshot or `synchronized` cursor named.
+        StreamItem::Thread(ThreadItem::Snapshot(snapshot)) => Some(snapshot.cursor.clone()),
+        StreamItem::Thread(ThreadItem::Synchronized { cursor })
+        | StreamItem::Shell(ShellItem::Synchronized { cursor })
+        | StreamItem::Shell(ShellItem::Snapshot { cursor, .. }) => Some(cursor.clone()),
+        StreamItem::Thread(ThreadItem::Event { seq, .. })
+        | StreamItem::Shell(
+            ShellItem::ProjectUpdated { seq, .. }
+            | ShellItem::ProjectRemoved { seq, .. }
+            | ShellItem::ThreadUpdated { seq, .. }
+            | ShellItem::ThreadRemoved { seq, .. },
+        ) => {
+            let StreamCursor::Sequence { store, .. } = previous? else {
+                return None;
+            };
+            Some(StreamCursor::Sequence {
+                store: *store,
+                seq: *seq,
+            })
+        }
         _ => None,
     }
 }
@@ -786,7 +808,7 @@ fn deliver(message: ServerMessage, inner: &Inner) -> bool {
             let mut routing = inner.routing.lock();
             if let Some(state) = routing.subscriptions.get_mut(&channel) {
                 for item in items {
-                    if let Some(cursor) = item_cursor(&item) {
+                    if let Some(cursor) = item_cursor(&item, state.cursor.as_ref()) {
                         state.cursor = Some(cursor);
                     }
                     let _ = state.events.send(StreamEvent::Item(item));

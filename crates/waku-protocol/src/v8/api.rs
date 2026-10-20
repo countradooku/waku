@@ -1,22 +1,28 @@
 //! The v8 methods and streams (RFC 0003 §5), declared with [`methods!`] and
 //! [`streams!`].
 //!
-//! This is the first vertical slice of #53: methods that already have a v7
-//! backend and need no orchestration. Everything else in RFC 0003 §5.2–§5.4
-//! is added here as its backend lands.
+//! #53 declared the methods that already had a v7 backend; #54, #56 and #57
+//! add orchestration: `orchestration.dispatch`, the `threads.*` reads, and
+//! the `shell`, `thread` and `commandOutput` streams, whose envelopes live in
+//! [`super::orchestration`]. Everything else in RFC 0003 §5.2–§5.4 is added
+//! here as its backend lands.
 //!
-//! TODO(#54): `orchestration.dispatch` (with the `Command` union declared by
-//! `commands!` over `crate::orchestration`), the `threads.*` reads, and the
-//! `shell` and `thread` streams (`DomainEvent`, `TurnItem`) plug in here once
-//! `waku_protocol::orchestration` is merged. `projects.list` then returns the
-//! orchestration `Project` entity instead of [`ProjectInfo`].
+//! TODO(#55): `projects.list` returns the orchestration `Project` entity
+//! instead of [`ProjectInfo`] once the orchestrator is the daemon's source of
+//! truth.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
+use super::orchestration::{
+    ArchivedPage, ArchivedParams, CommandOutputItem, CommandOutputSpec, DispatchParams,
+    DispatchResult, HistoryPage, HistoryPageParams, ShellItem, ShellSpec, ThreadItem,
+    ThreadSnapshot, ThreadSnapshotParams, ThreadSpec, TurnItemParams,
+};
 use super::{Scope, StreamCursor};
+use crate::orchestration::TurnItem;
 
 /// A method's static description; implemented by the marker types in
 /// [`method`].
@@ -96,6 +102,19 @@ methods! {
     /// A text file under a root. Text is inline up to
     /// [`MAX_INLINE_TEXT_BYTES`].
     "files.read" => FilesRead(FilesReadParams) -> FileContent, scope = FilesRead;
+    /// Dispatch a command (RFC 0001), idempotent by `commandId`. The scope
+    /// declared here is the floor; each command adds its own
+    /// ([`super::orchestration::command_scopes`]).
+    "orchestration.dispatch" => OrchestrationDispatch(DispatchParams) -> DispatchResult, scope = Read;
+    /// A bounded snapshot of a thread, the same shape as the `thread`
+    /// stream's first item.
+    "threads.snapshot" => ThreadsSnapshot(ThreadSnapshotParams) -> ThreadSnapshot, scope = Read;
+    /// Older turn items, bounded like the snapshot window.
+    "threads.historyPage" => ThreadsHistoryPage(HistoryPageParams) -> HistoryPage, scope = Read;
+    /// One turn item as stored, with the bodies the wire projection omits.
+    "threads.turnItem" => ThreadsTurnItem(TurnItemParams) -> TurnItem, scope = Read;
+    /// Archived threads, paged; the active shell never carries them.
+    "threads.archived" => ThreadsArchived(ArchivedParams) -> ArchivedPage, scope = Read;
 }
 
 streams! {
@@ -105,6 +124,14 @@ streams! {
     /// `meta`, then the blob's bytes as DATA within the credit window with
     /// `FIN` on the last chunk, then `end{completed}`.
     "blobDownload" => BlobDownload(BlobDownloadSpec) -> BlobDownloadItem, cursor = Offset, scope = Read, data;
+    /// Navigation rows: a snapshot (or the deltas since `after`), then
+    /// `synchronized`, then a delta per changed row.
+    "shell" => Shell(ShellSpec) -> ShellItem, cursor = Sequence, scope = Read;
+    /// One thread: a bounded snapshot or the replayed gap, `synchronized`,
+    /// then its events and live `delta`s.
+    "thread" => Thread(ThreadSpec) -> ThreadItem, cursor = Sequence, scope = Read;
+    /// The live output of one command, while its row is expanded.
+    "commandOutput" => CommandOutput(CommandOutputSpec) -> CommandOutputItem, cursor = None, scope = Read;
 }
 
 /// The params of a method that takes none: an empty map.
@@ -330,7 +357,19 @@ mod tests {
             CursorKind::Revision
         );
         let names = methods().iter().map(|info| info.name).collect::<Vec<_>>();
-        assert_eq!(names, ["settings.get", "projects.list", "files.read"]);
+        assert_eq!(
+            names,
+            [
+                "settings.get",
+                "projects.list",
+                "files.read",
+                "orchestration.dispatch",
+                "threads.snapshot",
+                "threads.historyPage",
+                "threads.turnItem",
+                "threads.archived",
+            ]
+        );
         let spec = <stream::Settings as StreamDef>::wrap(SettingsSpec {});
         assert_eq!(
             serde_json::to_value(&spec).unwrap(),

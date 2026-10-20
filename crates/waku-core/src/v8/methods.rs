@@ -31,6 +31,13 @@ pub(crate) fn handle(context: &V8Context, method: Method) -> Result<MethodResult
             projects(context)?.iter().map(project_info).collect(),
         )),
         Method::FilesRead(params) => files_read(context, params).map(MethodResult::FilesRead),
+        method @ (Method::OrchestrationDispatch(_)
+        | Method::ThreadsSnapshot(_)
+        | Method::ThreadsHistoryPage(_)
+        | Method::ThreadsTurnItem(_)
+        | Method::ThreadsArchived(_)) => {
+            super::orchestration::handle(context, method).expect("an orchestration method")
+        }
         Method::Unknown { name } => Err(Error::new(
             ErrorCode::UnknownMethod,
             format!("unknown method {name}"),
@@ -97,10 +104,10 @@ fn root_path(context: &V8Context, root: &RootRef) -> Result<PathBuf, Error> {
                     },
                 )
             }),
-        RootRef::Thread { .. } => Err(Error::new(
-            ErrorCode::Unsupported,
-            "thread roots arrive with the orchestrator",
-        )),
+        RootRef::Thread { thread_id } => super::orchestration::thread_root(
+            context,
+            waku_protocol::orchestration::ThreadId(*thread_id),
+        ),
         RootRef::Unknown => Err(Error::new(ErrorCode::BadRequest, "unknown root kind")),
     }
 }

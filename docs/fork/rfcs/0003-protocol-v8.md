@@ -71,6 +71,8 @@ MessagePack with named fields costs more bytes than postcard. Field names add ro
 - **Bytes:** MessagePack `bin` via `serde_bytes`, and standard padded base64 in JSON. Byte fields are reserved for small values (under 64 KiB). Bulk bytes use DATA frames ([§5.6](#56-blob-transfer)).
 - **Large values.** A response field that can exceed 1 MiB is typed `Payload<T> = inline{value: T} | blob{reference: BlobRef, size}`. The client fetches the blob form through blob transfer.
 
+> **Changed in #54.** Two schema markers relax the open-union rule where it cannot hold. A union that only clients send (`Command`, `DispatchMode`, `ForkSourcePoint`) is marked `x-waku-closed`: the daemon is the side that must refuse what it does not know, so an unknown command fails to decode and the call is answered `badRequest` (RFC 0001: commands have no `Unknown`). A union whose unknown tags decode to one of its own variants (`NotificationSource` → `background_task`, RFC 0001 amendments) is marked `x-waku-fallback`; generated decoders map unknown tags to that variant. The lint accepts both; every other union still needs `Unknown`. Orchestration's fieldless enums use `snake_case` strings and data-carrying unions `snake_case` tags (RFC 0001 amendments), while the v8 envelopes keep `camelCase`.
+
 ### 1.2 Forward compatibility
 
 - An unknown variant tag decodes to `Unknown`. The rest of that value is skipped, and the enclosing frame still decodes.
@@ -383,6 +385,8 @@ type HistoryCursor = String;                     // opaque, at most 4,096 bytes
 - Applying an event is an upsert by entity id (RFC 0001 rule 4). Events with `seq` at or below the client's applied cursor are therefore harmless no-ops.
 - Unknown items still advance the cursor.
 
+> **Changed in #54.** `store` is a random id written once into the `store_identity` table of `state.sqlite` (created by `Store::open` outside the numbered migrations, like the migration ledger, because it describes the file, not the schema). The welcome's `environment.storeId` is that id when the daemon serves orchestration. The thread replay pre-check reads `LENGTH(payload_json)` of at most 129 rows through `events_thread_seq`; the encoded budget is measured as JSON, the larger encoding. The shell gap is counted with `LIMIT 4097` over the primary key.
+
 ## 5. Message catalogue
 
 ### 5.1 Common types
@@ -442,6 +446,14 @@ Entity types for threads, runs, nodes, turn items and the rest are defined by RF
 | `threads.turnDiff` | `{threadId, runId, ignoreWhitespace}` | `ReviewDiff` | `read` | `CollectReviewDiff{LastTurn}` |
 | `threads.fullDiff` | `{threadId, ignoreWhitespace}` | `ReviewDiff` | `read` | new |
 | `checkpoints.list` | `{threadId}` | `Vec<CheckpointInfo{runOrdinal, ref, capturedAt}>` | `read` | `SessionTurnRefs` |
+
+> **Changed in #54, #57.**
+> - `orchestration.dispatch` takes `{commandId, command}` where `command` is RFC 0001's `Command` (dotted tags, R17) and replies `DispatchResult{sequence, duplicate}`. There is no `created`: clients supply the ids of new entities (§5.3). The method's declared scope is the `read` floor; the daemon then checks each command's scopes (`v8::orchestration::command_scopes`, §6.3). Commands are issued as `user` with a creation source from `hello.client.kind`. Read-your-writes (§2.3) holds: the reply waits until the event hub has routed `sequence` and every `thread` and `shell` stream of the connection has queued what it was routed (a barrier through each stream's queue, which also flushes held tool updates), for at most 2 s.
+> - `threads.historyPage` returns `HistoryPage{items, runs, next}`: the runs the page's items belong to instead of `messages`, so no page duplicates the message table (T3 regression §4.7.2). `next` is absent on the oldest page.
+> - `threads.turnItem` returns the stored `TurnItem` without `Payload`: storage already caps the large bodies (command output 256 KiB, R12), so an item fits a message; a larger one is answered `payloadTooLarge` by the connection. Images inside dynamic-tool output are moved to the blob store first and appear as `waku-blob:` references, never data URLs.
+> - `threads.archived` takes `{cursor?, limit?, projectId?}` (archived most recently first, `limit` ≤ 200 and 200 by default).
+> - `threads.snapshot` takes `compactTurnItems` like the `thread` stream.
+> - Until #55 makes the orchestrator the daemon's source of truth, the daemon serves these methods and streams only when `WAKU_V8_ORCHESTRATOR` is set (`1` for `state.sqlite` next to the task store, or a path); otherwise they answer (or end with) `unsupported`, and the legacy protocol is unchanged either way.
 
 **Projects**
 
@@ -639,6 +651,15 @@ Commands that are internal in T3 (`thread.stop`, `checkpoint.rollback.fail`, and
   - Clients subscribe only while a row is expanded.
 - **Terminal tail.** Each terminal retains 5,000 lines and 8 MiB. Eviction never splits a UTF-8 code point, and query/response escape sequences are stripped from retained history.
 - **No polling.** `vcsStatus` and `providers` compute only while someone is subscribed (the "leased to the viewport" rule).
+
+> **Changed in #54.** The `shell` and `thread` streams as implemented:
+> - **Rows.** Project rows are the `Project` entity. A thread row is `ThreadRow{thread: AppThread, activity, pendingRequestCount, queuedRunCount}`: the thread (never its transcript) plus the derived sidebar columns of `p_threads`. `threadUpdated` is sent when a row changes in the subscribed location and once when it leaves it (`location` says where it went); a row whose state did not change is skipped. While events that touch no row commit, the shell re-sends `synchronized` at most once a second so its cursor keeps up (T3 re-sends unchanged rows after 5 s instead). A resume sends one item per row touched since the cursor, at its newest state, under the sequence of its last change, then `synchronized`; after a resume, removals and moves out of the location are sent for every row because the daemon does not know which rows the client still holds.
+> - **Thread snapshot.** `snapshot` carries `ThreadSnapshot{cursor, projection, history?, hasMoreHistory, budgetExceeded}`; `projection` is `ThreadProjection{thread, runs, runAttempts, nodes, subagents, providerSessions, providerThreads, providerTurns, runtimeRequests, messages, plans, checkpointScopes, checkpoints, contextTransfers, contextHandoffs, turnItems}`. The window is selected newest first through `p_turn_items_position`: it stops before the item that would exceed 75 items or 1 MiB of JSON-encoded wire-projected items (at least one is admitted), and before any item older than the tenth user message. The required control records are every pending runtime request with its node and its request turn item, wherever they sit in history. Runs are those of the window plus every non-terminal run (queued ones included), each with its attempts, provider turns, plans, checkpoint scopes and checkpoints; nodes only for non-terminal runs; messages only of non-terminal runs, and with `compactTurnItems` only those no item in the window shows. All of it is read in one read transaction whose head is the cursor; the in-memory `ThreadProjection` of `decide` is not used. A 5,000-message thread opens with a 17 KB snapshot (MessagePack).
+> - **Live.** A subscription registers with the daemon's event hub before its snapshot or replay is read, and drops events at or below the cursor it sent. Each event is wire-projected once and encoded at most once per encoding for every subscriber. The hub queue of a subscription holds 4,096 messages before the subscription ends with `end{overflow}` (the connection's live budget of 1,000 items / 8 MiB applies after it); when the hub itself falls behind the committed feed, every subscription ends that way. Coalescing holds `turn_item.updated` of running or pending tool rows (command execution, dynamic tool, file change, file search, web search, subagent) for 50 ms, a newer update of the same row replacing the held one; any other event, a final update of a held row, 512 held updates or a dispatch barrier flush them first, in sequence order, so a client's cursor never passes an update it has not received.
+> - **Deltas.** The `computerUse` item is not implemented yet. `delta` items come from the provider session manager through `waku_orchestrator::streams::DeltaBus`; a subscriber holds 1,024 before dropping new ones, which its client sees as a `rev` gap.
+> - **Command output.** `commandOutput` sends `replace` first (the retained text: the first 64 KiB, `\n…\n` and the last 192 KiB when anything was dropped), then `append`s, then `finished` followed by `end{completed}`. A command the hub no longer holds is served from its stored item (`replace` with the stored output, `finished`); an unknown item ends `notFound`; a command that finishes without output sends `finished` alone. Evicting a running tail (more than 64 running commands) finishes its subscribers with `truncated`.
+>
+> **Changed in #57.** The wire projection also summarizes a command line or a dynamic-tool input over 4 KiB (`WIRE_VALUE_BYTES`) to its first line within 160 characters, ending in `…` when cut, and sets `outputOmitted` so the client fetches the item. A file change omits `diff`, `oldText` and `newText` and sets `bodyOmitted`. Subagent progress and results, compaction summaries and notification details over 4 KiB are summarized the same way; the handoff summary is dropped. `outputIndicatesFailure` is set from a non-zero exit code or a failed status.
 
 ### 5.5 Domain events and turn items
 

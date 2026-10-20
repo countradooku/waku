@@ -1062,12 +1062,23 @@ pub fn serve_listeners(
         .build()
         .context("could not start the Waku daemon runtime")?;
     let hub = Arc::new(Hub::default());
-    let v8 = Arc::new(crate::v8::V8Context::new(
-        token.clone(),
-        crate::v8::BackendHandle::new(backend.clone(), hub.event_sink(Uuid::nil(), Uuid::nil())),
-        hub.v8_settings.clone(),
-        shutdown.clone(),
-    ));
+    // Orchestration over v8 only when asked for (#54); #55 makes it the
+    // source of truth.
+    let orchestration = crate::v8::orchestration::Orchestration::from_env(|| {
+        crate::persistence::StateStore::default_path().with_file_name("state.sqlite")
+    });
+    let v8 = Arc::new(
+        crate::v8::V8Context::new(
+            token.clone(),
+            crate::v8::BackendHandle::new(
+                backend.clone(),
+                hub.event_sink(Uuid::nil(), Uuid::nil()),
+            ),
+            hub.v8_settings.clone(),
+            shutdown.clone(),
+        )
+        .with_orchestration(orchestration),
+    );
     let dispatcher = Arc::new(RequestDispatcher::new(
         backend.clone(),
         hub.clone(),

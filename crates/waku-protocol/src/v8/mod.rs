@@ -19,9 +19,9 @@
 //! the WebSocket path [`WEBSOCKET_PATH`] with subprotocol
 //! [`WEBSOCKET_SUBPROTOCOL`], and on the local socket behind [`PREFACE`].
 //!
-//! Orchestration (`orchestration.dispatch`, the `shell` and `thread` streams,
-//! `DomainEvent`, `TurnItem`, `Command`) is declared by #54 on top of this
-//! module; see `TODO(#54)` in [`api`].
+//! - [`orchestration`]: the envelopes of `orchestration.dispatch`, the
+//!   `threads.*` reads and the `shell`, `thread` and `commandOutput` streams
+//!   (#54, #56, #57), over the entities of [`crate::orchestration`].
 
 #[macro_use]
 mod macros;
@@ -34,6 +34,7 @@ pub mod error;
 pub mod frame;
 pub mod handshake;
 pub mod message;
+pub mod orchestration;
 #[cfg(feature = "schema")]
 pub mod schema;
 pub mod scope;
@@ -137,4 +138,57 @@ pub const CONSTANTS: &[(&str, u64)] = &[
     ("FRAME_KIND_DATA", frame::KIND_DATA as u64),
     ("FRAME_FLAG_FIN", frame::FLAG_FIN as u64),
     ("FRAME_FLAG_ZSTD", frame::FLAG_ZSTD as u64),
+    (
+        "MAX_HISTORY_CURSOR_BYTES",
+        orchestration::MAX_HISTORY_CURSOR_BYTES as u64,
+    ),
+    (
+        "SNAPSHOT_USER_TURNS",
+        orchestration::SNAPSHOT_USER_TURNS as u64,
+    ),
+    ("SNAPSHOT_ITEMS", orchestration::SNAPSHOT_ITEMS as u64),
+    ("SNAPSHOT_BYTES", orchestration::SNAPSHOT_BYTES as u64),
+    (
+        "THREAD_REPLAY_EVENTS",
+        orchestration::THREAD_REPLAY_EVENTS as u64,
+    ),
+    (
+        "THREAD_REPLAY_BYTES",
+        orchestration::THREAD_REPLAY_BYTES as u64,
+    ),
+    (
+        "SHELL_REPLAY_EVENTS",
+        orchestration::SHELL_REPLAY_EVENTS as u64,
+    ),
+    (
+        "SHELL_SNAPSHOT_BYTES",
+        orchestration::SHELL_SNAPSHOT_BYTES as u64,
+    ),
+    ("TOOL_COALESCE_MS", orchestration::TOOL_COALESCE_MS),
+    (
+        "TOOL_COALESCE_PENDING",
+        orchestration::TOOL_COALESCE_PENDING as u64,
+    ),
+    ("OUTPUT_FRAME_MS", orchestration::OUTPUT_FRAME_MS),
+    (
+        "OUTPUT_OVERFLOW_FRAME_MS",
+        orchestration::OUTPUT_OVERFLOW_FRAME_MS,
+    ),
+    (
+        "OUTPUT_APPEND_BYTES",
+        orchestration::OUTPUT_APPEND_BYTES as u64,
+    ),
+    ("OUTPUT_LIVE_TAILS", orchestration::OUTPUT_LIVE_TAILS as u64),
+    (
+        "OUTPUT_FINISHED_TAILS",
+        orchestration::OUTPUT_FINISHED_TAILS as u64,
+    ),
+    ("OUTPUT_HEAD_BYTES", orchestration::OUTPUT_HEAD_BYTES as u64),
+    ("OUTPUT_TAIL_BYTES", orchestration::OUTPUT_TAIL_BYTES as u64),
+    (
+        "WIRE_SUMMARY_CHARS",
+        orchestration::WIRE_SUMMARY_CHARS as u64,
+    ),
+    ("WIRE_VALUE_BYTES", orchestration::WIRE_VALUE_BYTES as u64),
+    ("MAX_ARCHIVED_PAGE", orchestration::MAX_ARCHIVED_PAGE as u64),
 ];

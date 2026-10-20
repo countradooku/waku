@@ -9035,6 +9035,7 @@ name = "waku-orchestrator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "criterion",
  "crossbeam-channel",
  "parking_lot",
