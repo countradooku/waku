@@ -8853,6 +8853,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "image",
+ "imagesize",
  "libc",
  "mimalloc",
  "nucleo-matcher",

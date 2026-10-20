@@ -315,19 +315,10 @@ fn fixed_hasher() -> std::hash::DefaultHasher {
 
 /// The RGBA size `bytes` decodes to, from the image header alone. Falls back
 /// to a conservative multiple of the encoded size when the header cannot be
-/// read on this platform.
+/// read.
 pub(super) fn estimated_decoded_bytes(bytes: &[u8]) -> usize {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        if let Some((width, height)) = image::ImageReader::new(std::io::Cursor::new(bytes))
-            .with_guessed_format()
-            .ok()
-            .and_then(|reader| reader.into_dimensions().ok())
-        {
-            return (width as usize)
-                .saturating_mul(height as usize)
-                .saturating_mul(4);
-        }
+    if let Ok(size) = imagesize::blob_size(bytes) {
+        return size.width.saturating_mul(size.height).saturating_mul(4);
     }
     bytes.len().saturating_mul(8)
 }
