@@ -307,6 +307,17 @@ impl CommandOutputHub {
     /// (`None` for a command the hub never saw).
     pub fn finish(&self, item_id: TurnItemId, exit_code: Option<i32>) -> Option<StoredOutput> {
         let mut inner = self.inner.lock();
+        if !inner.tails.contains_key(&item_id) {
+            // A command that printed nothing: its waiting subscribers see it
+            // finish.
+            if let Some((_, waiting)) = inner.waiting.remove(&item_id) {
+                for subscriber in waiting.iter().filter_map(Weak::upgrade) {
+                    subscriber.state.lock().finished = Some((exit_code, false));
+                    subscriber.wake();
+                }
+            }
+            return None;
+        }
         let tail = inner.tails.get_mut(&item_id)?;
         let stored = tail.retained.view(&self.config);
         if tail.running {
@@ -543,6 +554,18 @@ mod tests {
                 running: true
             }]
         );
+        // A command that never prints still finishes for its subscribers.
+        let (_, silent) = ids(14);
+        let waiting = hub.subscribe(thread, silent, || {}).unwrap();
+        assert_eq!(hub.finish(silent, Some(1)), None);
+        assert_eq!(
+            waiting.take_frames().0,
+            [CommandOutputItem::Finished {
+                exit_code: Some(1),
+                truncated: false
+            }]
+        );
+        assert!(waiting.is_finished());
     }
 
     #[test]

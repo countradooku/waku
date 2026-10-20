@@ -719,6 +719,36 @@ mod tests {
     }
 
     #[test]
+    fn closed_and_fallback_unions_decode_as_marked() {
+        let tagged = |tag: &str| json!({ "type": "object", "properties": { "type": { "type": "string", "const": tag } }, "required": ["type"] });
+        let document = json!({
+            "$defs": {
+                "Command": { "oneOf": [tagged("a"), tagged("b")], "x-waku-closed": true },
+                "Source": { "oneOf": [tagged("a"), tagged("weakest")], "x-waku-fallback": "weakest" },
+                "Holder": { "type": "object", "properties": {
+                    "command": { "$ref": "#/$defs/Command" },
+                    "source": { "$ref": "#/$defs/Source" },
+                }, "required": ["command", "source"] },
+            },
+            "methods": [],
+            "streams": [],
+            "constants": {},
+            "protocol": { "preface": [1], "websocketPath": "/v8", "websocketSubprotocol": "waku.v8" },
+            "scopes": [],
+            "errorCodes": [],
+        });
+        let files = generate(&document);
+        let types = &files["types.ts"];
+        assert!(!types.contains("rawType"), "{types}");
+        let decode = &files["decode.ts"];
+        assert!(
+            decode.contains("default:\n      return { type: \"weakest\" } as T.Source;"),
+            "{decode}"
+        );
+        assert!(!decode.contains("normalizeCommand"), "{decode}");
+    }
+
+    #[test]
     fn generation_is_deterministic() {
         let document = crate::schema_document();
         assert_eq!(generate(&document), generate(&document));

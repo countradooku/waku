@@ -119,7 +119,7 @@ struct Channel {
     task: Option<AbortHandle>,
     /// The hub queue of a `thread` or `shell` stream, for read-your-writes
     /// barriers.
-    barrier: Option<tokio::sync::mpsc::Sender<HubMessage>>,
+    barrier: Option<tokio::sync::mpsc::WeakSender<HubMessage>>,
 }
 
 pub(crate) enum Next {
@@ -332,7 +332,7 @@ impl Conn {
     }
 
     /// The hub queues of this connection's `thread` and `shell` streams.
-    pub(crate) fn barriers(&self) -> Vec<tokio::sync::mpsc::Sender<HubMessage>> {
+    pub(crate) fn barriers(&self) -> Vec<tokio::sync::mpsc::WeakSender<HubMessage>> {
         self.state
             .lock()
             .channels
@@ -481,7 +481,7 @@ impl StreamSink {
 
     /// Lets `orchestration.dispatch` on this connection wait for this
     /// stream (read-your-writes).
-    pub(crate) fn register_barrier(&self, sender: tokio::sync::mpsc::Sender<HubMessage>) {
+    pub(crate) fn register_barrier(&self, sender: tokio::sync::mpsc::WeakSender<HubMessage>) {
         if let Some(open) = self.conn.state.lock().channels.get_mut(&self.channel) {
             open.barrier = Some(sender);
         }

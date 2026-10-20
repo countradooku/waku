@@ -167,6 +167,8 @@ pub(crate) struct EventHub {
     routes: Mutex<Routes>,
     next: AtomicU64,
     routed: watch::Sender<Sequence>,
+    /// Capacity of each subscription's queue.
+    queue: usize,
 }
 
 /// A subscription's place in the hub; dropping it unsubscribes.
@@ -175,7 +177,9 @@ pub(crate) struct HubSubscription {
     thread: Option<ThreadId>,
     id: u64,
     pub(crate) receiver: mpsc::Receiver<HubMessage>,
-    pub(crate) sender: mpsc::Sender<HubMessage>,
+    /// Weak, so the queue closes once the hub drops the registration
+    /// (overflow, shutdown) and the stream sees it end.
+    pub(crate) sender: mpsc::WeakSender<HubMessage>,
     overflowed: Arc<AtomicBool>,
 }
 
@@ -214,15 +218,20 @@ impl Drop for HubSubscription {
 
 impl EventHub {
     fn new(head: Sequence) -> Self {
+        Self::with_queue(head, HUB_QUEUE)
+    }
+
+    fn with_queue(head: Sequence, queue: usize) -> Self {
         Self {
             routes: Mutex::new(Routes::default()),
             next: AtomicU64::new(1),
             routed: watch::channel(head).0,
+            queue,
         }
     }
 
     fn subscribe(self: &Arc<Self>, thread: Option<ThreadId>) -> HubSubscription {
-        let (sender, receiver) = mpsc::channel(HUB_QUEUE);
+        let (sender, receiver) = mpsc::channel(self.queue);
         let overflowed = Arc::new(AtomicBool::new(false));
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let registration = Registration {
@@ -240,7 +249,7 @@ impl EventHub {
             thread,
             id,
             receiver,
-            sender,
+            sender: sender.downgrade(),
             overflowed,
         }
     }
@@ -507,9 +516,14 @@ pub(crate) async fn dispatch(
         .map_err(dispatch_error)?;
     if orchestration.hub.routed_through(receipt.sequence).await {
         for barrier in conn.barriers() {
+            // A stream that already ended has nothing left to queue.
+            let Some(barrier) = barrier.upgrade() else {
+                continue;
+            };
             let (done, wait) = oneshot::channel();
             let queued = tokio::time::timeout(READ_YOUR_WRITES_TIMEOUT, async {
                 barrier.send(HubMessage::Barrier(done)).await.ok()?;
+                drop(barrier);
                 wait.await.ok()
             })
             .await;
@@ -1066,4 +1080,74 @@ fn serve_stored(sink: &StreamSink, kind: &TurnItemKind) {
         }
     }
     sink.end(EndReason::Completed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use waku_orchestrator::streams::seed::{SeedOptions, seed_history, seed_thread};
+
+    fn orchestrator(root: &std::path::Path) -> Arc<Orchestrator> {
+        Orchestrator::open(
+            OrchestratorConfig::new(root.join("state.sqlite")),
+            Dependencies {
+                clock: Arc::new(waku_orchestrator::ManualClock::new(1_700_000_000_000)),
+                ids: Box::new(waku_orchestrator::SequentialIds::default()),
+                capabilities: Arc::new(NoCapabilities),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_full_hub_queue_ends_its_subscription_with_overflow() {
+        let root = std::env::temp_dir().join(format!("wk8-hub-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        let orchestrator = orchestrator(&root);
+        let (_, thread_id) = seed_thread(&orchestrator, "hub").unwrap();
+        let (_, other) = seed_thread(&orchestrator, "other").unwrap();
+        let feed = orchestrator.subscribe();
+        seed_history(
+            &orchestrator,
+            thread_id,
+            SeedOptions {
+                turns: 1,
+                ..SeedOptions::default()
+            },
+        )
+        .unwrap();
+        let events = feed.drain();
+        assert_eq!(events.len(), 5);
+
+        let hub = Arc::new(EventHub::with_queue(0, 2));
+        let mut full = hub.subscribe(Some(thread_id));
+        let mut quiet = hub.subscribe(Some(other));
+        for event in &events {
+            hub.route(&orchestrator, event);
+        }
+        // Two events fit; the third overflowed and dropped the registration.
+        assert!(matches!(full.receiver.try_recv(), Ok(HubMessage::Event(_))));
+        assert!(matches!(full.receiver.try_recv(), Ok(HubMessage::Event(_))));
+        assert!(matches!(
+            full.receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert_eq!(full.end_reason(), EndReason::Overflow);
+        assert!(full.sender.upgrade().is_none());
+        // Another thread's subscription is unaffected.
+        assert!(matches!(
+            quiet.receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(hub.routes.lock().threads.len(), 1);
+        drop(quiet);
+        assert!(hub.routes.lock().threads.is_empty());
+        // Losing the feed ends every subscription with overflow.
+        let mut kicked = hub.subscribe(None);
+        hub.kick_all();
+        assert!(kicked.receiver.try_recv().is_err());
+        assert_eq!(kicked.end_reason(), EndReason::Overflow);
+        orchestrator.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
