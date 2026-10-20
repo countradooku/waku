@@ -349,7 +349,10 @@ mod tests {
         let joined = problems.join("\n");
         assert!(!joined.contains("$defs/Command"), "{joined}");
         assert!(!joined.contains("$defs/Source"), "{joined}");
-        assert!(joined.contains("$defs/Wrong: open union without"), "{joined}");
+        assert!(
+            joined.contains("$defs/Wrong: open union without"),
+            "{joined}"
+        );
     }
 
     #[test]

@@ -548,7 +548,8 @@ impl Generator {
                 if schema.get("x-waku-closed") == Some(&Value::Bool(true)) {
                     // Only clients send it; nothing to fall back to.
                     text.push_str("    default:\n      return value;\n  }\n}\n");
-                } else if let Some(fallback) = schema.get("x-waku-fallback").and_then(Value::as_str) {
+                } else if let Some(fallback) = schema.get("x-waku-fallback").and_then(Value::as_str)
+                {
                     let _ = writeln!(
                         text,
                         "    default:\n      return {{ type: {} }} as T.{name};\n  }}\n}}",

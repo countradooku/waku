@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use super::{Scope, StreamCursor};
 use crate::orchestration::{
     AppThread, Checkpoint, CheckpointScope, Command, CommandId, ContextHandoff, ContextTransfer,
-    DomainEvent, ExecutionNode, Message, Plan, Project, ProjectId, ProviderSession,
-    ProviderThread, ProviderTurn, Run, RunAttempt, RuntimeRequest, Subagent, ThreadId, TurnItem,
-    TurnItemId, WorkspaceStrategy,
+    DomainEvent, ExecutionNode, Message, Plan, Project, ProjectId, ProviderSession, ProviderThread,
+    ProviderTurn, Run, RunAttempt, RuntimeRequest, Subagent, ThreadId, TurnItem, TurnItemId,
+    WorkspaceStrategy,
 };
 
 fn is_false(value: &bool) -> bool {
@@ -428,7 +428,10 @@ pub enum ThreadItem {
     Snapshot(ThreadSnapshot),
     /// A committed event of the thread, wire-projected. Apply as an upsert
     /// by entity id; `seq` is the stream cursor.
-    Event { seq: u64, event: DomainEvent },
+    Event {
+        seq: u64,
+        event: DomainEvent,
+    },
     /// Live text, never sequenced, persisted or replayed. Apply only when
     /// `rev` is the item's `streamRev + 1`, then increment `streamRev`; on a
     /// gap ignore deltas until the next snapshot of the item.
@@ -439,7 +442,9 @@ pub enum ThreadItem {
         text: String,
     },
     /// The snapshot or replay is complete; data is fresh up to `cursor`.
-    Synchronized { cursor: StreamCursor },
+    Synchronized {
+        cursor: StreamCursor,
+    },
     #[serde(other)]
     Unknown,
 }

@@ -142,23 +142,53 @@ pub const CONSTANTS: &[(&str, u64)] = &[
         "MAX_HISTORY_CURSOR_BYTES",
         orchestration::MAX_HISTORY_CURSOR_BYTES as u64,
     ),
-    ("SNAPSHOT_USER_TURNS", orchestration::SNAPSHOT_USER_TURNS as u64),
+    (
+        "SNAPSHOT_USER_TURNS",
+        orchestration::SNAPSHOT_USER_TURNS as u64,
+    ),
     ("SNAPSHOT_ITEMS", orchestration::SNAPSHOT_ITEMS as u64),
     ("SNAPSHOT_BYTES", orchestration::SNAPSHOT_BYTES as u64),
-    ("THREAD_REPLAY_EVENTS", orchestration::THREAD_REPLAY_EVENTS as u64),
-    ("THREAD_REPLAY_BYTES", orchestration::THREAD_REPLAY_BYTES as u64),
-    ("SHELL_REPLAY_EVENTS", orchestration::SHELL_REPLAY_EVENTS as u64),
-    ("SHELL_SNAPSHOT_BYTES", orchestration::SHELL_SNAPSHOT_BYTES as u64),
+    (
+        "THREAD_REPLAY_EVENTS",
+        orchestration::THREAD_REPLAY_EVENTS as u64,
+    ),
+    (
+        "THREAD_REPLAY_BYTES",
+        orchestration::THREAD_REPLAY_BYTES as u64,
+    ),
+    (
+        "SHELL_REPLAY_EVENTS",
+        orchestration::SHELL_REPLAY_EVENTS as u64,
+    ),
+    (
+        "SHELL_SNAPSHOT_BYTES",
+        orchestration::SHELL_SNAPSHOT_BYTES as u64,
+    ),
     ("TOOL_COALESCE_MS", orchestration::TOOL_COALESCE_MS),
-    ("TOOL_COALESCE_PENDING", orchestration::TOOL_COALESCE_PENDING as u64),
+    (
+        "TOOL_COALESCE_PENDING",
+        orchestration::TOOL_COALESCE_PENDING as u64,
+    ),
     ("OUTPUT_FRAME_MS", orchestration::OUTPUT_FRAME_MS),
-    ("OUTPUT_OVERFLOW_FRAME_MS", orchestration::OUTPUT_OVERFLOW_FRAME_MS),
-    ("OUTPUT_APPEND_BYTES", orchestration::OUTPUT_APPEND_BYTES as u64),
+    (
+        "OUTPUT_OVERFLOW_FRAME_MS",
+        orchestration::OUTPUT_OVERFLOW_FRAME_MS,
+    ),
+    (
+        "OUTPUT_APPEND_BYTES",
+        orchestration::OUTPUT_APPEND_BYTES as u64,
+    ),
     ("OUTPUT_LIVE_TAILS", orchestration::OUTPUT_LIVE_TAILS as u64),
-    ("OUTPUT_FINISHED_TAILS", orchestration::OUTPUT_FINISHED_TAILS as u64),
+    (
+        "OUTPUT_FINISHED_TAILS",
+        orchestration::OUTPUT_FINISHED_TAILS as u64,
+    ),
     ("OUTPUT_HEAD_BYTES", orchestration::OUTPUT_HEAD_BYTES as u64),
     ("OUTPUT_TAIL_BYTES", orchestration::OUTPUT_TAIL_BYTES as u64),
-    ("WIRE_SUMMARY_CHARS", orchestration::WIRE_SUMMARY_CHARS as u64),
+    (
+        "WIRE_SUMMARY_CHARS",
+        orchestration::WIRE_SUMMARY_CHARS as u64,
+    ),
     ("WIRE_VALUE_BYTES", orchestration::WIRE_VALUE_BYTES as u64),
     ("MAX_ARCHIVED_PAGE", orchestration::MAX_ARCHIVED_PAGE as u64),
 ];
