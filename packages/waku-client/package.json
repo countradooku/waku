@@ -11,7 +11,8 @@
     "./composer-autocomplete": "./src/composer-autocomplete.ts",
     "./fuzzy-search": "./src/fuzzy-search.ts",
     "./provider-probe-cache": "./src/provider-probe-cache.ts",
-    "./protocol": "./src/generated/index.ts"
+    "./protocol": "./src/generated/index.ts",
+    "./v8": "./src/v8/index.ts"
   },
   "scripts": {
     "check": "tsc --noEmit -p tsconfig.json",

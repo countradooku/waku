@@ -1,0 +1,129 @@
+{
+  "frames": [
+    "frame_preface",
+    "frame_msg_ping",
+    "frame_data_chunk",
+    "frame_data_fin"
+  ],
+  "messages": [
+    {
+      "direction": "client",
+      "name": "client_hello"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_settings_get"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_projects_list"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_files_read"
+    },
+    {
+      "direction": "client",
+      "name": "client_cancel"
+    },
+    {
+      "direction": "client",
+      "name": "client_subscribe_settings"
+    },
+    {
+      "direction": "client",
+      "name": "client_subscribe_blob_download"
+    },
+    {
+      "direction": "client",
+      "name": "client_unsubscribe"
+    },
+    {
+      "direction": "client",
+      "name": "client_credit"
+    },
+    {
+      "direction": "client",
+      "name": "client_ping"
+    },
+    {
+      "direction": "client",
+      "name": "client_pong"
+    },
+    {
+      "direction": "client",
+      "name": "client_goodbye"
+    },
+    {
+      "direction": "server",
+      "name": "server_welcome"
+    },
+    {
+      "direction": "server",
+      "name": "server_rejected"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_settings_get"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_projects_list"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_files_read"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_error"
+    },
+    {
+      "direction": "server",
+      "name": "server_items_settings"
+    },
+    {
+      "direction": "server",
+      "name": "server_items_blob_download"
+    },
+    {
+      "direction": "server",
+      "name": "server_end_overflow"
+    },
+    {
+      "direction": "server",
+      "name": "server_end_error"
+    },
+    {
+      "direction": "server",
+      "name": "server_end_completed"
+    },
+    {
+      "direction": "server",
+      "name": "server_notice"
+    },
+    {
+      "direction": "server",
+      "name": "server_ping"
+    },
+    {
+      "direction": "server",
+      "name": "server_pong"
+    },
+    {
+      "direction": "server",
+      "name": "server_goodbye"
+    }
+  ],
+  "routes": {
+    "calls": {
+      "1": "settings.get",
+      "2": "projects.list",
+      "3": "files.read"
+    },
+    "channels": {
+      "1": "settings",
+      "2": "blobDownload"
+    }
+  }
+}

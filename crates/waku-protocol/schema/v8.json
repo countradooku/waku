@@ -1,0 +1,1957 @@
+{
+  "$defs": {
+    "AppGrant": {
+      "properties": {
+        "appName": {
+          "default": "",
+          "type": "string"
+        },
+        "bundleId": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "BlobDownloadItem": {
+      "oneOf": [
+        {
+          "properties": {
+            "mime": {
+              "type": "string"
+            },
+            "sha256": {
+              "description": "Lowercase hex.",
+              "type": "string"
+            },
+            "size": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "meta",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size",
+            "mime",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BlobDownloadSpec": {
+      "properties": {
+        "offset": {
+          "description": "Resume from this byte.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reference": {
+          "description": "`waku-blob:<sha256>.<ext>`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference"
+      ],
+      "type": "object"
+    },
+    "ClientInfo": {
+      "properties": {
+        "appVersion": {
+          "type": "string"
+        },
+        "deviceLabel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instanceId": {
+          "description": "Stable per installation, so a reconnect is recognized.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ClientKind"
+        },
+        "os": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "appVersion",
+        "os",
+        "instanceId"
+      ],
+      "type": "object"
+    },
+    "ClientKind": {
+      "enum": [
+        "desktop",
+        "web",
+        "ios",
+        "android",
+        "cli",
+        "bench"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ClientMessage": {
+      "description": "Client → daemon.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Hello",
+          "properties": {
+            "type": {
+              "const": "hello",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "method": {
+              "type": "string"
+            },
+            "params": {
+              "x-waku-dependent": true
+            },
+            "type": {
+              "const": "call",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "cancel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Subscribe",
+          "properties": {
+            "type": {
+              "const": "subscribe",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "channel": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "unsubscribe",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "channel"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "bytes": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "channel": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "credit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "channel",
+            "bytes"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "nonce": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "ping",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "nonce"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "nonce": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "pong",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "nonce"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "$ref": "#/$defs/GoodbyeCode"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "const": "goodbye",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Compression": {
+      "enum": [
+        "zstd"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "Credential": {
+      "oneOf": [
+        {
+          "description": "The daemon's local token (`run/local.token`).",
+          "properties": {
+            "token": {
+              "type": "string"
+            },
+            "type": {
+              "const": "local",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A session token issued by pairing.",
+          "properties": {
+            "token": {
+              "type": "string"
+            },
+            "type": {
+              "const": "session",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A one-time pairing secret; `welcome.issuedCredential` returns the\nsession token.",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "secret": {
+              "type": "string"
+            },
+            "type": {
+              "const": "pairing",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "secret",
+            "label"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "End": {
+      "description": "The last message of a subscription. Its channel may be reused afterwards.",
+      "properties": {
+        "channel": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "$ref": "#/$defs/EndReason"
+        },
+        "resumeAfter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StreamCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The last cursor delivered, to resubscribe from (after `overflow`)."
+        }
+      },
+      "required": [
+        "channel",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "EndReason": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "unsubscribed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The subscription's live budget overflowed; resubscribe from\n`resumeAfter`. Other streams on the connection are unaffected.",
+          "properties": {
+            "type": {
+              "const": "overflow",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "notFound",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "forbidden",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/Error"
+            },
+            "type": {
+              "const": "error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "error"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A newer subscription of the same client replaced this one.",
+          "properties": {
+            "type": {
+              "const": "superseded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "shuttingDown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnvironmentInfo": {
+      "properties": {
+        "hostArch": {
+          "type": "string"
+        },
+        "hostOs": {
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "storeId": {
+          "description": "The event store's id (RFC 0001); cursors from another store are\nanswered with a snapshot.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "hostOs",
+        "hostArch",
+        "storeId"
+      ],
+      "type": "object"
+    },
+    "Error": {
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "details": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorDetails"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "description": "English, for logs. Clients localize by `code`.",
+          "type": "string"
+        },
+        "retryAfterMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retryable": {
+          "default": false,
+          "type": "boolean"
+        },
+        "traceId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "enum": [
+        "badRequest",
+        "unknownMethod",
+        "unauthenticated",
+        "forbidden",
+        "notFound",
+        "conflict",
+        "alreadyExists",
+        "unsupported",
+        "notReady",
+        "busy",
+        "rateLimited",
+        "payloadTooLarge",
+        "cancelled",
+        "timeout",
+        "provider",
+        "vcs",
+        "io",
+        "internal"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ErrorDetails": {
+      "description": "Typed detail for an [`Error`]; an open union.",
+      "oneOf": [
+        {
+          "properties": {
+            "required": {
+              "$ref": "#/$defs/Scope"
+            },
+            "type": {
+              "const": "missingScope",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "required"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "const": "validation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "field",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "resource": {
+              "type": "string"
+            },
+            "type": {
+              "const": "notFound",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "resource",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`files.write`, `settings.update` and `drafts.apply` against a stale\nbase revision.",
+          "properties": {
+            "current": {
+              "type": "string"
+            },
+            "type": {
+              "const": "revisionConflict",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "current"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "RFC 0002 `Unsupported`.",
+          "properties": {
+            "capability": {
+              "type": "string"
+            },
+            "type": {
+              "const": "capability",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "capability"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "class": {
+              "$ref": "#/$defs/ProviderFailureClass"
+            },
+            "code": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resetAt": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "provider",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "class",
+            "retryable"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/VcsFailureKind"
+            },
+            "type": {
+              "const": "vcs",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The limit that `payloadTooLarge` or `busy` hit.",
+          "properties": {
+            "limit": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "limit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "limit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FileContent": {
+      "properties": {
+        "binary": {
+          "type": "boolean"
+        },
+        "blob": {
+          "description": "A blob reference to download the content from, otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "description": "A content hash, the base revision for a later `files.write`.",
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "description": "The content, when it is text and small enough to send inline.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "binary",
+        "size",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "FilesReadParams": {
+      "properties": {
+        "maxBytes": {
+          "description": "Refuse files larger than this instead of reading them.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Relative to `root`, with `/` separators.",
+          "type": "string"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        }
+      },
+      "required": [
+        "root",
+        "path"
+      ],
+      "type": "object"
+    },
+    "GoodbyeCode": {
+      "enum": [
+        "shuttingDown",
+        "revoked",
+        "expired",
+        "protocolError",
+        "frameTooLarge",
+        "idleTimeout",
+        "writeStalled",
+        "overloaded"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "Hello": {
+      "description": "The client's first message.",
+      "properties": {
+        "client": {
+          "$ref": "#/$defs/ClientInfo"
+        },
+        "compression": {
+          "default": [],
+          "description": "Compression the client accepts for the daemon → client direction.",
+          "items": {
+            "$ref": "#/$defs/Compression"
+          },
+          "type": "array"
+        },
+        "credential": {
+          "$ref": "#/$defs/Credential"
+        },
+        "features": {
+          "default": [],
+          "description": "Client feature flags.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "maxMessageBytes": {
+          "description": "The client's receive cap; the daemon uses the smaller of its own and\nthis.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolVersion"
+        }
+      },
+      "required": [
+        "protocol",
+        "client",
+        "credential"
+      ],
+      "type": "object"
+    },
+    "IssuedCredential": {
+      "properties": {
+        "expiresAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "token",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "Limits": {
+      "description": "The limits in force for the rest of the connection.",
+      "properties": {
+        "maxBlobBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxDataChunkBytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxInFlightCalls": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxMessageBytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxSubscriptions": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pingIntervalMs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pingTimeoutMs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxMessageBytes",
+        "maxDataChunkBytes",
+        "maxBlobBytes",
+        "pingIntervalMs",
+        "pingTimeoutMs",
+        "maxInFlightCalls",
+        "maxSubscriptions"
+      ],
+      "type": "object"
+    },
+    "NoParams": {
+      "description": "The params of a method that takes none: an empty map.",
+      "type": "object"
+    },
+    "Notice": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "updateAvailable",
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": {
+              "const": "credentialExpiring",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProjectInfo": {
+      "description": "A project of the catalog.\n\nTODO(#54): replaced by the orchestration `Project` entity.",
+      "properties": {
+        "createdAt": {
+          "description": "Milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ProtocolVersion": {
+      "properties": {
+        "major": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    },
+    "ProviderFailureClass": {
+      "enum": [
+        "usageLimit",
+        "providerError",
+        "transportError",
+        "permissionError",
+        "validationError",
+        "unknown"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "RejectCode": {
+      "enum": [
+        "versionUnsupported",
+        "unauthenticated",
+        "expired",
+        "revoked",
+        "rateLimited",
+        "originNotAllowed",
+        "overloaded"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "Rejected": {
+      "description": "The daemon's answer to a refused `hello`. Everything the client pipelined\nafter `hello` is discarded.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/RejectCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryAfterMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "RootRef": {
+      "description": "Where a files, vcs or terminal call operates.",
+      "oneOf": [
+        {
+          "properties": {
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "project",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "projectId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The thread's worktree, or its project's root. TODO(#54): resolved\nthrough the orchestrator; answered `unsupported` until then.",
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An absolute path on the daemon host.",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "const": "path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Scope": {
+      "enum": [
+        "read",
+        "operate",
+        "files:read",
+        "files:write",
+        "vcs:write",
+        "terminal",
+        "providers:manage",
+        "settings:write",
+        "diagnostics:read",
+        "admin"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ServerMessage": {
+      "description": "Daemon → client.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Welcome",
+          "properties": {
+            "type": {
+              "const": "welcome",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Rejected",
+          "properties": {
+            "type": {
+              "const": "rejected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Error"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ok": {
+              "x-waku-dependent": true
+            },
+            "type": {
+              "const": "reply",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "channel": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "items": {
+              "items": {
+                "x-waku-dependent": true
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "items",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "channel",
+            "items"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/End",
+          "properties": {
+            "type": {
+              "const": "end",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "notice": {
+              "$ref": "#/$defs/Notice"
+            },
+            "type": {
+              "const": "notice",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "notice"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "nonce": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "ping",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "nonce"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "nonce": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "pong",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "nonce"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "$ref": "#/$defs/GoodbyeCode"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reconnect": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "goodbye",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "code",
+            "message",
+            "reconnect"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SessionInfo": {
+      "properties": {
+        "expiresAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "scopes": {
+          "items": {
+            "$ref": "#/$defs/Scope"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "scopes"
+      ],
+      "type": "object"
+    },
+    "Settings": {
+      "description": "The daemon's settings as clients see them.",
+      "properties": {
+        "computerUseAllowedApps": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AppGrant"
+          },
+          "type": "array"
+        },
+        "computerUseEnabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "disabledProviders": {
+          "default": [],
+          "description": "Provider instance ids that are switched off.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "providerBinaryOverrides": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Binary path per provider instance id.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "SettingsItem": {
+      "oneOf": [
+        {
+          "properties": {
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "settings": {
+              "$ref": "#/$defs/Settings"
+            },
+            "type": {
+              "const": "snapshot",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "revision",
+            "settings"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "settings": {
+              "$ref": "#/$defs/Settings"
+            },
+            "type": {
+              "const": "updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "revision",
+            "settings"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Everything up to `cursor` has been delivered: data is fresh.",
+          "properties": {
+            "cursor": {
+              "$ref": "#/$defs/StreamCursor"
+            },
+            "type": {
+              "const": "synchronized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cursor"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SettingsSnapshot": {
+      "description": "`settings.get` result and settings snapshot.",
+      "properties": {
+        "revision": {
+          "description": "Equal revisions mean equal settings; compare for equality only.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "settings": {
+          "$ref": "#/$defs/Settings"
+        }
+      },
+      "required": [
+        "revision",
+        "settings"
+      ],
+      "type": "object"
+    },
+    "SettingsSpec": {
+      "type": "object"
+    },
+    "StreamCursor": {
+      "description": "Where a subscriber stands in a stream. A client passes its last *applied*\ncursor as `subscribe.after`; the daemon decides between replay and a\nsnapshot.",
+      "oneOf": [
+        {
+          "description": "The global event sequence of event store `store` (shell, thread).",
+          "properties": {
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "sequence",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "store",
+            "seq"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A revision of a small document (settings, providers, access, drafts).\nRevisions are compared for equality only.",
+          "properties": {
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "revision",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A byte offset into `generation` (terminal output, blob download).",
+          "properties": {
+            "generation": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "offset": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "offset",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "generation",
+            "offset"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StreamSpec": {
+      "description": "What a `subscribe` asks for: an open union tagged by stream name.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SettingsSpec",
+          "description": "`snapshot`, then `updated` on every change; `synchronized` after the\nsnapshot (or alone when `after` is the current revision).",
+          "properties": {
+            "type": {
+              "const": "settings",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/BlobDownloadSpec",
+          "description": "`meta`, then the blob's bytes as DATA within the credit window with\n`FIN` on the last chunk, then `end{completed}`.",
+          "properties": {
+            "type": {
+              "const": "blobDownload",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A stream this build does not know; answered with\n`end{error: unsupported}`.",
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Subscribe": {
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StreamCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The client's last applied cursor, to resume from."
+        },
+        "channel": {
+          "description": "Chosen by the client, unique among its open subscriptions; `0` is\nreserved.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stream": {
+          "$ref": "#/$defs/StreamSpec"
+        },
+        "window": {
+          "description": "Initial DATA credit in bytes, for streams that carry DATA.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "channel",
+        "stream"
+      ],
+      "type": "object"
+    },
+    "VcsFailureKind": {
+      "enum": [
+        "notARepository",
+        "dirtyWorktree",
+        "mergeConflict",
+        "authRequired",
+        "nonFastForward",
+        "refNotFound"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "Welcome": {
+      "description": "The daemon's answer to an accepted `hello`.",
+      "properties": {
+        "compression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Compression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "daemonVersion": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentInfo"
+        },
+        "features": {
+          "default": [],
+          "description": "Daemon feature flags.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "issuedCredential": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IssuedCredential"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limits": {
+          "$ref": "#/$defs/Limits"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolVersion"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionInfo"
+        }
+      },
+      "required": [
+        "protocol",
+        "daemonVersion",
+        "environment",
+        "session",
+        "limits"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "commands": [],
+  "constants": {
+    "CONNECTION_QUEUE_BYTES": 33554432,
+    "DEFAULT_DATA_WINDOW": 1048576,
+    "FRAME_FLAG_FIN": 1,
+    "FRAME_FLAG_ZSTD": 2,
+    "FRAME_HEADER_BYTES": 12,
+    "FRAME_KIND_DATA": 2,
+    "FRAME_KIND_MSG": 1,
+    "HANDSHAKE_MESSAGE_BYTES": 65536,
+    "HELLO_DEADLINE_MS": 10000,
+    "LIVE_BUDGET_BYTES": 8388608,
+    "LIVE_BUDGET_ITEMS": 1000,
+    "MAX_BLOB_BYTES": 67108864,
+    "MAX_DATA_CHUNK_BYTES": 262144,
+    "MAX_IN_FLIGHT_CALLS": 64,
+    "MAX_MESSAGE_BYTES": 4194304,
+    "MAX_SAFE_INTEGER": 9007199254740991,
+    "MAX_SUBSCRIPTIONS": 256,
+    "PING_INTERVAL_MS": 5000,
+    "PING_TIMEOUT_MS": 15000,
+    "PROTOCOL_MAJOR": 8,
+    "PROTOCOL_MINOR": 0,
+    "WRITE_STALL_MS": 10000
+  },
+  "errorCodes": [
+    "badRequest",
+    "unknownMethod",
+    "unauthenticated",
+    "forbidden",
+    "notFound",
+    "conflict",
+    "alreadyExists",
+    "unsupported",
+    "notReady",
+    "busy",
+    "rateLimited",
+    "payloadTooLarge",
+    "cancelled",
+    "timeout",
+    "provider",
+    "vcs",
+    "io",
+    "internal"
+  ],
+  "messages": {
+    "client": {
+      "$ref": "#/$defs/ClientMessage"
+    },
+    "server": {
+      "$ref": "#/$defs/ServerMessage"
+    }
+  },
+  "methods": [
+    {
+      "name": "settings.get",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SettingsSnapshot"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "projects.list",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/ProjectInfo"
+        },
+        "type": "array"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "files.read",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/FilesReadParams"
+      },
+      "result": {
+        "$ref": "#/$defs/FileContent"
+      },
+      "scope": "files:read"
+    }
+  ],
+  "protocol": {
+    "major": 8,
+    "minor": 0,
+    "preface": [
+      87,
+      65,
+      75,
+      85,
+      0,
+      8,
+      0,
+      0
+    ],
+    "websocketPath": "/v8",
+    "websocketSubprotocol": "waku.v8"
+  },
+  "scopes": [
+    "read",
+    "operate",
+    "files:read",
+    "files:write",
+    "vcs:write",
+    "terminal",
+    "providers:manage",
+    "settings:write",
+    "diagnostics:read",
+    "admin"
+  ],
+  "streams": [
+    {
+      "cursor": "revision",
+      "data": false,
+      "item": {
+        "$ref": "#/$defs/SettingsItem"
+      },
+      "name": "settings",
+      "scope": "read",
+      "spec": {
+        "$ref": "#/$defs/SettingsSpec"
+      }
+    },
+    {
+      "cursor": "offset",
+      "data": true,
+      "item": {
+        "$ref": "#/$defs/BlobDownloadItem"
+      },
+      "name": "blobDownload",
+      "scope": "read",
+      "spec": {
+        "$ref": "#/$defs/BlobDownloadSpec"
+      }
+    }
+  ],
+  "title": "waku-protocol v8"
+}

@@ -1,0 +1,1 @@
+{"type":"end","channel":2,"reason":{"type":"error","error":{"code":"busy","message":"too many subscriptions","retryable":true,"details":{"type":"limit","limit":256}}}}

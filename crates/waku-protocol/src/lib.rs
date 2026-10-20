@@ -47,6 +47,9 @@ pub mod skills;
 pub mod theme;
 pub mod usage;
 pub mod usage_history;
+/// Protocol v8 (RFC 0003), served beside the legacy protocol on its own
+/// endpoints until the clients move over (#53).
+pub mod v8;
 pub mod wire_event;
 pub mod workspace;
 
@@ -72,6 +75,9 @@ pub use protocol::{
     SequencedEvent, ServerMessage, WireComputerToolRequest, WireDriverStartOptions,
     WireSessionOptions,
 };
+/// The legacy (v7) protocol version, under its RFC 0003 name. v8 is
+/// [`v8::PROTOCOL_MAJOR`]; the two never share an endpoint.
+pub const LEGACY_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION;
 pub use settings::DaemonSettings;
 pub use wire_event::WireDriverEvent;
 pub use workspace::{WorkspaceOperation, WorkspaceResult};
