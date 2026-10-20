@@ -37,6 +37,14 @@ pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
 /// [`crate::identity::daemon_socket_path`].
 pub const DAEMON_SOCKET_ENV: &str = "WAKU_DAEMON_SOCKET";
 pub const APP_EXECUTABLE_ENV: &str = "WAKU_APP_EXECUTABLE";
+/// Lines of output a daemon terminal retains for replay (RFC 0003 §5.4).
+pub const TERMINAL_RETAINED_LINES: usize = 5_000;
+/// Bytes of output a daemon terminal retains for replay (RFC 0003 §5.4).
+pub const TERMINAL_RETAINED_BYTES: usize = 8 * 1024 * 1024;
+/// The most retained output one [`Command::AttachTerminal`] replays, and the
+/// default when the client names no smaller bound. It matches the v8
+/// terminal stream's initial credit (RFC 0003 §12).
+pub const TERMINAL_REPLAY_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -300,6 +308,33 @@ pub enum Command {
         rows: u16,
     },
     CloseTerminal,
+    /// Attach to a terminal another request (or another client) opened with
+    /// this session and runtime id. The response carries a bounded tail of
+    /// the retained output to replay into a fresh emulator, and the raw
+    /// output offset it ends at: live `terminalOutput` events below that
+    /// offset are already part of the replay. Fails when no such terminal is
+    /// open, so a client can fall back to [`Self::OpenTerminal`].
+    AttachTerminal {
+        /// Resize the PTY on attach, as [`Self::ResizeTerminal`] would.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        cols: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        rows: Option<u16>,
+        /// At most this many bytes of replay; capped at
+        /// [`TERMINAL_REPLAY_BYTES`], which is also the default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        max_replay_bytes: Option<u32>,
+    },
+    /// Drop the terminal's retained output. Every attached client receives a
+    /// `terminalReset` event and clears its screen and scrollback.
+    ClearTerminal,
+    /// Replace the terminal's shell with a fresh one in the same directory,
+    /// dropping its retained output. Attached clients receive
+    /// `terminalReset` with the new generation.
+    RestartTerminal,
     CloseSession,
 }
 
@@ -487,6 +522,36 @@ pub enum ResponsePayload {
     Workspace {
         result: WorkspaceResult,
     },
+    /// A daemon terminal's state after `attachTerminal` or `restartTerminal`.
+    TerminalAttached {
+        terminal: TerminalSnapshot,
+    },
+}
+
+/// What a client needs to attach to a daemon terminal.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSnapshot {
+    /// Starts at zero and increments on every restart.
+    pub generation: u32,
+    pub cols: u16,
+    pub rows: u16,
+    /// The raw output offset `replay` ends at. Offsets count every byte the
+    /// PTY has produced since the terminal opened, across restarts.
+    pub offset: u64,
+    /// The tail of the retained output, with terminal queries and replies
+    /// stripped, starting on a line boundary when one is in range.
+    #[serde(with = "base64_bytes")]
+    #[ts(type = "string")]
+    pub replay: Vec<u8>,
+    /// Earlier output exists that `replay` does not contain.
+    pub truncated: bool,
+    /// The shell has exited; the retained output stays until a restart or
+    /// close.
+    pub exited: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]

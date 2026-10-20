@@ -878,6 +878,9 @@ Every v7 message, command, operation, response, event and constant appears below
 | `WriteTerminal{data}` | DATA frames on the interactive `terminal` channel |
 | `ResizeTerminal{cols, rows}` | `terminal.resize` |
 | `CloseTerminal` | `terminal.close` |
+| `AttachTerminal{cols?, rows?, maxReplayBytes?}` (added in v7 by #60) | `terminal` stream subscription: `attached{generation, cols, rows, offset}` then the retained tail as DATA; the v7 response carries the tail as `TerminalSnapshot.replay` and its end `offset` |
+| `ClearTerminal` (added in v7 by #60) | `terminal.clear` |
+| `RestartTerminal` (added in v7 by #60) | `terminal.restart` |
 | `CloseSession` | `dispatch providerSessionDetach` (the thread survives) |
 
 ### 8.3 Workspace operations (all 30)
@@ -990,9 +993,10 @@ Every v7 message, command, operation, response, event and constant appears below
 | `turnFinished{success, summary}` | `runUpdated{completed \| failed}` from `TurnTerminal` (RFC 0002) |
 | `error` | `runUpdated.failure`, or `turnItemUpdated{error}` outside a run |
 | `processExited` | `providerSessionUpdated{status: exited}` |
-| `terminalOutput{data: base64}` | `terminal` DATA frames (raw bytes) |
+| `terminalOutput{data: base64, offset?}` | `terminal` DATA frames (raw bytes); `offset` becomes the stream cursor |
 | `terminalExited` | `terminal` item `exited{code}` |
 | `terminalError` | `terminal` item `error{message}` |
+| `terminalReset{generation, offset}` (added in v7 by #60) | `terminal` item `reset{offset}` |
 | `RuntimeEventCursorAdvanced` (client-only) | Removed; the client tracks its applied `StreamCursor` |
 
 ## 9. Codegen

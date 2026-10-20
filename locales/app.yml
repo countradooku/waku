@@ -1839,6 +1839,10 @@ terminal.no_workspace_description:
   en: Select a task before opening a terminal.
 terminal.process_exited:
   en: Process exited
+terminal.clear:
+  en: Clear
+terminal.restart:
+  en: Restart Shell
 
 browser.back:
   en: Back (%{shortcut})
