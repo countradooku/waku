@@ -292,15 +292,11 @@ pub struct ArchivedPage {
 
 open_string_enum! {
     /// Which navigation rows a shell holds.
+    #[derive(Default)]
     pub enum ShellLocation {
+        #[default]
         Active = "active",
         Archived = "archived",
-    }
-}
-
-impl Default for ShellLocation {
-    fn default() -> Self {
-        Self::Active
     }
 }
 
