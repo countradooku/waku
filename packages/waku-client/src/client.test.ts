@@ -256,6 +256,32 @@ describe("WakuClient", () => {
     expect(received).toEqual([1, 2]);
   });
 
+  test("does not buffer output of a daemon terminal nobody here is attached to", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+
+    socket.receive({
+      type: "event",
+      sessionId: "terminal",
+      runtimeId: "terminal",
+      epoch: "epoch",
+      sequence: 1,
+      event: { kind: "terminalOutput", payload: { data: "bHM=", offset: 0 } },
+    });
+    socket.receive({
+      type: "event",
+      sessionId: "terminal",
+      runtimeId: "terminal",
+      epoch: "epoch",
+      sequence: 2,
+      event: { kind: "terminalExited" },
+    });
+
+    const received: string[] = [];
+    client.subscribe("terminal", "terminal", (event) => received.push(event.event.kind));
+    expect(received).toEqual(["terminalExited"]);
+  });
+
   test("notifies connected apps when another client changes task state", async () => {
     const { client, sockets } = fixture();
     const socket = await connect(client, sockets);

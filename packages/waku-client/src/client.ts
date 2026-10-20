@@ -433,7 +433,11 @@ export class WakuClient {
       const listeners = this.subscriptions.get(key);
       if (listeners?.size) {
         for (const listener of listeners) listener(message);
-      } else {
+      } else if (message.event.kind !== "terminalOutput") {
+        // Every client receives every daemon terminal's output. Nothing here
+        // is attached to this one, and attaching replays the daemon's
+        // retained tail, so buffering it would only hold someone else's
+        // terminal in memory.
         const buffered = this.pendingEvents.get(key) ?? [];
         buffered.push(message);
         if (buffered.length > MAX_BUFFERED_EVENTS_PER_RUNTIME) {
