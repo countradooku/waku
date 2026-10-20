@@ -83,6 +83,29 @@ struct PanelFrame {
     right_panel_sliding: bool,
     /// An edge is still moving, so the frame loop has to keep going.
     sliding: bool,
+    /// While an edge moves, the width the transcript island keeps: the chat
+    /// column's width once the slide settles. `None` at rest.
+    transcript_slide_width: Option<f32>,
+}
+
+/// The chat column's content width once every slide has settled: the
+/// viewport minus the panels' settled widths, minus the column's 1px left
+/// border when the sidebar stays open.
+///
+/// A slide moves the column's edges for 200ms. Laying the transcript out at
+/// the column's eased width changed the list's width every frame, which
+/// drops every cached row height in gpui's `list()` and re-wraps every
+/// visible paragraph at display rate. Holding it at the settled width keeps
+/// heights and the line-layout cache warm: the narrowing column clips (or
+/// the panel container painted over it covers) the part not yet uncovered,
+/// and the frame the slide ends the column matches it exactly.
+fn transcript_slide_width(
+    viewport_width: f32,
+    settled_sidebar: f32,
+    settled_right_panel: f32,
+) -> f32 {
+    let border = if settled_sidebar > 0.0 { 1.0 } else { 0.0 };
+    (viewport_width - settled_sidebar - settled_right_panel - border).max(0.0)
 }
 
 /// Advance one panel's slide: the eased width while it runs, the settled
@@ -139,6 +162,14 @@ impl Waku {
         self.sidebar_rendered_width = sidebar;
         self.right_panel_rendered_width = right_panel;
         let sliding = self.panels_sliding();
+        let transcript_slide_width = sliding.then(|| {
+            let (settled_sidebar, settled_right_panel) = self.settled_panel_widths(window);
+            transcript_slide_width(
+                f32::from(window.viewport_size().width),
+                settled_sidebar,
+                settled_right_panel,
+            )
+        });
         if was_sliding && !sliding {
             // The observer gate held root-state fan-out away from any island
             // the slide left geometry-stable. One ungated notify now that
@@ -155,16 +186,29 @@ impl Waku {
             sidebar_sliding: self.sidebar_slide.is_some(),
             right_panel_sliding: self.right_panel_slide.is_some(),
             sliding,
+            transcript_slide_width,
         }
     }
 
-    /// Width left for the chat column once the panels take theirs — the
-    /// widths they are painted at this frame, so a transcript measured
-    /// mid-slide matches the column it is laid out in.
-    fn chat_viewport_width(&self, window: &Window) -> f32 {
-        f32::from(window.viewport_size().width)
-            - self.sidebar_rendered_width
-            - self.right_panel_rendered_width
+    /// Each panel's width once any slide settles: zero for a panel on its
+    /// way out, its full width for one on its way in.
+    fn settled_panel_widths(&self, window: &Window) -> (f32, f32) {
+        fitted_panel_widths(
+            f32::from(window.viewport_size().width),
+            self.sidebar_visible,
+            self.right_panel_visible,
+            self.sidebar_width,
+            self.right_panel_width,
+        )
+    }
+
+    /// Width left for the chat column once the panels take theirs. Settled
+    /// widths, not the ones a slide paints this frame: the transcript keeps
+    /// its settled width for the whole slide (see [`transcript_slide_width`]),
+    /// and at rest the two agree.
+    pub(super) fn chat_viewport_width(&self, window: &Window) -> f32 {
+        let (sidebar, right_panel) = self.settled_panel_widths(window);
+        f32::from(window.viewport_size().width) - sidebar - right_panel
     }
 
     /// [`WakuPane`] delegate for the sidebar island.
@@ -370,9 +414,13 @@ impl Render for Waku {
                     .child(if empty {
                         self.render_empty_state(cx).into_any_element()
                     } else {
+                        let style = StyleRefinement::default().flex_1().min_h(px(0.0));
                         self.transcript_pane
                             .clone()
-                            .cached(StyleRefinement::default().flex_1().min_h(px(0.0)).w_full())
+                            .cached(match panels.transcript_slide_width {
+                                Some(width) => style.w(px(width)),
+                                None => style.w_full(),
+                            })
                             .into_any_element()
                     })
                     .children(permission)
@@ -558,6 +606,39 @@ impl Waku {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The chat column's content width in a frame where the panels occupy
+    /// `sidebar` and `right_panel` (the column draws a 1px left border while
+    /// any sidebar is on screen).
+    fn column_content_width(viewport: f32, sidebar: f32, right_panel: f32) -> f32 {
+        viewport - sidebar - right_panel - if sidebar > 0.0 { 1.0 } else { 0.0 }
+    }
+
+    #[test]
+    fn a_slide_holds_the_transcript_at_the_settled_column_width() {
+        let viewport = 1400.0;
+        // Closing a 260px sidebar next to a 400px right panel, and opening it.
+        for (from, settled) in [(260.0, 0.0), (0.0, 260.0)] {
+            let width = transcript_slide_width(viewport, settled, 400.0);
+            let mut slide = Some(motion::WidthTween::new(from));
+            let mut frames = 0;
+            loop {
+                let eased = slide_width(&mut slide, settled);
+                // Every frame of the slide lays the transcript out at the
+                // same width, however far the edge has travelled.
+                assert_eq!(transcript_slide_width(viewport, settled, 400.0), width);
+                if slide.is_none() {
+                    // The frame the slide retires, the column matches it, so
+                    // switching back to `w_full` changes nothing.
+                    assert_eq!(column_content_width(viewport, eased, 400.0), width);
+                    break;
+                }
+                frames += 1;
+                assert!(frames < 10_000, "the slide retires");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
 
     #[test]
     fn unloaded_history_never_renders_the_new_task_prompt() {

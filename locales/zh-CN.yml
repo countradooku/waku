@@ -169,6 +169,8 @@ settings.code_font_size: 代码字号
 settings.code_font_size_description: 文件编辑器、差分视图、代码块与工具输出的文字大小
 settings.render_math: 渲染数学公式
 settings.render_math_description: 在 Markdown 中显示排版后的公式。关闭后显示 LaTeX 源码。
+settings.animate_panels: 面板动画
+settings.animate_panels_description: 以滑动方式打开和关闭侧边栏与侧面板。关闭后立即显示。
 settings.theme_system: 跟随系统
 settings.theme_light: 浅色
 settings.theme_dark: 深色

@@ -679,13 +679,14 @@ impl WakuPane {
     fn bind(&mut self, waku: &Entity<Waku>, cx: &mut Context<Self>) {
         self.waku = Some(waku.downgrade());
         cx.observe(waku, |_, waku, cx| {
-            // A panel slide notifies the root at display rate for its 200ms,
-            // and this fan-out would price every one of those ticks at a
-            // three-island rebuild. Skipping it hands the decision to the
-            // cached-view keys: the sliding panel (its clip moves) and the
-            // transcript (its bounds move) miss their caches and re-render
-            // with fresh state anyway, while the island nothing is moving
-            // re-plays its cached subtree. Root-state changes it displays
+            // A panel slide (opt-in: **Animate panels**) notifies the root at
+            // display rate for its 200ms, and this fan-out would price every
+            // one of those ticks at a three-island rebuild. Skipping it hands
+            // the decision to the cached-view keys: the sliding panel (its
+            // clip moves) and, for a sidebar slide, the transcript (its
+            // origin moves; its width is held at the settled one) miss their
+            // caches and re-render with fresh state anyway, while the island
+            // nothing is moving re-plays its cached subtree. Root-state changes it displays
             // can wait out the slide: updates born inside an island
             // (terminal output, pulse leases) dirty their ancestor pane
             // without this observer, and the slide's retirement notify
