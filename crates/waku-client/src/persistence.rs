@@ -1397,8 +1397,13 @@ impl AppFileWriterThread {
             // sync it skipped, so quit leaves everything past the drive cache.
             for index in 0..self.paths.len() {
                 if std::mem::take(&mut self.needs_full_sync[index]) {
-                    let synced =
-                        fs::File::open(&self.paths[index]).and_then(|file| file.sync_all());
+                    // Windows only flushes handles opened for writing
+                    // (`FlushFileBuffers` needs write access); opening for
+                    // write never truncates or modifies the file.
+                    let synced = fs::OpenOptions::new()
+                        .write(true)
+                        .open(&self.paths[index])
+                        .and_then(|file| file.sync_all());
                     result = result.and(synced);
                 }
             }
