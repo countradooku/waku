@@ -1,7 +1,7 @@
 //! `Orchestrator`: receipt lookup, per-key locks, the thread cache, `decide`
 //! and the sink, wired together (RFC 0001 "Public APIs").
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -238,6 +238,11 @@ pub struct Orchestrator {
     last_sequence: AtomicU64,
     waker: RwLock<Option<EffectWaker>>,
     shutting_down: AtomicBool,
+    /// Imported threads whose transcript is still in the legacy `app.db`
+    /// (#63); imported lazily by [`Orchestrator::ensure_transcript`].
+    pending_transcripts: Mutex<HashSet<ThreadId>>,
+    /// Serializes lazy transcript imports.
+    transcript_import: Mutex<()>,
 }
 
 impl fmt::Debug for Orchestrator {
@@ -304,6 +309,11 @@ impl Orchestrator {
             .map(|project| (project.id, project))
             .collect();
         let last_sequence = max_sequence(&store.writer())?;
+        let pending_transcripts = store
+            .reader()
+            .with(crate::import::legacy::pending_transcripts)?
+            .into_iter()
+            .collect();
         let feed = Arc::new(FeedPublisher::default());
         let ids = Arc::new(Mutex::new(deps.ids));
         Ok(Arc::new(Self {
@@ -321,6 +331,8 @@ impl Orchestrator {
             last_sequence: AtomicU64::new(last_sequence),
             waker: RwLock::new(None),
             shutting_down: AtomicBool::new(false),
+            pending_transcripts: Mutex::new(pending_transcripts),
+            transcript_import: Mutex::new(()),
         }))
     }
 
@@ -352,6 +364,13 @@ impl Orchestrator {
             return receipt_result(receipt);
         }
         let primary = command.primary_key();
+        // An imported thread's history arrives before anything else
+        // touches the thread (#63).
+        if let LockKey::Thread(thread_id) = primary
+            && !matches!(&command, AnyCommand::Internal { command, .. } if command.is_import())
+        {
+            self.ensure_transcript(thread_id);
+        }
         let guards = self.locks.lock(&command.lock_keys());
 
         let thread = match primary {
@@ -581,11 +600,13 @@ impl Orchestrator {
             .with(|connection| crate::search::search_threads(connection, query))
     }
 
-    /// Every match inside one thread, loaded or not (#65).
+    /// Every match inside one thread, loaded or not (#65). An imported
+    /// thread's transcript is imported first.
     pub fn find_in_thread(
         &self,
         query: &crate::search::ThreadFindQuery,
     ) -> StoreResult<crate::search::ThreadFindResult> {
+        self.ensure_transcript(query.thread_id);
         self.store
             .reader()
             .with(|connection| crate::search::find_in_thread(connection, query))
@@ -602,6 +623,48 @@ impl Orchestrator {
         self.store.reader().with(|connection| {
             crate::search::items_around(connection, thread_id, position, before, after)
         })
+    }
+
+    /// Imports an imported thread's transcript from its legacy `app.db` the
+    /// first time anything needs it (#63): a dispatch for the thread, a find,
+    /// and the thread stream's subscribe or history page (#54 calls this).
+    /// A no-op for every other thread. Imports are serialized; a dispatch for
+    /// the same thread waits for its history. A source that cannot be read
+    /// is recorded in `legacy_imports.error` and not retried until restart,
+    /// so the thread stays usable.
+    pub fn ensure_transcript(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<crate::import::legacy::TranscriptOutcome> {
+        if !self.pending_transcripts.lock().contains(&thread_id) {
+            return None;
+        }
+        let _import = self.transcript_import.lock();
+        if !self.pending_transcripts.lock().contains(&thread_id) {
+            return None;
+        }
+        let outcome =
+            crate::import::legacy::import_transcript(self, thread_id).unwrap_or_else(|error| {
+                crate::import::legacy::TranscriptOutcome::Failed(error.to_string())
+            });
+        self.pending_transcripts.lock().remove(&thread_id);
+        Some(outcome)
+    }
+
+    /// Imported threads whose transcript has not been imported yet.
+    pub fn pending_transcripts(&self) -> Vec<ThreadId> {
+        let mut pending = self
+            .pending_transcripts
+            .lock()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        pending.sort();
+        pending
+    }
+
+    pub(crate) fn note_pending_transcript(&self, thread_id: ThreadId) {
+        self.pending_transcripts.lock().insert(thread_id);
     }
 
     pub fn store(&self) -> &Arc<Store> {

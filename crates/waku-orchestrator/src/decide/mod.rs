@@ -172,15 +172,19 @@ fn decide_internal(
     command: &InternalCommand,
 ) -> Result<Decision, CommandError> {
     match command {
+        InternalCommand::ImportLegacyProject { project } => internal::import_project(cx, project),
         InternalCommand::ImportLegacyThread { shell } => internal::import_thread(cx, shell),
         InternalCommand::RecoverThread { .. } | InternalCommand::ContinueRun { .. } => Err(
             CommandError::unsupported(format!("{} (#59)", command.command_type())),
         ),
-        InternalCommand::ImportLegacyTranscript { .. } => Err(CommandError::unsupported(
-            "import.transcript (#63)".to_owned(),
-        )),
+        InternalCommand::ImportLegacyTranscript {
+            thread_id,
+            transcript,
+        } => internal::import_transcript(cx, *thread_id, transcript),
         _ => {
-            let thread_id = command.thread_id();
+            let Some(thread_id) = command.thread_id() else {
+                unreachable!("project commands are routed above");
+            };
             let projection = match cx.thread {
                 Some(projection) if projection.id() == thread_id => projection,
                 _ => return Err(CommandError::not_found("thread", thread_id)),

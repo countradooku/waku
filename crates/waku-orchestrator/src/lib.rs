@@ -18,6 +18,7 @@ pub mod effects;
 pub mod fakes;
 pub mod feed;
 pub mod ids;
+pub mod import;
 pub mod lifecycle;
 pub mod orchestrator;
 pub mod projection;
