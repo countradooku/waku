@@ -321,6 +321,7 @@ pub fn flatten(
     base_weight: FontWeight,
     base_color: Hsla,
 ) -> FlatText {
+    profile_span!(TRACE, "md::flatten");
     let mut text = String::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
@@ -512,6 +513,7 @@ impl MarkdownView {
     }
 
     pub fn set_text(&mut self, text: &str, mend: bool) {
+        profile_span!(TRACE, "MarkdownView::set_text");
         let was_streaming = self.streaming.replace(mend);
         if !mend && was_streaming {
             *self.veil.borrow_mut() = RowVeil::default();
@@ -1776,7 +1778,12 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
 /// `TextRun`s that tile `code` exactly, colored by the lexer. Every run shares
 /// one font, so the shaped width of a line is identical with or without
 /// highlighting — the property that makes coloring safe to defer.
-fn code_runs(code: &str, lang: Option<Lang>, code_font: &Font, palette: &Palette) -> Vec<TextRun> {
+pub(crate) fn code_runs(
+    code: &str,
+    lang: Option<Lang>,
+    code_font: &Font,
+    palette: &Palette,
+) -> Vec<TextRun> {
     let plain = palette.secondary;
     let mut runs: Vec<TextRun> = Vec::new();
     let push = |runs: &mut Vec<TextRun>, len: usize, color: Hsla| {
@@ -2112,7 +2119,7 @@ mod tests {
             .expect("code block renderer");
         let body = &source[start + 1..];
         let end = body
-            .find("\nfn code_runs(")
+            .find("\npub(crate) fn code_runs(")
             .expect("code block renderer end");
         let body = &body[..end];
 
@@ -2191,7 +2198,7 @@ mod tests {
             highlighted.iter().map(|run| run.len).sum::<usize>(),
             plain.iter().map(|run| run.len).sum::<usize>()
         );
-        assert!(highlighted.iter().all(|run| &run.font == &code_font));
+        assert!(highlighted.iter().all(|run| run.font == code_font));
     }
 
     #[test]

@@ -173,6 +173,8 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        profile_span!(DEBUG, "sidebar_pane");
+        perf_count!(render_sidebar);
         let (sidebar_width, _) = self.effective_panel_widths(window);
         self.render_sidebar(sidebar_width, window, cx)
             .into_any_element()
@@ -184,6 +186,8 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        profile_span!(DEBUG, "transcript_pane");
+        perf_count!(render_transcript);
         let chat_viewport_width = self.chat_viewport_width(window);
         // The transcript's own element sizes itself with `flex_1`, which only
         // stretches inside a flex parent. A cached pane lays its content out
@@ -204,6 +208,8 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        profile_span!(DEBUG, "right_panel_pane");
+        perf_count!(render_right_panel);
         let (_, right_panel_width) = self.effective_panel_widths(window);
         self.render_right_panel(right_panel_width, window, cx)
             .into_any_element()
@@ -225,6 +231,8 @@ impl Waku {
 
 impl Render for Waku {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        profile_span!(DEBUG, "Waku::render");
+        perf_count!(frame);
         // Panel geometry first: the browser sync right below reads whether a
         // panel is mid-slide, and settling here rather than at the point of
         // use keeps the pane islands and the transcript on one set of widths.
@@ -421,23 +429,6 @@ impl Render for Waku {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unloaded_history_never_renders_the_new_task_prompt() {
-        let mut stored = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        stored.detail_loaded = false;
-
-        assert!(!should_render_empty_state(Some(&stored)));
-
-        let draft = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        assert!(should_render_empty_state(Some(&draft)));
-        assert!(should_render_empty_state(None));
-    }
-}
-
 impl Waku {
     /// Arm the dismiss timer and build the floating toast layer, if a toast
     /// is active. Every full-window surface (workspace and settings alike)
@@ -559,5 +550,22 @@ impl Waku {
                         .opacity(0.4 + 0.6 * delta)
                 },
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unloaded_history_never_renders_the_new_task_prompt() {
+        let mut stored = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        stored.detail_loaded = false;
+
+        assert!(!should_render_empty_state(Some(&stored)));
+
+        let draft = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        assert!(should_render_empty_state(Some(&draft)));
+        assert!(should_render_empty_state(None));
     }
 }

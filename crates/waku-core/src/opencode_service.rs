@@ -599,10 +599,10 @@ fn acquire(binary: &Path, may_spawn: bool) -> anyhow::Result<Option<Arc<OpenCode
 }
 
 fn connect(binary: &Path, may_spawn: bool) -> anyhow::Result<Option<Arc<OpenCodeService>>> {
-    if let Some(registration) = read_registration() {
-        if let Ok(endpoint) = probe(&registration) {
-            return Ok(Some(OpenCodeService::adopt(binary, registration, endpoint)));
-        }
+    if let Some(registration) = read_registration()
+        && let Ok(endpoint) = probe(&registration)
+    {
+        return Ok(Some(OpenCodeService::adopt(binary, registration, endpoint)));
     }
     if !may_spawn {
         return Ok(None);
@@ -619,11 +619,11 @@ fn connect(binary: &Path, may_spawn: bool) -> anyhow::Result<Option<Arc<OpenCode
 /// object would put a second reader on the same process and orphan every live
 /// subscription.
 fn revalidate(service: &Arc<OpenCodeService>, may_spawn: bool) -> anyhow::Result<bool> {
-    if let Some(registration) = read_registration() {
-        if let Ok(endpoint) = probe(&registration) {
-            service.adopt_registration(registration, endpoint);
-            return Ok(true);
-        }
+    if let Some(registration) = read_registration()
+        && let Ok(endpoint) = probe(&registration)
+    {
+        service.adopt_registration(registration, endpoint);
+        return Ok(true);
     }
     if !may_spawn {
         return Ok(false);
@@ -655,14 +655,14 @@ fn spawn_service(binary: &Path) -> anyhow::Result<(ServiceRegistration, Endpoint
     let deadline = Instant::now() + SERVICE_START_BUDGET;
     let mut exit = None;
     loop {
-        if let Some(registration) = read_registration() {
-            if let Ok(endpoint) = probe(&registration) {
-                // Reap the launcher if it has already detached. The service
-                // itself is never signalled, and dropping a `Child` does not
-                // kill it, so an attached service simply outlives this handle.
-                let _unused = child.try_wait();
-                return Ok((registration, endpoint));
-            }
+        if let Some(registration) = read_registration()
+            && let Ok(endpoint) = probe(&registration)
+        {
+            // Reap the launcher if it has already detached. The service
+            // itself is never signalled, and dropping a `Child` does not
+            // kill it, so an attached service simply outlives this handle.
+            let _unused = child.try_wait();
+            return Ok((registration, endpoint));
         }
         if exit.is_none() {
             exit = child.try_wait().ok().flatten();

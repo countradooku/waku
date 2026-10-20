@@ -1330,9 +1330,11 @@ pub(super) fn activity_row_detail(activity: &ActivityItem, reasoning_live: bool)
                 .as_deref()
                 .is_some_and(|target| !target.trim().is_empty())
                 || !crate::model::is_generic_activity_title(activity.kind, &activity.title);
-            has_name
-                .then(|| activity_tool_display_name(activity))
-                .unwrap_or_default()
+            if has_name {
+                activity_tool_display_name(activity)
+            } else {
+                Default::default()
+            }
         }
     }
 }

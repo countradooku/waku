@@ -26,6 +26,7 @@ const MAX_BUFFERED_EVENTS_PER_RUNTIME: usize = 4096;
 enum Outgoing {
     Message(ClientMessage),
     Shutdown,
+    Disconnect,
 }
 
 struct ClientInner {
@@ -237,6 +238,13 @@ impl DaemonClient {
     pub fn shutdown(&self) {
         let _ = self.inner.outgoing.send(Outgoing::Shutdown);
     }
+
+    /// Close this connection without asking the daemon to stop. Runtimes are
+    /// daemon-owned, so anything this client started keeps running and other
+    /// clients stay attached; the daemon just stops writing to this socket.
+    pub fn disconnect(&self) {
+        let _ = self.inner.outgoing.send(Outgoing::Disconnect);
+    }
 }
 
 fn daemon_url(address: &str) -> anyhow::Result<String> {
@@ -267,6 +275,11 @@ fn run_client(
                 }
                 Outgoing::Shutdown => {
                     let _ = write_json(&mut socket, &ClientMessage::Shutdown);
+                    let _ = socket.flush();
+                    break 'connection;
+                }
+                Outgoing::Disconnect => {
+                    let _ = socket.close(None);
                     let _ = socket.flush();
                     break 'connection;
                 }

@@ -27,6 +27,49 @@ impl Waku {
         self.request_session_activation(session_id, SessionActivationTransition::Visit, cx);
     }
 
+    /// Bench harness hook, compiled only with `perf-counters`: when
+    /// `WAKU_PERF_VISIT_SESSIONS_MS` is set, select every started session
+    /// once, in catalog order, one per interval, through the same path as a
+    /// sidebar click. The memory scenarios use it to visit N long sessions
+    /// without UI input. Each visit bumps `totals.session_visits`.
+    #[cfg(feature = "perf-counters")]
+    pub(super) fn start_perf_session_visits(&mut self, cx: &mut Context<Self>) {
+        let Some(interval) = std::env::var("WAKU_PERF_VISIT_SESSIONS_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Duration::from_millis)
+        else {
+            return;
+        };
+        cx.spawn(async move |waku, cx| {
+            let mut visited = HashSet::new();
+            loop {
+                cx.background_executor().timer(interval).await;
+                let next = waku.update(cx, |waku, cx| {
+                    let next = waku
+                        .state
+                        .sessions
+                        .iter()
+                        .filter(|session| session.has_started() && !visited.contains(&session.id))
+                        .map(|session| session.id)
+                        .next();
+                    if let Some(session_id) = next {
+                        waku.select_session(session_id, cx);
+                        crate::perf_counters::session_visit();
+                    }
+                    next
+                });
+                match next {
+                    Ok(Some(session_id)) => {
+                        visited.insert(session_id);
+                    }
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+
     fn request_session_activation(
         &mut self,
         session_id: Uuid,
@@ -855,7 +898,7 @@ impl Waku {
         for id in streaming_messages {
             message_markdown
                 .entry(id)
-                .or_insert_with(MarkdownView::new)
+                .or_default()
                 .seed_streaming_baseline();
         }
         drop(message_markdown);
@@ -1562,19 +1605,18 @@ impl Waku {
             .state
             .selected_session
             .and_then(|session_id| self.runtimes.get_mut(&session_id))
-        {
-            if let Some(preview) = runtime.computer_use_previews.iter_mut().find(|preview| {
+            && let Some(preview) = runtime.computer_use_previews.iter_mut().find(|preview| {
                 preview
                     .target
                     .as_ref()
                     .is_some_and(|target| target.window_id == window_id)
-            }) {
-                // Keep the hidden entry until the turn ends so the next
-                // screenshot cannot reopen a preview the user just closed.
-                preview.visible = false;
-                preview.decode_task = None;
-                preview.frames = Default::default();
-            }
+            })
+        {
+            // Keep the hidden entry until the turn ends so the next
+            // screenshot cannot reopen a preview the user just closed.
+            preview.visible = false;
+            preview.decode_task = None;
+            preview.frames = Default::default();
         }
         cx.notify();
     }

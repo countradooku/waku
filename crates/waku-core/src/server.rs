@@ -245,6 +245,7 @@ impl Hub {
     }
 
     fn emit(&self, session_id: Uuid, runtime_id: Uuid, event: WireDriverEvent, replayable: bool) {
+        profile_span!(TRACE, "Hub::emit");
         let mut state = self.state.lock();
         if state.active_runtimes.get(&session_id) != Some(&runtime_id) {
             return;
@@ -441,6 +442,7 @@ impl RequestDispatcher {
         outgoing: Sender<ServerMessage>,
         source_subscriber_id: u64,
     ) {
+        profile_span!(DEBUG, "dispatch");
         if command_targets_runtime(&request.command) {
             self.dispatch_runtime(request, outgoing, source_subscriber_id);
         } else {
@@ -566,7 +568,7 @@ pub fn serve(
         match listener.accept() {
             Ok((stream, _)) => {
                 if active_connections
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                         (active < MAX_CONNECTIONS).then_some(active + 1)
                     })
                     .is_err()
@@ -932,6 +934,7 @@ fn handle_request(
     backend: Arc<dyn Backend>,
     hub: Arc<Hub>,
 ) -> HandledRequest {
+    profile_span!(DEBUG, "handle_request");
     let request_id = request.request_id;
     let notification = request_id.is_nil();
     let session_id = request.session_id;

@@ -9,20 +9,25 @@
 //
 // Env:
 //   SPARKLE_PRIVATE_KEY        EdDSA private key, base64 (required)
+//   WAKU_SPARKLE_PUBLIC_ED_KEY public key the app trusts (required)
+//   WAKU_RELEASES_URL          release host base URL (required unless
+//                              WAKU_DOWNLOAD_URL_PREFIX is set)
 //   WAKU_DOWNLOAD_URL_PREFIX   base URL for enclosure links
+//                              (default: $WAKU_RELEASES_URL/)
 import { sign } from "node:crypto";
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { defaultDownloadUrlPrefix } from "./appcast.ts";
 import {
-  appPublicKey,
+  assertSigningKeyMatches,
+  defaultDownloadUrlPrefix,
+  privateKeyFromSparkleSecret,
+} from "./appcast.ts";
+import {
   architectures,
   escapeXml,
   mergeItems,
   parseAppcast,
-  privateKeyFromSparkleSecret,
-  publicKeyBase64,
   type AppcastItem,
   type Architecture,
 } from "./appcast-windows.ts";
@@ -67,15 +72,8 @@ export async function generateLinuxAppcasts(
   if (!secret) {
     throw new Error("SPARKLE_PRIVATE_KEY is required to sign the Linux feed.");
   }
+  assertSigningKeyMatches(secret);
   const privateKey = privateKeyFromSparkleSecret(secret);
-  const derived = publicKeyBase64(privateKey);
-  const expected = await appPublicKey();
-  if (derived !== expected) {
-    throw new Error(
-      `SPARKLE_PRIVATE_KEY does not match SUPublicEDKey (${expected}); ` +
-        `it derives ${derived}. Signing with it would ship a feed the app rejects.`,
-    );
-  }
 
   const present = new Set(readdirSync(assetsDir));
   const written: string[] = [];
@@ -118,7 +116,7 @@ if (import.meta.main) {
   await generateLinuxAppcasts(
     assetsDir,
     version,
-    process.env.WAKU_DOWNLOAD_URL_PREFIX ?? defaultDownloadUrlPrefix,
+    defaultDownloadUrlPrefix(),
     new Date().toUTCString(),
   );
 }

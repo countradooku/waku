@@ -291,15 +291,13 @@ fn session_summary_from_path(path: &Path) -> anyhow::Result<ProviderSessionSumma
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("custom-title"))
         .filter_map(|entry| entry.get("customTitle").and_then(Value::as_str))
         .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .next_back();
+        .rfind(|title| !title.is_empty());
     let ai_title = entries
         .iter()
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("ai-title"))
         .filter_map(|entry| entry.get("aiTitle").and_then(Value::as_str))
         .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .next_back();
+        .rfind(|title| !title.is_empty());
     let title = custom_title
         .or(ai_title)
         .map(str::to_owned)
@@ -480,7 +478,7 @@ fn list_provider_sessions_from_history(
             Some(summary)
         })
         .collect::<Vec<_>>();
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
     sessions.truncate(limit);
     Ok(sessions)
 }
@@ -503,7 +501,7 @@ fn list_provider_sessions_in(
         return list_provider_sessions_from_history(projects_directory, &history_path, limit);
     }
     let mut candidates = provider_session_files(projects_directory)?;
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
 
     let mut sessions = Vec::new();
     for (_, path) in candidates {
@@ -652,7 +650,7 @@ fn session_metadata_in(
         .then(|| entry.get("uuid").and_then(Value::as_str).map(str::to_owned))
         .flatten()
     });
-    let title = entries.iter().filter_map(claude_title).last();
+    let title = entries.iter().filter_map(claude_title).next_back();
     Ok(ClaudeSessionMetadata {
         latest_message_id,
         title,

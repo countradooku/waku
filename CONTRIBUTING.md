@@ -62,7 +62,7 @@ The archive is written under `target/release` with an install-prefix layout
 not bundle system graphics libraries; distribution packages should declare
 those runtime dependencies normally.
 
-`website/public/install.sh` (served at `https://waku.sh/install.sh`) is what
+`website/public/install.sh` (published as `$WAKU_RELEASES_URL/install.sh`) is what
 users run to install that archive. Point it at a local build to exercise it
 without publishing:
 

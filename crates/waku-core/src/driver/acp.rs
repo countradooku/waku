@@ -387,19 +387,19 @@ async fn run_sdk_connection(
                 let grok_title_home = grok_title_home.clone();
                 let title_refresh = title_refresh.clone();
                 async move |notification: UntypedMessage, _connection| {
-                    if notification.method() == "_x.ai/session/prompt_complete" {
-                        if let Some(session_id) = finish_xai_prompt_complete(
+                    if notification.method() == "_x.ai/session/prompt_complete"
+                        && let Some(session_id) = finish_xai_prompt_complete(
                             notification.params(),
                             &prompt_requests,
                             &events,
-                        ) {
-                            start_grok_title_refresh(
-                                grok_title_home.as_deref(),
-                                &session_id,
-                                &title_refresh,
-                                events.clone(),
-                            );
-                        }
+                        )
+                    {
+                        start_grok_title_refresh(
+                            grok_title_home.as_deref(),
+                            &session_id,
+                            &title_refresh,
+                            events.clone(),
+                        );
                     }
                     Ok(())
                 }
@@ -1353,9 +1353,7 @@ fn finish_xai_prompt_complete(
     prompt_requests: &Mutex<PendingPrompts>,
     events: &DriverEventSender,
 ) -> Option<String> {
-    let Some(session_id) = params.get("sessionId").and_then(Value::as_str) else {
-        return None;
-    };
+    let session_id = params.get("sessionId").and_then(Value::as_str)?;
     let prompt_id = params.get("promptId").and_then(Value::as_str);
     if !prompt_requests
         .lock()

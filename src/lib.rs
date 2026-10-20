@@ -28,16 +28,52 @@ macro_rules! tr_cow {
     };
 }
 
+/// Enter a `tracing` span at `$level` (`TRACE`, `DEBUG`, ...) for the rest of
+/// the enclosing block. With the `profiling` feature off this expands to
+/// nothing, so spans on per-frame paths cost nothing in shipping builds.
+macro_rules! profile_span {
+    ($level:ident, $name:literal) => {
+        #[cfg(feature = "profiling")]
+        let _profile_span = tracing::span!(tracing::Level::$level, $name).entered();
+    };
+}
+
+/// Bump a `perf-counters` counter: `perf_count!(frame)` calls
+/// `perf_counters::frame()`, `perf_count!(stream_drain(flag))` passes `flag`.
+/// Without the feature it expands to nothing and its arguments are never
+/// evaluated.
+macro_rules! perf_count {
+    ($counter:ident $(($($arg:expr),*))?) => {
+        #[cfg(feature = "perf-counters")]
+        crate::perf_counters::$counter($($($arg),*)?);
+    };
+}
+
+/// Hold a `perf-counters` guard (`perf_counters::$scope()`) for the rest of
+/// the enclosing block. Without the feature it expands to nothing.
+macro_rules! perf_scope {
+    ($scope:ident) => {
+        #[cfg(feature = "perf-counters")]
+        let _perf_scope = crate::perf_counters::$scope();
+    };
+}
+
 mod analytics;
 mod app;
 mod assets;
+#[doc(hidden)]
+pub mod bench_support;
 mod browser;
 mod computer_use;
 pub mod daemon;
 mod driver;
 mod input;
 mod md;
+#[cfg(feature = "perf-counters")]
+mod perf_counters;
 mod platform;
+#[cfg(feature = "profiling")]
+mod profiling;
 mod query;
 mod review_diff;
 mod terminal;
@@ -192,6 +228,10 @@ impl WakuApplicationExt for Application {
 }
 
 pub fn run() {
+    #[cfg(feature = "profiling")]
+    crate::profiling::init();
+    #[cfg(feature = "perf-counters")]
+    crate::perf_counters::init();
     let daemon = crate::daemon::start_process()
         .unwrap_or_else(|error| panic!("failed to start Waku daemon: {error:#}"));
     gpui_platform::application()
@@ -372,22 +412,19 @@ pub fn run() {
                 )
                 .expect("failed to open Waku window");
 
-            cx.on_system_notification_response({
-                let window = window;
-                move |response, cx| {
-                    let Some(session_id) = crate::app::task_id_from_notification_tag(&response.tag)
-                    else {
-                        return;
-                    };
-                    window
-                        .update(cx, |waku, window, cx| {
-                            waku.open_task_from_notification(session_id, cx);
-                            window.activate_window();
-                            cx.activate(true);
-                        })
-                        .ok();
-                    cx.dismiss_system_notification(&response.tag);
-                }
+            cx.on_system_notification_response(move |response, cx| {
+                let Some(session_id) = crate::app::task_id_from_notification_tag(&response.tag)
+                else {
+                    return;
+                };
+                window
+                    .update(cx, |waku, window, cx| {
+                        waku.open_task_from_notification(session_id, cx);
+                        window.activate_window();
+                        cx.activate(true);
+                    })
+                    .ok();
+                cx.dismiss_system_notification(&response.tag);
             });
 
             window

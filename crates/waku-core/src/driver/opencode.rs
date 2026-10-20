@@ -2783,7 +2783,7 @@ mod tests {
                 DriverEvent::RichActivity(item) if item.complete => Some(item),
                 _ => None,
             })
-            .last()
+            .next_back()
             .expect("completed computer-use tool");
         assert_eq!(item.tool_name.as_deref(), Some("js"));
         assert_eq!(item.mcp_server.as_deref(), Some(server));

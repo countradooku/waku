@@ -81,7 +81,7 @@ The full audit reports are in [`audit/`](audit/):
 > - The daemon's domain model still mirrors T3 v2 one-to-one: entities, entity-snapshot events, turn-item variants and capability groups. That is a proven model, and it keeps T3 a useful reference.
 > - On the wire, every client speaks **our own typed protocol**, `waku-protocol` v8: binary frames for the native client, JSON for web and mobile.
 > - **No T3-compatible gateway is planned.** T3's web and mobile clients are not reused.
-> - Waku's own `apps/web` and `apps/mobile` are grown to parity instead (see D2).
+> - Waku's own `apps/web` is grown to parity instead, and mobile becomes native apps (see D2).
 
 What option B costs ([t3-remote-auth-install-cli.md §0](audit/t3-remote-auth-install-cli.md)):
 - T3's socket carries Effect RPC serialized as JSON. A Rust server has to reproduce its framing: request, chunk/stream, exit, interrupt, ack, ping, and tagged errors.
@@ -91,30 +91,35 @@ What option B costs ([t3-remote-auth-install-cli.md §0](audit/t3-remote-auth-in
 
 ### D2: mobile
 
-- Keep a React Native client, because GPUI does not target iOS or Android in production.
-- Grow Waku's `apps/mobile` (Expo) toward the T3 list in [t3-clients.md §4.3](audit/t3-clients.md). Order: thread list, transcript, composer, approvals, terminal, then git and PRs, push, widgets and the offline outbox.
-- T3 mobile is MIT, so individual native modules (composer editor, diff canvas, terminal) can be lifted where that saves time, with their notices kept.
-- Generate the TypeScript client from the Rust protocol, as `packages/waku-client` already does, so web and mobile never drift from the daemon.
+> **Decided (2026-10-20): native mobile apps, written later.**
+> - Mobile clients will be native iOS (Swift) and Android (Kotlin) apps built on protocol v8. Their messages and stream semantics come from the Rust schema, and a Swift/Kotlin codegen target is added when that work starts.
+> - The Expo app in `apps/mobile` is not grown toward parity. It stays as upstream left it until the native apps replace it.
+> - The mobile issues in Phase 8 are deferred. They will be rewritten for native apps when that phase starts.
+> - The generated TypeScript client still serves `apps/web`.
 
 ### D3: cloud relay and push
 
-T3 Connect runs on Cloudflare Workers, Durable Objects, PlanetScale Postgres and Clerk. It adds managed tunnels, DPoP-bound credentials, APNs/FCM and Live Activities.
+> **Decided (2026-10-20): no relay first.**
+> - Remote access ships as LAN pairing, Tailscale and SSH (Phase 7).
+> - A minimal push relay comes later, with the native mobile apps.
+> - No managed tunnels or cloud identity service is planned.
 
-Options:
-- (a) Build an equivalent. XL, and it costs money to operate.
-- (b) Ship Tailscale, LAN pairing and SSH only, and add push later through a minimal relay.
-
-Recommend (b) first.
+T3 Connect runs on Cloudflare Workers, Durable Objects, PlanetScale Postgres and Clerk, with managed tunnels, DPoP-bound credentials, APNs/FCM and Live Activities. We are not building that equivalent.
 
 ### D4: GPUI ownership
 
-Waku pins `egoist/zed@waku-webview`. The fluid-streaming work (§5.3) needs changes inside GPUI, so the fork must either maintain its own GPUI fork rebased on upstream Zed, or upstream the changes. Budget for owning it.
+> **Decided (2026-10-20): stay on `egoist/zed@waku-webview` for now.**
+> - The fork keeps upstream's GPUI pin.
+> - When the fluidity track ([#173](https://github.com/countradooku/waku/issues/173)) needs to change GPUI itself, starting with [#32](https://github.com/countradooku/waku/issues/32), we fork that branch under `countradooku`, as [#37](https://github.com/countradooku/waku/issues/37) describes, and re-pin.
 
 ### D5: identity
 
-- New name and bundle ids.
-- Signing keys, the Sparkle/appcast feeds, an R2 bucket and the analytics endpoint.
-- Keep GPL headers and add MIT notices for any T3-derived code.
+> **Decided (2026-10-20): keep the product name "Waku" for now, with a separate internal identity.**
+> - User-visible name: "Waku".
+> - Internal identity, used for bundle ids, data directories, the daemon socket and the keychain service: `waku-fork`. It lives in one module (`crates/waku-protocol/src/identity.rs`), so a later rename changes one place.
+> - The fork never reads or writes upstream Waku's files, so both apps can be installed side by side.
+> - Release signing, update feeds and storage are set up by the owner with their own credentials. See `docs/fork/RELEASING.md`.
+> - Keep GPL headers, and add MIT notices for any T3-derived code.
 
 ---
 
@@ -411,7 +416,7 @@ The details are in `AGENTS.md` under "Fork workflow".
 | **5. UI parity** (can start once the protocol v8 RFC is merged) | [#168](https://github.com/countradooku/waku/issues/168) | §4.4–4.7: rich composer with chips (start early, it is the hardest piece), trigger menus, stash, history, citations, v2 timeline rows, minimap, paging, server-side find, sidebar sections with drag and undo, keybindings engine, 14 settings pages with scoping, themes plus VS Code import, terminal drawer, diff split view and comments, file previews, go-to-file and search, usage, wizard, diagnostics, HTML renders and MCP Apps webview | A checklist walk of [t3-clients.md §1–2](audit/t3-clients.md) with all S/M/L rows closed |
 | **6. Source control** | [#169](https://github.com/countradooku/waku/issues/169) | Pull, PR creation, publish, setup and project scripts; GitHub PR inbox, detail, review and merge; stacks; review guides; PR watch and linking; then GitLab, Bitbucket, Azure DevOps and Forgejo | Full PR lifecycle on GitHub from inside the app |
 | **7. Remote** | [#170](https://github.com/countradooku/waku/issues/170) | Pairing and scopes, connection catalog with routes, Tailscale, SSH environments, multi-environment client, load balancing, provider sign-in flows for remote hosts, update channels | Phone or second machine pairs over LAN, Tailscale or SSH with scoped access |
-| **8. Mobile, web and relay** (starts once protocol v8 lands) | [#171](https://github.com/countradooku/waku/issues/171) | Grow Waku `apps/web` and `apps/mobile` on the generated protocol client (D2); minimal relay plus push (D3) | Mobile at the parity level D2 chose |
+| **8. Mobile, web and relay** (starts once protocol v8 lands) | [#171](https://github.com/countradooku/waku/issues/171) | Grow `apps/web` on the generated protocol client. Native iOS and Android apps on protocol v8 come later (D2). A minimal push relay comes with them (D3). | Web at desktop parity; native mobile scoped when that work starts |
 | **9. Long tail** | [#172](https://github.com/countradooku/waku/issues/172) | Agent browser automation (CDP), headless browser, devices panel, SnapShots, ACP Registry, Antigravity, Muse, provider install/update management, Mermaid, voice, default browser, CLI activation | Per item |
 
 The fluidity track (§5.3, epic [#173](https://github.com/countradooku/waku/issues/173)) runs alongside Phases 2–3; it only depends on the perf counters from Phase 0.

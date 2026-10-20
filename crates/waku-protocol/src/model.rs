@@ -4060,7 +4060,7 @@ mod tests {
     #[test]
     fn projectless_projects_use_projects_root_and_recognize_legacy_paths() {
         let home = dirs::home_dir().expect("test user has a home directory");
-        let root = home.join(".waku");
+        let root = home.join(crate::identity::HOME_DIRECTORY_NAME);
         let legacy = Project::from_path(root.clone());
         let legacy_dated = Project::from_path(root.join("2026-08-08/new-chat"));
         let project = Project::from_path(root.join("projects/2026-08-08/new-chat"));

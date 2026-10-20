@@ -6,7 +6,7 @@ description = "A fast, native control plane for local coding agents"
 license = "GPL-3.0-only"
 
 [workspace]
-members = ["crates/waku-client", "crates/waku-core", "crates/waku-daemon", "crates/waku-protocol", "crates/waku-computer-use"]
+members = ["crates/waku-client", "crates/waku-core", "crates/waku-daemon", "crates/waku-protocol", "crates/waku-computer-use", "crates/waku-bench-daemon"]
 default-members = [
   ".",
   "crates/waku-client",
@@ -16,6 +16,32 @@ default-members = [
   "crates/waku-computer-use",
 ]
 resolver = "2"
+
+# CI runs `cargo clippy --all-targets -- -D warnings`. These lints are allowed
+# workspace-wide on purpose: the large protocol enums and error types are
+# reshaped by protocol v8 (issue #53), and splitting long argument lists or
+# complex types is churn without a measurable benefit. Everything else is an
+# error in CI.
+[workspace.lints.clippy]
+large_enum_variant = "allow"
+result_large_err = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+
+[lints]
+workspace = true
+
+[features]
+# Tracy instrumentation: `tracing` spans on the event pump, the root and pane
+# renders, transcript rows, Markdown and saves, recorded by a `tracing-tracy`
+# subscriber. Off by default, and without it every span compiles to nothing.
+# Pair it with `--profile profiling`. See docs/performance.md.
+profiling = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-tracy"]
+# Frame, per-pane render, stream-commit, save and allocation counters (with a
+# counting global allocator), dumped as JSON to `WAKU_PERF_COUNTERS_OUT` and
+# shown next to the FPS counter. Off by default, and without it every counter
+# compiles to nothing. See docs/performance.md.
+perf-counters = []
 
 [dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }
@@ -59,6 +85,21 @@ futures-lite = "2"
 futures = "0.3"
 nucleo-matcher = "0.3.1"
 tokio = { version = "1", features = ["rt"] }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
+  "std",
+  "fmt",
+  "registry",
+] }
+# tracy-client 0.19 speaks the Tracy 0.14.1 protocol; connect with a matching
+# profiler. `ondemand` keeps the client from buffering until a profiler
+# attaches, and `only-localhost` keeps its listener off the network.
+tracing-tracy = { version = "0.12", optional = true, default-features = false, features = [
+  "enable",
+  "ondemand",
+  "broadcast",
+  "only-localhost",
+] }
 
 # `test-support` has to stay test-only. It compiles a loop into gpui's
 # `flush_effects` that draws every dirty window right there, so with the
@@ -69,6 +110,16 @@ tokio = { version = "1", features = ["rt"] }
 gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = [
   "test-support",
 ] }
+# Microbenchmarks (`benches/`, `scripts/bench/compare.sh`). Criterion rather
+# than divan because the CI regression gate compares the `estimates.json` it
+# writes per benchmark; plots and rayon are not needed.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+# Window-free microbenchmarks over the markdown, review-diff and terminal hot
+# paths, reached through `waku::bench_support`.
+[[bench]]
+name = "desktop"
+harness = false
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -191,6 +242,22 @@ ed25519-dalek = "2"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Release code generation that keeps line tables and symbols, so Tracy and
+# `sample` can attribute time to source lines:
+# `cargo run --profile profiling --features profiling`.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
+
+# Benchmarks only need an optimized build that is compared against itself: the
+# CI gate builds base and head on one runner, so the release profile's single
+# codegen unit and thin LTO would multiply that build time without making the
+# comparison any fairer.
+[profile.bench]
+lto = false
+codegen-units = 16
 
 # Keep debug assertions and incremental builds for app code, but do not run
 # GPUI's text shaping and Taffy layout hot paths completely unoptimized.

@@ -121,10 +121,10 @@ fn discover_codex(binary: &Path, project_root: &Path) -> Option<Vec<SlashCommand
             "id": 2,
             "params": {"cwds": [cwd.as_ref()]}
         });
-        if write_json_line(&mut stdin, &request).is_ok() {
-            if let Some(value) = recv_rpc_response(&rx, 2, CLI_PROBE_TIMEOUT) {
-                commands.extend(parse_codex_skills(&value, project_root));
-            }
+        if write_json_line(&mut stdin, &request).is_ok()
+            && let Some(value) = recv_rpc_response(&rx, 2, CLI_PROBE_TIMEOUT)
+        {
+            commands.extend(parse_codex_skills(&value, project_root));
         }
         Some(commands)
     } else {

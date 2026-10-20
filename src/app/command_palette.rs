@@ -1635,9 +1635,8 @@ impl Waku {
         let theme = Theme::current(cx);
         let viewport_height = f32::from(window.viewport_size().height);
         let top = (viewport_height * 0.09).clamp(48.0, 72.0);
-        let card_max_height = (viewport_height - top - 36.0)
-            .max(SEARCH_ROW_HEIGHT)
-            .min(MAX_CARD_HEIGHT);
+        let card_max_height =
+            (viewport_height - top - 36.0).clamp(SEARCH_ROW_HEIGHT, MAX_CARD_HEIGHT);
         let selected = self
             .command_palette
             .selected

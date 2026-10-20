@@ -207,7 +207,7 @@ fn pump(cx: &mut App) {
         });
         cx.spawn(async move |cx| {
             let results = task.await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let mut cache = cx.global::<Store>().0.borrow_mut();
                 cache.active -= 1;
                 let views = cache.complete(results);
@@ -263,10 +263,10 @@ fn typeset(latex: &Arc<str>, display: bool) -> anyhow::Result<Arc<DisplayList>> 
     cache.entries.insert(key.clone(), list.clone());
     cache.order.push_back(key);
     while cache.entries.len() > 128 || cache.items > 32768 {
-        if let Some(key) = cache.order.pop_front() {
-            if let Some(list) = cache.entries.remove(&key) {
-                cache.items -= list.items.len();
-            }
+        if let Some(key) = cache.order.pop_front()
+            && let Some(list) = cache.entries.remove(&key)
+        {
+            cache.items -= list.items.len();
         }
     }
     Ok(list)
@@ -373,7 +373,9 @@ mod tests {
             dark.image
                 .as_bytes(0)
                 .unwrap()
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|pixel| pixel[3] > 0)
         );
         assert_ne!(dark.image.as_bytes(0), light.image.as_bytes(0));

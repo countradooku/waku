@@ -27,7 +27,7 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install 1.96.0 --profile minimal
+          rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
           rustup default 1.96.0
 
       - name: Install Bun
@@ -61,8 +61,22 @@ jobs:
           restore-keys: |
             ${{ matrix.os }}-rust-1.96.0-cargo-
 
+      # Formatting is platform-independent; clippy runs on every OS because
+      # much of the app is behind per-platform cfgs.
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
       - name: Run tests
         run: cargo test --locked
+
+      # Not a default member, so `cargo test` above skips it.
+      - name: Bench daemon and fake provider CLIs
+        if: runner.os != 'Windows'
+        run: cargo test -p waku-bench-daemon --locked
 
       - name: Verify in-process Cua SDK and REPL lifecycle
         run: |
@@ -82,3 +96,11 @@ jobs:
           bun run protocol:check
           bun run --filter @waku/client check
           bun run --filter @waku/client test
+
+      - name: Web and mobile typecheck and tests
+        if: runner.os == 'Linux'
+        run: |
+          bun run --filter @waku/web typecheck
+          bun run --filter @waku/web test
+          bun run --filter @waku/mobile typecheck
+          bun run --filter @waku/mobile test

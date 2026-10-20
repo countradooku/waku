@@ -2,27 +2,32 @@
 set -eu
 
 # Installs Waku for Linux into ~/.local — no root, no package manager.
-# Downloads the release tarball from https://releases.waku.sh, unpacks it as
-# ~/.local/waku.app, links the binary onto PATH, and registers the desktop
-# entry. docs/linux.md documents the equivalent manual steps.
+# Downloads the release tarball from the release host (WAKU_RELEASES_URL),
+# unpacks it as ~/.local/waku.app, links the binary onto PATH, and registers
+# the desktop entry. docs/linux.md documents the equivalent manual steps.
 #
-#   curl -fsSL https://waku.sh/install.sh | sh
+#   curl -fsSL <release host>/install.sh | sh
 #
 # Environment:
 #   WAKU_VERSION        install this version instead of the latest
 #   WAKU_BUNDLE_PATH    install a local tarball instead of downloading
-#   WAKU_RELEASES_URL   base URL to download from
+#   WAKU_RELEASES_URL   base URL to download from (default: DEFAULT_RELEASES_URL)
+
+# The release host this copy of the script installs from. It is empty in the
+# source tree; set it to the same value as the WAKU_RELEASES_URL release
+# builds use when publishing the script (see docs/fork/RELEASING.md).
+DEFAULT_RELEASES_URL=""
 
 usage() {
     cat <<'USAGE'
 Install Waku for Linux into ~/.local.
 
 Usage:
-  curl -fsSL https://waku.sh/install.sh | sh
-  curl -fsSL https://waku.sh/install.sh | sh -s -- --uninstall
+  curl -fsSL <release host>/install.sh | sh
+  curl -fsSL <release host>/install.sh | sh -s -- --uninstall
 
 Options:
-  --uninstall   Remove Waku, leaving ~/.waku (projects and settings) alone
+  --uninstall   Remove Waku, leaving ~/.waku-fork (projects and settings) alone
   --help        Show this help
 USAGE
 }
@@ -30,8 +35,9 @@ USAGE
 main() {
     app_dir="$HOME/.local/waku.app"
     bin_link="$HOME/.local/bin/waku"
-    desktop_file="$HOME/.local/share/applications/sh.waku.desktop"
-    releases="${WAKU_RELEASES_URL:-https://releases.waku.sh}"
+    desktop_file="$HOME/.local/share/applications/io.github.countradooku.waku.desktop"
+    releases="${WAKU_RELEASES_URL:-$DEFAULT_RELEASES_URL}"
+    releases="${releases%/}"
 
     case "${1:-}" in
         --uninstall) uninstall; return ;;
@@ -46,8 +52,8 @@ main() {
 
     platform="$(uname -s)"
     if [ "$platform" = "Darwin" ]; then
-        echo "Waku for macOS ships as a signed .dmg that updates itself." >&2
-        echo "Download it from https://waku.sh" >&2
+        echo "Waku for macOS ships as a .dmg." >&2
+        echo "Download it from https://github.com/countradooku/waku/releases" >&2
         exit 1
     fi
     if [ "$platform" != "Linux" ]; then
@@ -61,7 +67,7 @@ main() {
         aarch64 | arm64) target="aarch64-unknown-linux-gnu" ;;
         *)
             echo "Unsupported architecture: $machine" >&2
-            echo "Build from source: https://github.com/egoist/waku" >&2
+            echo "Build from source: https://github.com/countradooku/waku" >&2
             exit 1
             ;;
     esac
@@ -83,6 +89,11 @@ main() {
     if [ -n "${WAKU_BUNDLE_PATH:-}" ]; then
         cp "$WAKU_BUNDLE_PATH" "$archive"
     else
+        if [ -z "$releases" ]; then
+            echo "No release host configured: set WAKU_RELEASES_URL to the base URL" >&2
+            echo "Waku releases are served from, or WAKU_BUNDLE_PATH to a local tarball." >&2
+            exit 1
+        fi
         version="${WAKU_VERSION:-}"
         if [ -z "$version" ]; then
             if ! version="$(fetch "$releases/latest-linux.txt")"; then
@@ -137,12 +148,12 @@ main() {
     mv "$staging" "$app_dir"
     ln -sf "$app_dir/bin/waku" "$bin_link"
 
-    entry="$app_dir/share/applications/sh.waku.desktop"
+    entry="$app_dir/share/applications/io.github.countradooku.waku.desktop"
     if [ -f "$entry" ]; then
         # The packaged entry is relocatable (bare Exec/Icon names). Pin both to
         # this install so the launcher works without PATH or icon-theme setup.
         sed -e "s|^Exec=waku$|Exec=$app_dir/bin/waku|" \
-            -e "s|^Icon=sh.waku$|Icon=$app_dir/share/icons/hicolor/256x256/apps/sh.waku.png|" \
+            -e "s|^Icon=io.github.countradooku.waku$|Icon=$app_dir/share/icons/hicolor/256x256/apps/io.github.countradooku.waku.png|" \
             "$entry" >"$desktop_file"
         if command -v update-desktop-database >/dev/null 2>&1; then
             update-desktop-database "$(dirname "$desktop_file")" 2>/dev/null || true
@@ -177,7 +188,7 @@ uninstall() {
         rm -f "$desktop_file"
     fi
     rm -rf "$app_dir"
-    echo "Waku is uninstalled. Projects and settings remain in ~/.waku."
+    echo "Waku is uninstalled. Projects and settings remain in ~/.waku-fork."
 }
 
 main "$@"

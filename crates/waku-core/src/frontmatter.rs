@@ -3,10 +3,10 @@
 /// Unknown and unsupported values are ignored so a hand-written prompt still
 /// stays listed. YAML syntax, including folded and literal block scalars, is
 /// handled by `serde-saphyr`.
-pub(crate) fn parse_frontmatter_fields<'a>(
-    contents: &'a str,
+pub(crate) fn parse_frontmatter_fields(
+    contents: &str,
     mut visit: impl FnMut(&str, String),
-) -> &'a str {
+) -> &str {
     let Some(rest) = contents.strip_prefix("---") else {
         return contents;
     };

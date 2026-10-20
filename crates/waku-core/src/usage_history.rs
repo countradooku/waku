@@ -659,10 +659,10 @@ fn read_transcript_records(path: &Path, provider: UsageProvider) -> Option<Vec<U
                     // message's usage; the first record wins. Cross-file
                     // repeats (resumed or forked sessions) are handled by the
                     // aggregator's global pass.
-                    if let Some(key) = &record.dedupe_key {
-                        if !seen_in_file.insert(key.clone()) {
-                            continue;
-                        }
+                    if let Some(key) = &record.dedupe_key
+                        && !seen_in_file.insert(key.clone())
+                    {
+                        continue;
                     }
                     records.push(record);
                 }
@@ -756,10 +756,10 @@ impl Aggregator {
     }
 
     fn add(&mut self, record: &UsageRecord, rates: &RateTable) {
-        if let Some(key) = &record.dedupe_key {
-            if !self.seen.insert(key.clone()) {
-                return;
-            }
+        if let Some(key) = &record.dedupe_key
+            && !self.seen.insert(key.clone())
+        {
+            return;
         }
         let Some(timestamp) = Utc.timestamp_millis_opt(record.timestamp_ms).single() else {
             return;

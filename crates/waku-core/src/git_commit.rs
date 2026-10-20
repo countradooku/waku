@@ -595,10 +595,11 @@ pub(crate) fn run_capture(
         }
         // A hook/helper may inherit these pipes after the parent exits. Keep
         // their draining within the same deadline instead of joining forever.
-        if let Some(status) = exit_status {
-            if stdout_reader.is_finished() && stderr_reader.is_finished() {
-                break status;
-            }
+        if let Some(status) = exit_status
+            && stdout_reader.is_finished()
+            && stderr_reader.is_finished()
+        {
+            break status;
         }
         if Instant::now() >= deadline {
             #[cfg(unix)]
@@ -624,10 +625,7 @@ pub(crate) fn run_capture(
 fn read_bounded(mut reader: impl Read, limit: usize) -> Vec<u8> {
     let mut kept = Vec::new();
     let mut chunk = [0u8; 8192];
-    loop {
-        let Ok(read) = reader.read(&mut chunk) else {
-            break;
-        };
+    while let Ok(read) = reader.read(&mut chunk) {
         if read == 0 {
             break;
         }

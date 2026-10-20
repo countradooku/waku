@@ -3066,6 +3066,8 @@ impl ComposerInput {
 
 impl Render for ComposerInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        profile_span!(TRACE, "ComposerInput::render");
+        perf_count!(render_composer);
         div()
             .w_full()
             // The embedded field propagates SubmitSteer; this ancestor
@@ -3156,9 +3158,9 @@ mod tests {
         (input, cx)
     }
 
-    fn setup_composer<'a>(
-        cx: &'a mut TestAppContext,
-    ) -> (Entity<ComposerInput>, &'a mut gpui::VisualTestContext) {
+    fn setup_composer(
+        cx: &mut TestAppContext,
+    ) -> (Entity<ComposerInput>, &mut gpui::VisualTestContext) {
         cx.update(super::init);
         let (harness, cx) = cx.add_window_view(|window, cx| {
             let composer = cx.new(|cx| ComposerInput::new(window, cx));

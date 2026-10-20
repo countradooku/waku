@@ -1601,6 +1601,8 @@ impl Waku {
     }
 
     pub(super) fn save(&mut self) {
+        profile_span!(DEBUG, "Waku::save");
+        perf_scope!(save_scope);
         self.last_stream_save = Instant::now();
         let daemon_error = self
             .daemon
@@ -2218,7 +2220,7 @@ impl Waku {
             return;
         }
         let Some(project_path) = self
-            .workspace_path_for_session(&source)
+            .workspace_path_for_session(source)
             .map(std::path::Path::to_path_buf)
         else {
             self.show_toast(tr!("errors.task_project_not_found"));
@@ -2269,7 +2271,7 @@ impl Waku {
             )
             && driver.is_none()
         {
-            match self.driver_start_request_for_session(&source, project_path.clone()) {
+            match self.driver_start_request_for_session(source, project_path.clone()) {
                 Ok(request) => Some(request),
                 Err(error) => {
                     self.show_toast(error.to_string());
@@ -2722,7 +2724,7 @@ impl Waku {
             reasoning_effort,
             service_tier,
             context_window,
-        } = self.session_options(&session);
+        } = self.session_options(session);
         Ok(DriverStartRequest {
             session_id: session.id,
             provider: session.provider,
@@ -3524,6 +3526,8 @@ impl Waku {
     }
 
     pub(super) fn drain_event_pump(&mut self, cx: &mut Context<Self>) -> EventPumpSchedule {
+        profile_span!(DEBUG, "drain_event_pump");
+        perf_scope!(pump_scope);
         // `|` on purpose: a busy provider must not starve the other result
         // queues just because its own drain reported a change first.
         if self.drain_driver_events(cx)
@@ -3661,6 +3665,7 @@ impl Waku {
                 }
             }
             runtime.stream_remeasure_pending = markdown_changed;
+            perf_count!(stream_drain(markdown_changed));
             if keep_runtime {
                 self.runtimes.insert(session_id, runtime);
             }

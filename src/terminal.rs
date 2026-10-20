@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
-use alacritty_terminal::event::{Event, EventListener, WindowSize};
+use alacritty_terminal::event::{Event, EventListener, VoidListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::{BidirectionalIterator, Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point as TerminalPoint, Side};
@@ -17,7 +17,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty::{self, Shell};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
@@ -315,112 +315,170 @@ impl TerminalSession {
     ) -> TerminalSnapshot {
         self.dark_theme.store(theme.is_dark, Ordering::Release);
         let term = self.term.lock();
-        let content = term.renderable_content();
-        let columns = self.grid_size.0;
-        let rows = self.grid_size.1;
-        let selection = content.selection;
-        let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
-        let cursor_column = content.cursor.point.column.0;
-        let cursor_style = if matches!(
-            content.cursor.shape,
-            alacritty_terminal::vte::ansi::CursorShape::Hidden
-        ) {
-            TerminalCursorStyle::Hidden
+        snapshot_term(
+            &term,
+            self.grid_size,
+            theme,
+            selection_color,
+            cursor_style,
+            hovered_link,
+        )
+    }
+}
+
+/// Paint-ready rows for the visible grid. Pure over the terminal state, so the
+/// per-frame cost can be benchmarked without a PTY (see [`SnapshotBench`]).
+fn snapshot_term<T: EventListener>(
+    term: &Term<T>,
+    (columns, rows): (usize, usize),
+    theme: Theme,
+    selection_color: Hsla,
+    cursor_style: TerminalCursorStyle,
+    hovered_link: Option<&Match>,
+) -> TerminalSnapshot {
+    let content = term.renderable_content();
+    let selection = content.selection;
+    let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
+    let cursor_column = content.cursor.point.column.0;
+    let cursor_style = if matches!(
+        content.cursor.shape,
+        alacritty_terminal::vte::ansi::CursorShape::Hidden
+    ) {
+        TerminalCursorStyle::Hidden
+    } else {
+        cursor_style
+    };
+    let outline_cursor = (cursor_style == TerminalCursorStyle::Outline
+        && (0..rows as i32).contains(&cursor_row)
+        && cursor_column < columns)
+        .then_some((cursor_row as usize, cursor_column));
+    let mut cells = vec![TerminalCell::blank(theme); columns * rows];
+
+    for indexed in content.display_iter {
+        let row = indexed.point.line.0 + content.display_offset as i32;
+        let column = indexed.point.column.0;
+        if row < 0 || row as usize >= rows || column >= columns {
+            continue;
+        }
+        let cell = indexed.cell;
+        let mut text = if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+            || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+            || cell.flags.contains(Flags::HIDDEN)
+        {
+            " ".to_owned()
         } else {
-            cursor_style
+            cell.c.to_string()
         };
-        let outline_cursor = (cursor_style == TerminalCursorStyle::Outline
-            && (0..rows as i32).contains(&cursor_row)
-            && cursor_column < columns)
-            .then_some((cursor_row as usize, cursor_column));
-        let mut cells = vec![TerminalCell::blank(theme); columns * rows];
+        if let Some(zerowidth) = cell.zerowidth() {
+            text.extend(zerowidth);
+        }
 
-        for indexed in content.display_iter {
-            let row = indexed.point.line.0 + content.display_offset as i32;
-            let column = indexed.point.column.0;
-            if row < 0 || row as usize >= rows || column >= columns {
-                continue;
-            }
-            let cell = indexed.cell;
-            let mut text = if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::HIDDEN)
-            {
-                " ".to_owned()
+        let mut foreground = resolve_color(cell.fg, content.colors, theme, true);
+        let mut background = resolve_color(cell.bg, content.colors, theme, false);
+        if cell.flags.contains(Flags::INVERSE) {
+            std::mem::swap(&mut foreground, &mut background);
+        }
+        // `Flags::DIM_BOLD` and `Flags::BOLD_ITALIC` are unions of the
+        // individual bits, so testing them with `intersects` would also
+        // match plain bold or italic cells.
+        if cell.flags.contains(Flags::DIM) {
+            if theme.is_dark {
+                foreground.l *= 0.7;
             } else {
-                cell.c.to_string()
+                foreground.l = 1.0 - (1.0 - foreground.l) * 0.7;
+            }
+        }
+        if selection.is_some_and(|selection| selection.contains(indexed.point)) {
+            background = selection_color;
+            foreground = theme.text;
+        }
+        if cursor_style == TerminalCursorStyle::Solid
+            && row == cursor_row
+            && column == cursor_column
+        {
+            background = theme.text;
+            foreground = theme.terminal;
+        }
+
+        cells[row as usize * columns + column] = TerminalCell {
+            text,
+            foreground,
+            background,
+            bold: cell.flags.contains(Flags::BOLD),
+            italic: cell.flags.contains(Flags::ITALIC),
+            underline: cell.flags.intersects(Flags::ALL_UNDERLINES)
+                || hovered_link.is_some_and(|bounds| bounds.contains(&indexed.point)),
+            strikeout: cell.flags.contains(Flags::STRIKEOUT),
+        };
+    }
+
+    let mut rendered_rows = Vec::with_capacity(rows);
+    for row in cells.chunks(columns) {
+        let mut text = String::new();
+        let mut runs: Vec<TerminalRun> = Vec::new();
+        for cell in row {
+            let len = cell.text.len();
+            text.push_str(&cell.text);
+            let style = TerminalRunStyle {
+                foreground: cell.foreground,
+                background: cell.background,
+                bold: cell.bold,
+                italic: cell.italic,
+                underline: cell.underline,
+                strikeout: cell.strikeout,
             };
-            if let Some(zerowidth) = cell.zerowidth() {
-                text.extend(zerowidth);
+            if let Some(run) = runs.last_mut().filter(|run| run.style == style) {
+                run.len += len;
+            } else {
+                runs.push(TerminalRun { len, style });
             }
-
-            let mut foreground = resolve_color(cell.fg, content.colors, theme, true);
-            let mut background = resolve_color(cell.bg, content.colors, theme, false);
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut foreground, &mut background);
-            }
-            // `Flags::DIM_BOLD` and `Flags::BOLD_ITALIC` are unions of the
-            // individual bits, so testing them with `intersects` would also
-            // match plain bold or italic cells.
-            if cell.flags.contains(Flags::DIM) {
-                if theme.is_dark {
-                    foreground.l *= 0.7;
-                } else {
-                    foreground.l = 1.0 - (1.0 - foreground.l) * 0.7;
-                }
-            }
-            if selection.is_some_and(|selection| selection.contains(indexed.point)) {
-                background = selection_color;
-                foreground = theme.text;
-            }
-            if cursor_style == TerminalCursorStyle::Solid
-                && row == cursor_row
-                && column == cursor_column
-            {
-                background = theme.text;
-                foreground = theme.terminal;
-            }
-
-            cells[row as usize * columns + column] = TerminalCell {
-                text,
-                foreground,
-                background,
-                bold: cell.flags.contains(Flags::BOLD),
-                italic: cell.flags.contains(Flags::ITALIC),
-                underline: cell.flags.intersects(Flags::ALL_UNDERLINES)
-                    || hovered_link.is_some_and(|bounds| bounds.contains(&indexed.point)),
-                strikeout: cell.flags.contains(Flags::STRIKEOUT),
-            };
         }
+        rendered_rows.push(TerminalRow { text, runs });
+    }
 
-        let mut rendered_rows = Vec::with_capacity(rows);
-        for row in cells.chunks(columns) {
-            let mut text = String::new();
-            let mut runs: Vec<TerminalRun> = Vec::new();
-            for cell in row {
-                let len = cell.text.len();
-                text.push_str(&cell.text);
-                let style = TerminalRunStyle {
-                    foreground: cell.foreground,
-                    background: cell.background,
-                    bold: cell.bold,
-                    italic: cell.italic,
-                    underline: cell.underline,
-                    strikeout: cell.strikeout,
-                };
-                if let Some(run) = runs.last_mut().filter(|run| run.style == style) {
-                    run.len += len;
-                } else {
-                    runs.push(TerminalRun { len, style });
-                }
-            }
-            rendered_rows.push(TerminalRow { text, runs });
-        }
+    TerminalSnapshot {
+        rows: rendered_rows,
+        outline_cursor,
+    }
+}
 
-        TerminalSnapshot {
-            rows: rendered_rows,
-            outline_cursor,
+/// A PTY-less grid for the `desktop` microbenchmark: the snapshot pass a frame
+/// runs, over a terminal fed from recorded output instead of a live shell.
+#[doc(hidden)]
+pub struct SnapshotBench {
+    term: Term<VoidListener>,
+    grid_size: (usize, usize),
+}
+
+impl SnapshotBench {
+    pub fn new(columns: usize, rows: usize, output: &[u8]) -> Self {
+        let dimensions = TerminalDimensions { columns, rows };
+        let config = Config {
+            scrolling_history: TERMINAL_SCROLLBACK_LINES,
+            ..Default::default()
+        };
+        let mut term = Term::new(config, &dimensions, VoidListener);
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, output);
+        Self {
+            term,
+            grid_size: (columns, rows),
         }
+    }
+
+    /// One frame's snapshot. Returns the styled run count so the work is
+    /// observable to the benchmark.
+    pub fn snapshot(&self) -> usize {
+        let theme = Theme::dark();
+        let snapshot = snapshot_term(
+            &self.term,
+            self.grid_size,
+            theme,
+            theme.selection,
+            TerminalCursorStyle::Solid,
+            None,
+        );
+        snapshot.rows.iter().map(|row| row.runs.len()).sum()
     }
 }
 
@@ -1767,8 +1825,6 @@ fn terminal_rgb(index: usize, is_dark: bool) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alacritty_terminal::event::VoidListener;
-    use alacritty_terminal::vte::ansi::Processor;
     use gpui::{Modifiers, point, size};
 
     fn key(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> Keystroke {

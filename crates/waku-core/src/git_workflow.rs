@@ -66,10 +66,10 @@ pub fn stage_files(cwd: &Path, paths: &[String], stage: bool) -> anyhow::Result<
         // Unstaging an indexed rename must restore both paths. When staging
         // it again, its old name has already left the index and would be an
         // unmatched pathspec. Only a working-tree rename needs that old path.
-        if let Some(previous) = &file.previous_path {
-            if !stage || file.worktree_status == "R" {
-                expanded.push(previous);
-            }
+        if let Some(previous) = &file.previous_path
+            && (!stage || file.worktree_status == "R")
+        {
+            expanded.push(previous);
         }
     }
     if selected.iter().any(|path| !known.contains(path)) {
@@ -312,6 +312,12 @@ mod tests {
             let path =
                 std::env::temp_dir().join(format!("waku-git-workflow-{}", uuid::Uuid::new_v4()));
             fs::create_dir(&path).unwrap();
+            // Git reports canonical paths; on macOS the temp dir is under the
+            // `/var` -> `/private/var` symlink, so compare against the real path.
+            // Not on Windows, where `canonicalize` yields `\\?\` verbatim paths
+            // that git does not accept.
+            #[cfg(not(windows))]
+            let path = path.canonicalize().unwrap();
             git(&path, &["init", "-b", "main"]).unwrap();
             git(&path, &["config", "user.name", "Waku Tests"]).unwrap();
             git(&path, &["config", "user.email", "waku@example.com"]).unwrap();
@@ -452,7 +458,9 @@ mod tests {
         fs::write(repo.0.join("nested/file"), "content\n").unwrap();
         let nested = repo.0.join("nested");
         let snapshot = status(&nested).unwrap();
-        assert_eq!(snapshot.repository, repo.0);
+        // `status` reports the canonical root; on Windows that is a verbatim
+        // long-name path while the temp dir may use an 8.3 short name.
+        assert_eq!(snapshot.repository, fs::canonicalize(&repo.0).unwrap());
         assert_eq!(snapshot.files[0].path, "nested/file");
         stage_files(&nested, &["nested/file".into()], true).unwrap();
         assert_eq!(status(&nested).unwrap().files[0].index_status, "A");

@@ -1,0 +1,48 @@
+[package]
+name = "waku-bench-daemon"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic Waku daemon and fake provider CLIs that replay scripted benchmark timelines"
+license = "GPL-3.0-only"
+publish = false
+default-run = "waku-bench-daemon"
+
+[[bin]]
+name = "waku-bench-daemon"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-codex"
+path = "src/bin/fake-codex.rs"
+
+[[bin]]
+name = "fake-claude"
+path = "src/bin/fake-claude.rs"
+
+[[bin]]
+name = "rpc-latency"
+path = "src/bin/rpc-latency.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+crossbeam-channel = "0.5"
+# Timelines are committed gzip-compressed; see README.md for the size budget.
+flate2 = "1"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+# The bench daemon is the real daemon server (`waku_core::serve`) and the real
+# persistence backend with only the provider runtime replaced, so the desktop
+# cannot tell the two apart on the wire.
+waku-core = { path = "../waku-core" }
+waku-protocol = { path = "../waku-protocol" }
+# `--autoplay` and `rpc-latency` talk to a daemon the way the desktop does.
+waku-client = { path = "../waku-client" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

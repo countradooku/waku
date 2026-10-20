@@ -8,6 +8,9 @@ readme = "README.md"
 
 [features]
 dev-binary = []
+# Install a `tracing-tracy` subscriber and turn on waku-core's spans. See
+# docs/performance.md.
+profiling = ["waku-core/profiling", "dep:tracing", "dep:tracing-subscriber", "dep:tracing-tracy"]
 
 [[bin]]
 name = "waku-daemon"
@@ -21,6 +24,18 @@ required-features = ["dev-binary"]
 [dependencies]
 anyhow = "1.0"
 serde_json = "1.0"
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "fmt",
+    "registry",
+] }
+tracing-tracy = { version = "0.12", optional = true, default-features = false, features = [
+    "enable",
+    "ondemand",
+    "broadcast",
+    "only-localhost",
+] }
 waku-core = { path = "../waku-core" }
 waku-protocol = { path = "../waku-protocol" }
 
@@ -32,3 +47,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
 ] }
+
+[lints]
+workspace = true

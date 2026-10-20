@@ -460,6 +460,16 @@ impl Waku {
         } else {
             theme.danger
         };
+        // The last second of `perf-counters`, beside the frame rate.
+        #[cfg(feature = "perf-counters")]
+        let perf_counters = crate::perf_counters::overlay_text().map(|text| {
+            div()
+                .text_color(theme.text_tertiary)
+                .font_family(crate::md::render::MONO_FAMILY)
+                .child(SharedString::from(text))
+        });
+        #[cfg(not(feature = "perf-counters"))]
+        let perf_counters: Option<Div> = None;
         div()
             .flex_none()
             .h(px(26.0))
@@ -476,6 +486,7 @@ impl Waku {
                     .font_family(crate::md::render::MONO_FAMILY)
                     .child(SharedString::from(format!("{fps} FPS"))),
             )
+            .children(perf_counters)
     }
 
     fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> Stateful<Div> {

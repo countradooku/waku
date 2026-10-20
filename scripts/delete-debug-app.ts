@@ -8,7 +8,7 @@ import { createInterface } from "node:readline/promises";
 const projectRoot = resolve(import.meta.dir, "..");
 const userHome = homedir();
 const library = join(userHome, "Library");
-const debugBundleIdentifiers = ["sh.waku.dev", "codes.waku.dev"];
+const debugBundleIdentifiers = ["io.github.countradooku.waku.dev"];
 
 type Target = {
   path: string;
@@ -81,8 +81,8 @@ if (process.env.CARGO_TARGET_DIR) {
 addCandidate(join(userHome, "Applications", "Waku Debug.app"));
 addCandidate("/Applications/Waku Debug.app");
 
-// Debug-only app data. The release app uses Waku/sh.waku and is not included.
-addCandidate(join(library, "Application Support", "Waku Debug"));
+// Debug-only app data. The release app uses "Waku Fork"/io.github.countradooku.waku and is not included.
+addCandidate(join(library, "Application Support", "Waku Fork Debug"));
 addCandidate(
   join(
     library,

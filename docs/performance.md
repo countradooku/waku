@@ -159,11 +159,13 @@ run. In order of usefulness:
    to a file from the root render (write on the background executor). One
    streaming run gives the full decomposition — it is how the 40-commits/sec
    reasoning bug and the stuck-stride bug were found after profiles showed
-   nothing but generic layout work. Wire it temporarily; do not ship it.
+   nothing but generic layout work. The `perf-counters` feature (below)
+   is this, built in and compiled out of default builds.
 2. **`sample <pid> 5` during a captured stream**, `awk '/Sort by top of
    stack/,0'` for leaves, ancestor-walk for the hot chain. Good for *what*
    is expensive (taffy vs shaping vs app code), useless for *how often*.
-   The production binary is stripped — profile the debug build.
+   The production binary is stripped — profile the debug build, or a
+   `--profile profiling` build (below) for release code with symbols.
 3. **CPU traces across a whole turn**: poll `ps -o %cpu= -p <pid>` every
    500 ms from trigger until settle. Averages over a turn hide phase
    plateaus; report both.
@@ -173,6 +175,170 @@ run. In order of usefulness:
 Debug-build numbers overweight taffy/style/scene generics by several fold;
 treat them as structure, not as what users feel, and confirm user-facing
 claims on a release build.
+
+### Perf counters (`perf-counters` feature)
+
+Measuring method 1 above, built in. The `perf-counters` feature on the root
+crate adds relaxed atomic counters on the UI thread, a counting wrapper
+around the system allocator, and a thread that closes a one-second bucket
+every second. Call sites use the `perf_count!`/`perf_scope!` macros
+([src/lib.rs](../src/lib.rs)), which expand to nothing without the feature,
+so a default build has no counters, no allocator wrapper and no thread.
+
+```sh
+WAKU_PERF_COUNTERS_OUT=/tmp/waku-perf.json \
+  cargo run --profile profiling --features perf-counters
+```
+
+- With `WAKU_PERF_COUNTERS_OUT` set, the JSON report is rewritten once per
+  second (temp file plus rename, so a reader never sees a partial file) with
+  `"final": false`, and once more at quit with `"final": true`. A scripted run
+  can read it while the app is still up, or quit the app and read the final
+  report.
+- The FPS counter (**View › Toggle FPS Counter**, `cmd-alt-shift-f`; `ctrl-alt-shift-f` off
+  macOS) shows the
+  last bucket next to the FPS reading: `8c/s · R t9 s0 p0 c9 · rows 14 ·
+  save 0.0ms` is stream commits, then transcript/sidebar/right-panel/composer
+  renders, transcript rows built and UI time in save, all for the last
+  second. The FPS counter pins the window at display rate, so turn it off
+  for runs whose numbers you keep.
+- The counters are process-local to the app; the daemon has none.
+
+Definitions:
+
+| Counter | Counted where |
+| --- | --- |
+| frame | Each `Waku::render`. The root re-renders on every window draw, so this is the frame count, and `renders.root` equals it. |
+| `renders.sidebar` / `transcript` / `right_panel` | The `WakuPane` delegates. A cached pane replaying its subtree is not a render. |
+| `renders.composer` | `ComposerInput::render`. |
+| stream commit | A pump drain (`drain_event_pump`) that applied at least one text or reasoning delta, however many sessions streamed in it. |
+| commit frame | The first frame after a stream commit: the commit's root notify, presented. |
+| transcript row built | Each `transcript_row` call (the `list()` row builder). |
+| save | Each `Waku::save`, timed on the UI thread. |
+| allocation | Each `alloc`, `alloc_zeroed` or `realloc` (counted at its full new size). |
+
+Report schema (`"schema": "waku.perf-counters/1"`). Counts are integers;
+`_ns` fields are nanoseconds, `_ms` milliseconds, `_bytes` bytes. Ratios are
+`null` when their denominator is zero. Fields are only ever added within a
+schema version (readers ignore what they do not know); a field that changes
+meaning bumps it. `startup` and `totals.session_visits` were added for the
+baseline harness (#9).
+
+| Field | Meaning |
+| --- | --- |
+| `schema`, `pid`, `final` | Layout version, app process id, and whether this is the report written at quit. |
+| `elapsed_ms` | Time since the counters started (early in `waku::run`). |
+| `startup.origin` | `"process"` when the times below run from the moment the OS created the process (macOS, from `proc_pidinfo`); `"init"` when the process start is unknown and they run from counter start. |
+| `startup.init_ms` | Process start to counter start: exec, dyld, static initializers and `main` up to `waku::run`. `null` with `origin: "init"`. |
+| `startup.first_frame_ms` | To the first root render, the first window frame being drawn (not yet presented). |
+| `startup.first_content_ms` | To the first transcript row built, i.e. the first frame drawing transcript content. `null` until a session with messages is on screen. |
+| `totals.frames` | Frames since start. |
+| `totals.renders.{root,sidebar,transcript,right_panel,composer}` | Renders since start. |
+| `totals.stream_commits` | Stream commits since start. |
+| `totals.commit_frames` | Commit frames since start. |
+| `totals.transcript_rows_built` | Rows built since start. |
+| `totals.transcript_rows_built_in_commit_frames` | Rows built while laying out commit frames. |
+| `totals.save_calls`, `totals.save_ui_ns`, `totals.save_max_ns` | `Waku::save` calls, total UI-thread time in them, and the longest single call. |
+| `totals.alloc_bytes`, `totals.alloc_count` | Bytes and allocations, all threads. |
+| `totals.ui_alloc_bytes` | Bytes allocated on the UI thread, as of the last frame. |
+| `totals.session_visits` | Sessions selected by the bench visitor (`WAKU_PERF_VISIT_SESSIONS_MS`, below). |
+| `totals.commit_alloc_bytes` | UI-thread bytes allocated inside the pump drains that were stream commits. |
+| `mean_per_s.{frames,stream_commits}`, `mean_per_s.renders.*` | Totals divided by `elapsed_ms / 1000`. |
+| `peak_per_s.{frames,stream_commits,transcript_rows_built,save_ui_ns,alloc_bytes}`, `peak_per_s.renders.*` | The highest value in any one complete one-second bucket. |
+| `per_commit.transcript_rows_built` | `transcript_rows_built_in_commit_frames / commit_frames`: rows rebuilt to present one commit. |
+| `per_commit.alloc_bytes` | `commit_alloc_bytes / stream_commits`: UI-thread bytes to apply one commit (not to render it). |
+| `per_commit.renders.*` | Total renders divided by `stream_commits`. This is meaningful only for a run that does nothing but stream, which is what the budget harness drives. |
+| `series[]` | One-second buckets, oldest first, at most 3600 (`series_dropped` counts the evicted ones). Each has `t_ms` (bucket end, since start), `dur_ms`, and the per-bucket deltas `frames`, `renders.*`, `stream_commits`, `transcript_rows_built`, `save_calls`, `save_ui_ns`, `alloc_bytes` and `commit_alloc_bytes`. |
+
+With `WAKU_PERF_VISIT_SESSIONS_MS=<ms>` set, a `perf-counters` build also
+selects every started session once, in catalog order, one per interval,
+through the same path as a sidebar click. The memory scenarios of
+`scripts/bench/baseline.sh` use it to visit N long sessions without UI input.
+Default builds have neither the variable nor the code.
+
+Budget checks map onto it directly. For example, "commits/s ≤ budget" is
+`peak_per_s.stream_commits`, "transcript renders per commit ≤ 1" is
+`per_commit.renders.transcript`, "sidebar and right panel do not render while
+streaming" is `totals.renders.sidebar` and `right_panel` over a streaming-only
+run, and "no UI time in save" is `totals.save_ui_ns`.
+
+### Tracing spans and Tracy (`profiling` feature)
+
+The app, `waku-core` and `waku-daemon` carry `tracing` spans on the paths a
+streaming frame or a save reaches:
+
+| Process | Spans |
+| --- | --- |
+| App | `drain_event_pump`, `Waku::render`, `sidebar_pane`, `transcript_pane`, `right_panel_pane`, `ComposerInput::render`, `transcript_row`, `MarkdownView::set_text`, `IncrementalParser::set_text`, `md::flatten`, `Waku::save` |
+| Daemon (`waku-core`) | `Hub::emit`, `dispatch`, `handle_request`, `save_task_state`, `StateStore::save` |
+
+Spans are written with the crate-local `profile_span!` macro. Without the
+`profiling` feature it expands to nothing, so default and release builds carry
+neither the spans nor `tracing` itself, and no subscriber is installed. With
+the feature, a `tracing-tracy` layer records every span (all levels):
+
+```sh
+# Daemon: the app spawns the `waku-daemon` binary next to its own executable
+# (target/profiling/) unless WAKU_DAEMON_PATH says otherwise, so build that
+# one with the feature first to see its spans.
+cargo build --profile profiling -p waku-daemon --features profiling
+# App (the GUI process)
+cargo run --profile profiling --features profiling
+```
+
+- The client is `tracy-client` 0.19, so connect with the **Tracy 0.14.1**
+  profiler. It runs `ondemand` (nothing is buffered until a profiler
+  attaches) and `only-localhost`. The daemon is a second Tracy client and
+  appears separately in the profiler's discovery list.
+- `WAKU_TRACE` (profiling builds only) adds a stderr layer that prints each
+  matching span's busy and idle time when it closes. The value is a target
+  filter such as `waku::app=debug,waku::md=trace` or
+  `waku_core::server=trace`; `1`, `true` or `all` select everything. The
+  daemon inherits the variable, and its stderr reaches the app's.
+- `[profile.profiling]` inherits `release` and keeps line tables and symbols
+  (`debug = "line-tables-only"`, `strip = false`), so `sample` output is
+  symbolized too.
+
+### Microbenchmarks and the CI gate
+
+Criterion benches cover the window-free hot paths. Their inputs are generated
+from fixed seeds (`benches/support/fixtures.rs`).
+
+- `benches/desktop.rs` (`waku`, through `waku::bench_support`):
+  - `IncrementalParser::append` over 20k streamed tokens;
+  - `flatten` of a 3,000-line paragraph;
+  - code runs and `highlight::tokenize` on a 3,000-line block;
+  - `review_diff::parse_collected` on a 10k-line patch;
+  - the terminal snapshot of a 200×60 grid.
+- `crates/waku-protocol/benches/wire.rs`: encode and decode of 10k sequenced
+  events.
+- `crates/waku-core/benches/persistence.rs`: the daemon's `StateStore::save`
+  for a 2k-message session, both the first write and the streaming re-save.
+
+`tests/md_stream_linear.rs` asserts that streaming is linear. It counts
+allocations, which is deterministic, so it does not depend on timing.
+
+```sh
+cargo bench --workspace --bench '*'              # everything
+cargo bench -p waku --bench desktop -- md/       # one group
+scripts/bench/compare.sh main .                  # A/B: main vs working tree
+BENCH_FILTER=terminal/ BENCH_ROUNDS=2 scripts/bench/compare.sh HEAD~1 HEAD
+```
+
+Use `--bench '*'` rather than `--benches`. The latter also runs the libtest
+harnesses, which reject Criterion's flags.
+
+The `Benchmarks` workflow (`.github/workflows/bench.yml`) runs
+`compare.sh <base sha> HEAD` on pull requests that touch `src/md`,
+`src/terminal.rs`, `src/review_diff.rs`, `crates/`, or the benches themselves.
+It builds both revisions on the same runner and runs them in alternating
+rounds (three by default). It then takes the median of each benchmark's
+per-round Criterion medians. A benchmark fails the job only when both hold:
+
+- its median is more than 10% slower;
+- the slowdown is larger than the spread between that runner's own rounds.
+
+The report is written to the job summary.
 
 ## Known floor and next levers
 

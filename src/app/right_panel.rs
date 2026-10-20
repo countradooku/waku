@@ -239,9 +239,11 @@ fn review_diff_tree_rows(
         .iter()
         .enumerate()
         .filter(|(_, file)| {
-            filtering
-                .then(|| file.path.to_ascii_lowercase().contains(&filter))
-                .unwrap_or(true)
+            if filtering {
+                file.path.to_ascii_lowercase().contains(&filter)
+            } else {
+                true
+            }
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
@@ -564,9 +566,7 @@ fn file_icon_for_name(name: &str) -> &'static str {
         Some("icons/file-types/webpack.svg")
     } else if name.starts_with("rollup.config.") {
         Some("icons/file-types/rollup.svg")
-    } else if name.starts_with("next.config.") {
-        Some("icons/file-types/next.svg")
-    } else if name == "next-env.d.ts" {
+    } else if name.starts_with("next.config.") || name == "next-env.d.ts" {
         Some("icons/file-types/next.svg")
     } else if name.starts_with("nuxt.config.") || name == ".nuxtrc" {
         Some("icons/file-types/nuxt.svg")

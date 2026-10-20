@@ -82,6 +82,8 @@ enum InlinePiece {
 
 /// A markdown block. Containers nest.
 #[derive(Clone, Debug, PartialEq)]
+// `CodeBlock` and `BlockQuote` are the CommonMark names for these blocks.
+#[allow(clippy::enum_variant_names)]
 pub enum Block {
     Paragraph {
         runs: Vec<InlineRun>,
@@ -761,6 +763,7 @@ impl IncrementalParser {
     /// Point the parser at `text`. Appends reparse incrementally; any other
     /// change falls back to a full reparse.
     pub fn set_text(&mut self, text: &str) {
+        profile_span!(TRACE, "IncrementalParser::set_text");
         if text == self.text {
             return;
         }
@@ -1295,9 +1298,8 @@ mod tests {
         let Block::Paragraph { runs } = &parser.tree().blocks[0].block else {
             panic!("expected a paragraph");
         };
-        assert_eq!(
+        assert!(
             runs.iter().find(|run| run.style.link.is_some()).is_some(),
-            true,
             "the definition should resolve the earlier reference"
         );
     }

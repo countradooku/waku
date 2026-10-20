@@ -15,6 +15,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The fork's release host and Sparkle public key. build.rs compiles both into
+  # every desktop build and scripts/bundle.sh writes them into the macOS
+  # Info.plist, so a build only ever updates from this host. They are public
+  # values, so they live in repository variables rather than secrets. See
+  # docs/fork/RELEASING.md.
+  WAKU_RELEASES_URL: ${{ vars.WAKU_RELEASES_URL }}
+  WAKU_SPARKLE_PUBLIC_ED_KEY: ${{ vars.WAKU_SPARKLE_PUBLIC_ED_KEY }}
 
 jobs:
   version:
@@ -27,6 +34,28 @@ jobs:
       published: ${{ steps.published.outputs.published }}
     steps:
       - uses: actions/checkout@v6
+
+      # Fail before 90 minutes of builds rather than ship artifacts that
+      # cannot update, or feeds nobody can verify.
+      - name: Check the release configuration
+        env:
+          HAS_SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
+        run: |
+          missing=""
+          [ -n "$WAKU_RELEASES_URL" ] || missing="$missing variable:WAKU_RELEASES_URL"
+          [ -n "$WAKU_SPARKLE_PUBLIC_ED_KEY" ] || missing="$missing variable:WAKU_SPARKLE_PUBLIC_ED_KEY"
+          [ "$HAS_SPARKLE_PRIVATE_KEY" = true ] || missing="$missing secret:SPARKLE_PRIVATE_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Release configuration is incomplete; set$missing (see docs/fork/RELEASING.md)"
+            exit 1
+          fi
+          case "$WAKU_RELEASES_URL" in
+            https://*) ;;
+            *)
+              echo "::error::WAKU_RELEASES_URL must be an https:// URL"
+              exit 1
+              ;;
+          esac
 
       - name: Resolve version from Cargo.toml
         id: resolve
@@ -357,6 +386,8 @@ jobs:
           WAKU_ANALYTICS_ENDPOINT: ${{ secrets.WAKU_ANALYTICS_ENDPOINT }}
           WAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKU_ANALYTICS_WEBSITE_ID }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          # GitHub Releases hosting serves each version's files under its tag.
+          WAKU_DOWNLOAD_URL_PREFIX: ${{ vars.WAKU_RELEASE_HOSTING == 'github' && format('https://github.com/{0}/releases/download/{1}/', github.repository, needs.version.outputs.tag) || '' }}
         run: bun run release --local
 
       - uses: actions/upload-artifact@v7
@@ -403,6 +434,12 @@ jobs:
           # "latest" to. In-app updates read the appcasts instead.
           echo "$VERSION" > artifacts/latest-linux.txt
           echo "$VERSION" > artifacts/latest-windows.txt
+          # The Linux installer, pointed at this repository's release host so
+          # `curl -fsSL "$WAKU_RELEASES_URL/install.sh" | sh` works as is.
+          releases="${WAKU_RELEASES_URL%/}"
+          sed "s|^DEFAULT_RELEASES_URL=\"\"$|DEFAULT_RELEASES_URL=\"$releases\"|" \
+            website/public/install.sh > artifacts/install.sh
+          grep -q "^DEFAULT_RELEASES_URL=\"$releases\"$" artifacts/install.sh
 
       # Signed here rather than on platform runners: this is the only job that
       # holds every native artifact, and the signing key stays in one place.
@@ -410,13 +447,15 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          WAKU_DOWNLOAD_URL_PREFIX: ${{ vars.WAKU_RELEASE_HOSTING == 'github' && format('https://github.com/{0}/releases/download/{1}/', github.repository, needs.version.outputs.tag) || '' }}
         run: |
           # Merge into the live feeds so previously published releases keep
           # their entries; a first run simply starts from nothing.
+          releases="${WAKU_RELEASES_URL%/}"
           for platform in linux windows; do
             for arch in x86_64 aarch64; do
               curl -fsSL --max-time 30 \
-                "https://releases.waku.sh/appcast-$platform-$arch.xml" \
+                "$releases/appcast-$platform-$arch.xml" \
                 -o "artifacts/appcast-$platform-$arch.xml" || true
             done
           done
@@ -461,3 +500,4 @@ jobs:
             artifacts/appcast-windows-*.xml
             artifacts/latest-linux.txt
             artifacts/latest-windows.txt
+            artifacts/install.sh

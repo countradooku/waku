@@ -1620,7 +1620,6 @@ fn codex_subagent_work(item: &Value) -> Vec<BackgroundWorkItem> {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn handle_codex_message(
     value: Value,
     thread_id: &Mutex<Option<String>>,

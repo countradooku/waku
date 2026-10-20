@@ -190,7 +190,7 @@ async function prepareHyprlandLaunch(): Promise<void> {
     if _G[subscription_key] == nil then
       local anchor_selector = ${luaString(anchorSelector)}
       _G[subscription_key] = hl.on("window.open", function(window)
-        if not _G[armed_key] or window.initial_class ~= "sh.waku.dev" then
+        if not _G[armed_key] or window.initial_class ~= "io.github.countradooku.waku.dev" then
           return
         end
         _G[armed_key] = false

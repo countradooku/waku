@@ -290,11 +290,8 @@ impl Backend for WakuBackend {
                     }
                     crate::model::ProviderKind::Grok => {
                         ensure_shell_environment();
-                        let probe = match binary_override.as_deref() {
-                            override_value => {
-                                crate::model::provider_probe(provider, override_value)
-                            }
-                        };
+                        let probe =
+                            crate::model::provider_probe(provider, binary_override.as_deref());
                         let binary = probe.path.ok_or_else(|| anyhow!("grok is not installed"))?;
                         Some(crate::usage::fetch_grok_plan_usage(&binary)?)
                     }
@@ -355,6 +352,7 @@ impl Backend for WakuBackend {
                 live_session_ids: _,
                 sessions,
             } => {
+                profile_span!(DEBUG, "save_task_state");
                 let active_runtimes = self
                     .sessions
                     .lock()
@@ -724,11 +722,13 @@ impl Backend for WakuBackend {
             }),
             Command::OpenTerminal { cwd, cols, rows } => {
                 let terminal = self.open_terminal(&cwd, cols, rows, events)?;
-                let previous = self
+                // Bound so a replaced terminal shuts down after the lock is
+                // released (an explicit `drop` trips clippy on Windows, where
+                // the terminal stub has no destructor).
+                let _previous = self
                     .terminals
                     .lock()
                     .insert(session_id, (runtime_id, terminal));
-                drop(previous);
                 Ok(ResponsePayload::Ack)
             }
             Command::WriteTerminal { data } => {
@@ -758,18 +758,18 @@ impl Backend for WakuBackend {
                 Ok(ResponsePayload::Ack)
             }
             Command::CloseTerminal => {
-                let removed = {
+                // Dropped at the end of the arm, outside the lock.
+                let _removed = {
                     let mut terminals = self.terminals.lock();
-                    if let Some((active_runtime_id, _)) = terminals.get(&session_id) {
-                        if *active_runtime_id != runtime_id {
-                            bail!(
-                                "daemon terminal {session_id} belongs to runtime {active_runtime_id}, not {runtime_id}"
-                            );
-                        }
+                    if let Some((active_runtime_id, _)) = terminals.get(&session_id)
+                        && *active_runtime_id != runtime_id
+                    {
+                        bail!(
+                            "daemon terminal {session_id} belongs to runtime {active_runtime_id}, not {runtime_id}"
+                        );
                     }
                     terminals.remove(&session_id)
                 };
-                drop(removed);
                 Ok(ResponsePayload::Ack)
             }
             Command::Start { options } => {
