@@ -60,9 +60,17 @@ fn retire_images(images: Vec<Arc<gpui::Image>>, cx: &mut App) {
     });
 }
 
+/// An attachment's menu. `can_reveal` is false while the daemon is remote:
+/// the file is on its host, so the item stays visible but disabled and says
+/// why (#61).
 pub(super) fn attachment_menu_items(path: PathBuf, can_reveal: bool) -> Vec<MenuItem> {
+    let label = if can_reveal {
+        tr!("common.reveal_in_finder")
+    } else {
+        tr!("common.reveal_unavailable_remote")
+    };
     vec![
-        MenuItem::new(tr!("common.reveal_in_finder"), move |_, cx| {
+        MenuItem::new(label, move |_, cx| {
             crate::platform::reveal_in_file_manager(&path, cx);
         })
         .icon("icons/folder.svg")

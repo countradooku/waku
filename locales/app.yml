@@ -1269,8 +1269,20 @@ terminal.starting:
 
 project.add_project:
   en: Add project
-errors.remote_project_picker:
-  en: Adding a daemon-host project needs a remote path picker, which is not available yet
+project.remote_picker_title:
+  en: Open a Folder on the Daemon Host
+project.remote_picker_open:
+  en: Open Folder
+project.remote_picker_up:
+  en: Up
+project.remote_picker_home:
+  en: Home
+project.remote_picker_loading:
+  en: Loading…
+project.remote_picker_empty:
+  en: No folders here
+project.remote_picker_hint:
+  en: Folders on the daemon host
 
 session.stopped:
   en: Stopped
@@ -1893,6 +1905,8 @@ common.dismiss_notification:
 
 common.reveal_in_finder:
   en: Show in File Manager
+common.reveal_unavailable_remote:
+  en: Show in File Manager (not available for a remote daemon)
 
 attachments.close_preview:
   en: Close image preview

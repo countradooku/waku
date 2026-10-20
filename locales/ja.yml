@@ -661,7 +661,13 @@ workspace.worktree: ワークツリー
 terminal.starting: ターミナルを起動中…
 
 project.add_project: プロジェクトを追加
-errors.remote_project_picker: デーモンホスト上のプロジェクトを追加するにはリモートパス選択が必要ですが、まだ利用できません
+project.remote_picker_title: デーモンホスト上のフォルダを開く
+project.remote_picker_open: フォルダを開く
+project.remote_picker_up: 上へ
+project.remote_picker_home: ホーム
+project.remote_picker_loading: 読み込み中…
+project.remote_picker_empty: フォルダがありません
+project.remote_picker_hint: デーモンホスト上のフォルダ
 
 session.stopped: 停止しました
 session.turn_completed: ターンが完了しました
@@ -971,6 +977,7 @@ find.toggle_replace: 置換欄の表示を切り替える
 
 common.dismiss_notification: 通知を閉じる
 common.reveal_in_finder: ファイルマネージャーで表示
+common.reveal_unavailable_remote: ファイルマネージャーで表示（リモートデーモンでは利用不可）
 
 attachments.close_preview: 画像プレビューを閉じる
 attachments.open_preview: "%{name} を開く"

@@ -628,7 +628,13 @@ workspace.workspace: 工作区
 workspace.worktree: 工作树
 terminal.starting: 正在启动终端…
 project.add_project: 添加项目
-errors.remote_project_picker: 添加守护进程主机上的项目需要远程路径选择器，但该功能尚不可用
+project.remote_picker_title: 在守护进程主机上打开文件夹
+project.remote_picker_open: 打开文件夹
+project.remote_picker_up: 上一级
+project.remote_picker_home: 主目录
+project.remote_picker_loading: 正在加载…
+project.remote_picker_empty: 这里没有文件夹
+project.remote_picker_hint: 守护进程主机上的文件夹
 session.stopped: 已停止
 session.turn_completed: 本轮已完成
 session.turn_waiting_background: 正在等待后台任务
@@ -925,6 +931,7 @@ find.replace_all: 全部替换（%{shortcut}）
 find.toggle_replace: 展开或收起替换栏
 common.dismiss_notification: 关闭通知
 common.reveal_in_finder: 在文件管理器中显示
+common.reveal_unavailable_remote: 在文件管理器中显示（远程守护进程不可用）
 attachments.close_preview: 关闭图片预览
 attachments.open_preview: 打开%{name}
 attachments.preview_unavailable: 无法显示图片

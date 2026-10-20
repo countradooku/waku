@@ -1012,6 +1012,9 @@ pub struct TerminalView {
     error: Option<String>,
     focus_handle: FocusHandle,
     working_directory: PathBuf,
+    /// The daemon runs on this machine, so its paths are this machine's and
+    /// file links can be revealed here.
+    local_paths: bool,
     title: String,
     exited: bool,
     scroll_accumulator: f32,
@@ -1056,6 +1059,7 @@ impl TerminalView {
         working_directory: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
+        let local_paths = !daemon.is_remote();
         let terminal_cwd = working_directory.clone();
         let (wakeup_tx, wakeups) = smol::channel::bounded(1);
         cx.spawn(async move |this, cx| {
@@ -1085,6 +1089,7 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             title: tr!("right_panel.terminal"),
             working_directory,
+            local_paths,
             exited: false,
             scroll_accumulator: 0.0,
             panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
@@ -1338,8 +1343,11 @@ impl TerminalView {
                 .session
                 .as_mut()
                 .and_then(|session| session.link_at(point))
-            && let Some(target) =
-                terminal_link_target(&link.value, self.working_directory.as_path())
+            && let Some(target) = terminal_link_target(
+                &link.value,
+                self.working_directory.as_path(),
+                self.local_paths,
+            )
         {
             self.selecting = false;
             self.hovered_link = Some(link);
@@ -2177,8 +2185,14 @@ fn hyperlink_at<T: EventListener>(term: &Term<T>, point: TerminalPoint) -> Optio
     Some((hyperlink.uri().to_owned(), start..=end))
 }
 
-fn terminal_link_target(value: &str, working_directory: &Path) -> Option<TerminalLinkTarget> {
-    if let Some(path) = existing_terminal_file_path(value, working_directory) {
+/// What a clicked link opens. File paths resolve only when `local_paths`: a
+/// remote daemon's paths name files on its host, not on this machine (#61).
+fn terminal_link_target(
+    value: &str,
+    working_directory: &Path,
+    local_paths: bool,
+) -> Option<TerminalLinkTarget> {
+    if local_paths && let Some(path) = existing_terminal_file_path(value, working_directory) {
         return Some(TerminalLinkTarget::File(path));
     }
 
@@ -2510,21 +2524,30 @@ mod tests {
     fn resolves_terminal_urls_and_existing_project_paths() {
         let working_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert_eq!(
-            terminal_link_target("https://example.com/docs", working_directory),
+            terminal_link_target("https://example.com/docs", working_directory, true),
             Some(TerminalLinkTarget::Url(
                 "https://example.com/docs".to_owned()
             ))
         );
         assert_eq!(
-            terminal_link_target("src/terminal.rs:42:8", working_directory),
+            terminal_link_target("src/terminal.rs:42:8", working_directory, true),
             Some(TerminalLinkTarget::File(
                 working_directory.join("src/terminal.rs")
             ))
         );
         assert_eq!(
-            terminal_link_target("src/does-not-exist.rs", working_directory),
+            terminal_link_target("src/does-not-exist.rs", working_directory, true),
             None
         );
+        // A remote daemon's paths are not this machine's: only URLs open.
+        assert_eq!(
+            terminal_link_target("src/terminal.rs:42:8", working_directory, false),
+            None
+        );
+        assert!(matches!(
+            terminal_link_target("https://example.com/docs", working_directory, false),
+            Some(TerminalLinkTarget::Url(_))
+        ));
     }
 
     #[test]
