@@ -33,6 +33,30 @@ re-renders every island, so caching can never show stale state — while a
 notify targeted at one pane (the pulse clock leases `window.current_view()`)
 rebuilds only that island and replays the rest.
 
+Producers that know what they changed notify islands directly instead of the
+root ([src/app/dirty.rs](../src/app/dirty.rs)). The event pump builds a
+`DirtySet { root, sidebar, transcript, right_panel }` per drain:
+
+- text and reasoning deltas of the selected session dirty the transcript;
+- tool activity and background work also dirty the right panel;
+- a background session's deltas dirty nothing;
+- the sidebar is dirty only when a drained session's sidebar fingerprint
+  (`sidebar_session_fingerprint`: status, title, recency, branch, last turn)
+  moved;
+- everything else (turn boundaries, permissions, errors, usage, session
+  added or removed, the other result queues) is `DirtySet::ALL`, a plain root
+  notify.
+
+`Waku::notify_dirty` notifies the named panes, or uses a plain root notify
+when all three are dirty. The root renders on every draw anyway, so root
+state rides along with any pane notify. When only the root is dirty, it
+notifies `RootFrame`, a zero-size child of the root: gpui marks it and its
+ancestors dirty, so the root repaints and every island replays. Pulse ticks
+and overlay-scrollbar wakes aimed at the root go to the same stand-in
+(`motion::redirect_notifications`), so a spinner in the header or composer
+no longer rebuilds all three islands at pulse rate. The time-label wake
+dirties the root, sidebar and transcript, not the right panel.
+
 The one exception to that fan-out is the 200 ms panel slide: its display-rate
 root notifies would price every tick at a three-island rebuild, so while
 `panels_sliding()` the observer skips the fan-out and the cached-view keys

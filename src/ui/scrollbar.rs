@@ -216,7 +216,7 @@ fn arm_fade_wake(state: &Rc<ScrollbarState>, view: gpui::EntityId, delay: Durati
             .timer(delay + Duration::from_millis(16))
             .await;
         state.fade_wake_armed.set(false);
-        cx.update(|cx| cx.notify(view));
+        cx.update(|cx| super::motion::notify_view(view, cx));
     })
     .detach();
 }
@@ -367,7 +367,7 @@ where
                     }
                     let hovering = track.contains(&event.position);
                     if state.hovered.replace(hovering) != hovering {
-                        cx.notify(view);
+                        super::motion::notify_view(view, cx);
                     }
                 }
             });
@@ -397,7 +397,7 @@ where
                             geometry.max_offset,
                         );
                     }
-                    cx.notify(view);
+                    super::motion::notify_view(view, cx);
                 }
             });
 
@@ -416,7 +416,7 @@ where
                         offset_for_thumb_top(track.top(), event.position.y - px(grab), &geometry),
                         geometry.max_offset,
                     );
-                    cx.notify(view);
+                    super::motion::notify_view(view, cx);
                 }
             });
 
@@ -427,7 +427,7 @@ where
                         return;
                     }
                     state.grab_offset.set(None);
-                    cx.notify(view);
+                    super::motion::notify_view(view, cx);
                 }
             });
         },

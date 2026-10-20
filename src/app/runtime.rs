@@ -3528,18 +3528,23 @@ impl Waku {
     pub(super) fn drain_event_pump(&mut self, cx: &mut Context<Self>) -> EventPumpSchedule {
         profile_span!(DEBUG, "drain_event_pump");
         perf_scope!(pump_scope);
+        // Provider events say what they dirtied, so a stream commit rebuilds
+        // the transcript island alone instead of fanning a root notify out to
+        // every pane (`DirtySet`). The other result queues are rare and keep
+        // the whole-window notify.
+        let mut dirty = self.drain_driver_events(cx);
         // `|` on purpose: a busy provider must not starve the other result
         // queues just because its own drain reported a change first.
-        if self.drain_driver_events(cx)
-            | self.drain_provider_probe_events()
+        if self.drain_provider_probe_events()
             | self.drain_provider_version_events()
             | self.drain_provider_detection_events()
             | self.drain_computer_permission_events()
             | self.drain_plan_usage_events()
             | self.drain_task_state_sync_events(cx)
         {
-            cx.notify();
+            dirty = DirtySet::ALL;
         }
+        self.notify_dirty(dirty, cx);
         if std::mem::take(&mut self.workspace_queries_stale) {
             self.invalidate_workspace_queries(cx);
         }
@@ -3596,12 +3601,15 @@ impl Waku {
         changed
     }
 
-    pub(super) fn drain_driver_events(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Apply every queued provider event and report which regions of the
+    /// window they dirtied.
+    pub(super) fn drain_driver_events(&mut self, cx: &mut Context<Self>) -> DirtySet {
         let session_ids = self.runtimes.keys().copied().collect::<Vec<_>>();
-        let mut changed = false;
+        let mut dirty = DirtySet::NONE;
         let mut persisted_state_changed = false;
         let mut force_save = false;
         let mut selected_changed = false;
+        let session_count = self.state.sessions.len();
         for session_id in session_ids {
             let Some(mut runtime) = self.runtimes.remove(&session_id) else {
                 continue;
@@ -3609,9 +3617,12 @@ impl Waku {
             let follow_up_remeasure = std::mem::take(&mut runtime.stream_remeasure_pending);
             Self::collect_runtime_events(&mut runtime);
             let mut runtime_changed = false;
-            let mut background_changed = false;
             let mut markdown_changed = false;
             let mut keep_runtime = true;
+            // Only sessions with events pay for the sidebar fingerprint.
+            let sidebar_before = (!runtime.pending_events.is_empty())
+                .then(|| session_sidebar_fingerprint(&self.state.sessions, session_id));
+            let mut impact = None;
             while let Some(event) = runtime.pending_events.front() {
                 let kind = stream_delta_kind(event);
                 let event = if let Some(kind) = kind {
@@ -3654,11 +3665,10 @@ impl Waku {
                     // The registry batches log text into SharedString at 10Hz;
                     // repainting and saving for every provider chunk would
                     // turn a noisy command into UI-thread work.
-                } else if background_event {
-                    background_changed = true;
-                } else {
+                } else if !background_event {
                     runtime_changed = true;
                 }
+                impact = widest_impact(impact, driver_event_impact(&event));
                 keep_runtime &= self.handle_driver_event(session_id, &mut runtime, event, true, cx);
                 if !keep_runtime {
                     break;
@@ -3668,12 +3678,17 @@ impl Waku {
             perf_count!(stream_drain(markdown_changed));
             if keep_runtime {
                 self.runtimes.insert(session_id, runtime);
+            } else {
+                // A detached runtime changes what its session shows.
+                impact = Some(DriverEventImpact::All);
             }
-            changed |= runtime_changed || background_changed;
+            let selected = self.state.selected_session == Some(session_id);
+            let sidebar_changed = sidebar_before.is_some_and(|before| {
+                before != session_sidebar_fingerprint(&self.state.sessions, session_id)
+            });
+            dirty = dirty.union(session_drain_dirty(impact, selected, sidebar_changed));
             persisted_state_changed |= runtime_changed;
-            if self.state.selected_session == Some(session_id)
-                && (runtime_changed || follow_up_remeasure)
-            {
+            if selected && (runtime_changed || follow_up_remeasure) {
                 selected_changed = true;
             }
         }
@@ -3687,7 +3702,12 @@ impl Waku {
                     self.drain_queued_message(session_id, cx);
                 }
             }
-            changed = true;
+            dirty = DirtySet::ALL;
+        }
+        if self.state.sessions.len() != session_count {
+            // A session appeared or went away: the sidebar list, selection
+            // and everything keyed by it moved.
+            dirty = DirtySet::ALL;
         }
 
         if persisted_state_changed {
@@ -3695,13 +3715,20 @@ impl Waku {
         }
         if selected_changed {
             self.remeasure_transcript_tail();
+            // The tail remeasure (and its follow-up drain) lands in the
+            // transcript island; the root draws the composer's turn state.
+            dirty = dirty.union(DirtySet {
+                root: true,
+                transcript: true,
+                ..DirtySet::NONE
+            });
         }
         if self.stream_state_dirty
             && (force_save || self.last_stream_save.elapsed() >= STREAM_SAVE_INTERVAL)
         {
             self.save();
         }
-        changed || selected_changed
+        dirty
     }
 }
 

@@ -275,6 +275,7 @@ impl Render for Waku {
                 .children(goal_dialog)
                 .children(image_preview)
                 .children(task_switcher)
+                .child(self.root_frame.clone())
                 .into_any_element();
             return self.render_window_frame(content, window, cx);
         }
@@ -423,6 +424,7 @@ impl Render for Waku {
             .children(goal_dialog)
             .children(image_preview)
             .children(task_switcher)
+            .child(self.root_frame.clone())
             .into_any_element();
 
         self.render_window_frame(content, window, cx)

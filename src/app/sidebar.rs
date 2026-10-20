@@ -249,6 +249,34 @@ fn sidebar_session_timestamp(session: &AgentSession) -> u64 {
     session.last_reply_at.unwrap_or(session.created_at)
 }
 
+/// Everything one sidebar row (and the row order) reads from its session, at
+/// the granularity the row draws it. The event pump compares this across a
+/// drain to decide whether streaming touched the sidebar at all: text and
+/// reasoning deltas move `updated_at` and the transcript but none of these.
+///
+/// Time-derived labels ("Working for 12s", "5m") are not in here; they move
+/// with the clock, not with events, and the time-label wake repaints them.
+pub(super) fn sidebar_session_fingerprint(session: &AgentSession) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    session.id.hash(&mut hasher);
+    session.project_id.hash(&mut hasher);
+    session.has_started().hash(&mut hasher);
+    (session.status as u8).hash(&mut hasher);
+    session.display_title().hash(&mut hasher);
+    sidebar_session_timestamp(session).hash(&mut hasher);
+    session.last_reply_at.hash(&mut hasher);
+    persisted_sidebar_branch_label(&session.workspace).hash(&mut hasher);
+    matches!(&session.workspace, SessionWorkspace::Local).hash(&mut hasher);
+    session
+        .turns
+        .last()
+        .map(|turn| (turn.status as u8, turn.started_at))
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
 fn sort_sidebar_sessions(sessions: &mut Vec<&AgentSession>, ordering: SidebarOrdering) {
     match ordering {
         SidebarOrdering::Newest => {

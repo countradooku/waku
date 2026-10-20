@@ -1610,6 +1610,8 @@ pub struct Waku {
     sidebar_pane: Entity<WakuPane>,
     transcript_pane: Entity<WakuPane>,
     right_panel_pane: Entity<WakuPane>,
+    /// Notified for a root-only frame; see [`RootFrame`].
+    root_frame: Entity<RootFrame>,
     /// The unix second the pending time-label wake-up targets, or `None` when
     /// none is armed. See `schedule_time_label_wake`.
     time_label_wake: Cell<Option<u64>>,
@@ -1629,6 +1631,7 @@ mod command_palette;
 mod commit_dialog;
 mod components;
 mod composer;
+mod dirty;
 mod drafts;
 mod file_search;
 mod goal_dialog;
@@ -1657,12 +1660,16 @@ use background_work::{
 pub use command_palette::init as init_command_palette;
 pub use commit_dialog::init as init_commit_dialog_keys;
 use components::*;
+use dirty::{
+    DirtySet, DriverEventImpact, RootFrame, driver_event_impact, session_drain_dirty,
+    session_sidebar_fingerprint, widest_impact,
+};
 pub use goal_dialog::init as init_goal_dialog_keys;
 pub use image_preview::init as init_image_preview_keys;
 use project_picker::ProjectPickerSite;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
-use sidebar::{SidebarGroup, SidebarRow};
+use sidebar::{SidebarGroup, SidebarRow, sidebar_session_fingerprint};
 pub use skills_page::init as init_skills_keys;
 use streaming::*;
 use transcript::*;
@@ -1884,7 +1891,18 @@ impl Waku {
                 }
                 // Consumed: the notified frame re-arms the next boundary.
                 this.time_label_wake.set(None);
-                cx.notify();
+                // Relative reply times live in the sidebar, "Working for Ns"
+                // in the sidebar and the transcript; the right panel shows
+                // neither and replays.
+                this.notify_dirty(
+                    DirtySet {
+                        root: true,
+                        sidebar: true,
+                        transcript: true,
+                        right_panel: false,
+                    },
+                    cx,
+                );
             });
         })
         .detach();
@@ -2059,6 +2077,7 @@ impl Waku {
         let sidebar_pane = WakuPane::new(Waku::sidebar_pane_content, cx);
         let transcript_pane = WakuPane::new(Waku::transcript_pane_content, cx);
         let right_panel_pane = WakuPane::new(Waku::right_panel_pane_content, cx);
+        let root_frame = cx.new(|_| RootFrame);
         let workspace_client = waku_client::WorkspaceClient::new(daemon.client());
         let (projectless_migrated, projectless_migration_error) =
             migrate_legacy_projectless_projects(&mut state, &workspace_client);
@@ -3059,6 +3078,7 @@ impl Waku {
                 sidebar_pane: sidebar_pane.clone(),
                 transcript_pane: transcript_pane.clone(),
                 right_panel_pane: right_panel_pane.clone(),
+                root_frame: root_frame.clone(),
                 time_label_wake: Cell::new(None),
                 time_label_wake_generation: Cell::new(0),
                 fps_last_frame: Instant::now(),
@@ -3070,6 +3090,10 @@ impl Waku {
         for pane in [&sidebar_pane, &transcript_pane, &right_panel_pane] {
             pane.update(cx, |pane, cx| pane.bind(&entity, cx));
         }
+        // A pulse loader or overlay scrollbar painted by the root view leases
+        // the root itself. Redirect those ticks to the root frame so they
+        // repaint the root without fanning out to every island.
+        crate::ui::motion::redirect_notifications(entity.entity_id(), root_frame.entity_id(), cx);
         let initial_row_count = entity.read(cx).transcript_row_count();
         entity.read(cx).reset_transcript_rows(initial_row_count);
         // Everything launch needs from `git` or the filesystem, started now

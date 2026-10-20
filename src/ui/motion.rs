@@ -58,6 +58,35 @@ impl Default for PulseClock {
     }
 }
 
+/// Views whose ticks are delivered to a stand-in instead. See
+/// [`redirect_notifications`].
+#[derive(Default)]
+struct NotifyRedirects(HashMap<EntityId, EntityId>);
+
+impl Global for NotifyRedirects {}
+
+/// Deliver every tick or wake meant for `from` to `to` instead.
+///
+/// The app's root view hands its pane islands every notify it receives, so a
+/// spinner the root paints (or a root-hosted scrollbar fading out) would
+/// rebuild every island at pulse rate. The root registers a zero-size child
+/// as its stand-in: notifying that child marks it and its ancestors — the
+/// root — dirty, which repaints the loader without the fan-out.
+pub fn redirect_notifications(from: EntityId, to: EntityId, cx: &mut App) {
+    cx.default_global::<NotifyRedirects>().0.insert(from, to);
+}
+
+/// Notify `view` for a repaint of what it painted, through its redirect if
+/// it registered one. Pulse ticks and the overlay scrollbar use this instead
+/// of a bare `cx.notify(view)`.
+pub fn notify_view(view: EntityId, cx: &mut App) {
+    let target = cx
+        .try_global::<NotifyRedirects>()
+        .and_then(|redirects| redirects.0.get(&view).copied())
+        .unwrap_or(view);
+    cx.notify(target);
+}
+
 /// Keep `view` re-rendering at ~30 fps until the lease lapses. A caller
 /// that stops leasing stops being notified, and the clock parks once no
 /// leases remain — quiescence needs no unsubscribe step.
@@ -115,7 +144,7 @@ fn pulse_lease_with_stride(view: EntityId, stride: u32, cx: &mut App) {
                     })
                     .collect::<Vec<_>>();
                 for view in due {
-                    cx.notify(view);
+                    notify_view(view, cx);
                 }
                 false
             });
