@@ -1,0 +1,21 @@
+[package]
+name = "waku-codegen"
+version = "0.1.0"
+edition = "2024"
+description = "Exports the waku-protocol v8 schema and generates clients from it (RFC 0003 §9)"
+license = "GPL-3.0-only"
+publish = false
+
+[[bin]]
+name = "waku-codegen"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1.0"
+# The `schema` feature adds the JsonSchema derives; only this crate enables
+# it, and it is not a default workspace member, so app and daemon builds
+# never compile schemars.
+waku-protocol = { path = "../waku-protocol", features = ["schema"] }
+
+[lints]
+workspace = true

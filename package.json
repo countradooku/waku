@@ -4,8 +4,8 @@
   "scripts": {
     "dev": "bun ./scripts/dev.ts",
     "release": "bun ./scripts/release.ts",
-    "protocol:generate": "cargo run -p waku-protocol --features ts --bin export_types",
-    "protocol:check": "cargo run -p waku-protocol --features ts --bin export_types -- --check",
+    "protocol:generate": "cargo run -p waku-protocol --features ts --bin export_types && cargo run -p waku-codegen",
+    "protocol:check": "cargo run -p waku-protocol --features ts --bin export_types -- --check && cargo run -p waku-codegen -- --check",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push"
   },

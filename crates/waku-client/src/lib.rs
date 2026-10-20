@@ -12,6 +12,9 @@ pub mod driver;
 pub mod persistence;
 mod process;
 pub mod terminal;
+/// Protocol v8 (RFC 0003); shadows the protocol crate's `v8` module and
+/// re-exports its types.
+pub mod v8;
 mod workspace_client;
 
 pub use client::{DaemonClient, local_endpoint_address};
@@ -19,6 +22,7 @@ pub use process::{
     DEFAULT_EXPOSED_DAEMON_PORT, DaemonExposureSettings, DaemonProcess, DaemonSupervisor,
     parse_allowed_origins,
 };
+pub use v8::V8Client;
 pub use waku_protocol::*;
 pub use workspace_client::WorkspaceClient;
 

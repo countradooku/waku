@@ -1,0 +1,1 @@
+{"type":"reply","id":3,"error":{"code":"notFound","message":"src/main.rs does not exist","retryable":false,"details":{"type":"notFound","resource":"file","id":"src/main.rs"}}}
