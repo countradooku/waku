@@ -120,6 +120,8 @@ static SAVE_MAX_NS: AtomicU64 = AtomicU64::new(0);
 static UI_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 static COMMIT_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 static SESSION_VISITS: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_GRID_UPDATES: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_ROWS_REBUILT: AtomicU64 = AtomicU64::new(0);
 
 /// Nanoseconds from [`init`] to the first frame and to the first transcript
 /// row, plus one so zero can mean "not yet".
@@ -191,6 +193,14 @@ pub fn transcript_row() {
     if COMMIT_FRAME.load(Relaxed) == COMMIT_FRAME_IN_FRAME {
         TRANSCRIPT_ROWS_BUILT_IN_COMMIT_FRAMES.fetch_add(1, Relaxed);
     }
+}
+
+/// The desktop terminal's grid was brought up to date for a frame
+/// (`TerminalGrid::update`), rebuilding `rows` of its rows. Damage-only
+/// rebuilds keep `rows` at the rows that actually changed.
+pub fn terminal_grid_update(rows: usize) {
+    TERMINAL_GRID_UPDATES.fetch_add(1, Relaxed);
+    TERMINAL_ROWS_REBUILT.fetch_add(rows as u64, Relaxed);
 }
 
 /// The startup thread finished: daemon connected, initial state loaded (or
@@ -326,6 +336,8 @@ pub struct Totals {
     pub ui_alloc_bytes: u64,
     pub commit_alloc_bytes: u64,
     pub session_visits: u64,
+    pub terminal_grid_updates: u64,
+    pub terminal_rows_rebuilt: u64,
 }
 
 impl Totals {
@@ -352,6 +364,8 @@ impl Totals {
             ui_alloc_bytes: UI_ALLOC_BYTES.load(Relaxed),
             commit_alloc_bytes: COMMIT_ALLOC_BYTES.load(Relaxed),
             session_visits: SESSION_VISITS.load(Relaxed),
+            terminal_grid_updates: TERMINAL_GRID_UPDATES.load(Relaxed),
+            terminal_rows_rebuilt: TERMINAL_ROWS_REBUILT.load(Relaxed),
         }
     }
 }
@@ -370,6 +384,8 @@ pub struct Bucket {
     pub save_ui_ns: u64,
     pub alloc_bytes: u64,
     pub commit_alloc_bytes: u64,
+    pub terminal_grid_updates: u64,
+    pub terminal_rows_rebuilt: u64,
 }
 
 impl Bucket {
@@ -389,6 +405,12 @@ impl Bucket {
             commit_alloc_bytes: later
                 .commit_alloc_bytes
                 .saturating_sub(earlier.commit_alloc_bytes),
+            terminal_grid_updates: later
+                .terminal_grid_updates
+                .saturating_sub(earlier.terminal_grid_updates),
+            terminal_rows_rebuilt: later
+                .terminal_rows_rebuilt
+                .saturating_sub(earlier.terminal_rows_rebuilt),
         }
     }
 }
@@ -402,6 +424,7 @@ pub struct Peaks {
     pub transcript_rows_built: u64,
     pub save_ui_ns: u64,
     pub alloc_bytes: u64,
+    pub terminal_rows_rebuilt: u64,
 }
 
 impl Peaks {
@@ -412,6 +435,7 @@ impl Peaks {
         self.transcript_rows_built = self.transcript_rows_built.max(bucket.transcript_rows_built);
         self.save_ui_ns = self.save_ui_ns.max(bucket.save_ui_ns);
         self.alloc_bytes = self.alloc_bytes.max(bucket.alloc_bytes);
+        self.terminal_rows_rebuilt = self.terminal_rows_rebuilt.max(bucket.terminal_rows_rebuilt);
     }
 }
 
@@ -789,6 +813,38 @@ mod tests {
         assert!(json["startup"]["daemon_ready_ms"].is_null());
         assert_eq!(json["totals"]["session_visits"], 0);
         assert_eq!(json["totals"]["renders"]["right_panel"], 0);
+        assert_eq!(json["totals"]["terminal_rows_rebuilt"], 0);
+        assert_eq!(json["totals"]["terminal_grid_updates"], 0);
+        assert_eq!(json["peak_per_s"]["terminal_rows_rebuilt"], 0);
+    }
+
+    #[test]
+    fn terminal_rows_rebuilt_reach_totals_and_the_series() {
+        // The terminal tests update grids in parallel threads of this
+        // process, so the global counters can only be bounded from below.
+        let before = Totals::load();
+        terminal_grid_update(24);
+        terminal_grid_update(1);
+        terminal_grid_update(0);
+        let after = Totals::load();
+        assert!(after.terminal_grid_updates - before.terminal_grid_updates >= 3);
+        assert!(after.terminal_rows_rebuilt - before.terminal_rows_rebuilt >= 25);
+
+        let mut series = Series::default();
+        series.close_bucket(
+            Totals {
+                terminal_grid_updates: 3,
+                terminal_rows_rebuilt: 25,
+                ..Totals::default()
+            },
+            1000,
+        );
+        let report = series.report(Totals::default(), 1000, false, Startup::load(None));
+        assert_eq!(report.series[0].terminal_grid_updates, 3);
+        assert_eq!(report.series[0].terminal_rows_rebuilt, 25);
+        assert_eq!(report.peak_per_s.terminal_rows_rebuilt, 25);
+        let json = serde_json::to_value(report.series[0]).unwrap();
+        assert_eq!(json["terminal_rows_rebuilt"], 25);
     }
 
     #[test]

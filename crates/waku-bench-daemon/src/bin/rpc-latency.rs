@@ -14,12 +14,17 @@
 //! ```text
 //! rpc-latency [--address ADDR] [--token TOKEN] [--count N] [--warmup N]
 //!             [--files N] [--project DIR] [--label TEXT] [--out FILE]
-//!             [--hold SECONDS]
+//!             [--hold SECONDS] [--terminal] [--supervise DAEMON]
 //! ```
 //!
 //! `--hold` keeps the connection open and idle after the timed requests, so
 //! an outside sampler (`scripts/bench/harness.py measure --pid`) can count
 //! the idle wakeups of a connected daemon and client pair without a GUI.
+//! `--terminal` keeps a daemon terminal open (its shell at the prompt) for
+//! the hold. `--supervise DAEMON` launches that `waku-daemon` binary through
+//! the desktop's `DaemonSupervisor`, as a release app does, instead of
+//! connecting to `--address`, so the hold also covers the supervisor (#178).
+//! Give it a private `HOME` and `WAKU_DAEMON_SOCKET`.
 //!
 //! The address and token default to `$WAKU_DAEMON_ADDRESS` and
 //! `$WAKU_DAEMON_TOKEN`. Point it only at a disposable daemon: it adds a
@@ -32,14 +37,16 @@ use anyhow::{Context as _, anyhow, bail};
 use serde_json::{Value, json};
 use uuid::Uuid;
 use waku_bench_daemon::fixture;
-use waku_client::{Command, DaemonClient, ResponsePayload, WorkspaceOperation, WorkspaceResult};
+use waku_client::{
+    Command, DaemonClient, DaemonSupervisor, ResponsePayload, WorkspaceOperation, WorkspaceResult,
+};
 use waku_core::model::ProviderKind;
 use waku_protocol::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV};
 
 const USAGE: &str = "\
 usage: rpc-latency [--address ADDR] [--token TOKEN] [--count N] [--warmup N]
                    [--files N] [--project DIR] [--label TEXT] [--out FILE]
-                   [--hold SECONDS]
+                   [--hold SECONDS] [--terminal] [--supervise DAEMON]
 
   --address ADDR   daemon address (default: $WAKU_DAEMON_ADDRESS)
   --token TOKEN    daemon token (default: $WAKU_DAEMON_TOKEN)
@@ -50,6 +57,10 @@ usage: rpc-latency [--address ADDR] [--token TOKEN] [--count N] [--warmup N]
   --label TEXT     recorded in the JSON (e.g. waku-daemon)
   --out FILE       also write the JSON report here
   --hold SECONDS   stay connected and idle this long before disconnecting
+  --terminal       keep a daemon terminal open during the hold
+  --supervise BIN  launch this waku-daemon through DaemonSupervisor instead
+                   of connecting to --address (set HOME and WAKU_DAEMON_SOCKET
+                   to private paths)
 
 Seeds a project and a session through saveTaskState: use a disposable daemon.";
 
@@ -66,6 +77,8 @@ struct Options {
     label: Option<String>,
     out: Option<PathBuf>,
     hold: Option<Duration>,
+    terminal: bool,
+    supervise: Option<PathBuf>,
 }
 
 fn parse() -> anyhow::Result<Options> {
@@ -79,6 +92,8 @@ fn parse() -> anyhow::Result<Options> {
         label: None,
         out: None,
         hold: None,
+        terminal: false,
+        supervise: None,
     };
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -99,6 +114,8 @@ fn parse() -> anyhow::Result<Options> {
             "--hold" => {
                 options.hold = Some(Duration::from_secs_f64(value()?.parse().context("--hold")?));
             }
+            "--terminal" => options.terminal = true,
+            "--supervise" => options.supervise = Some(PathBuf::from(value()?)),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -106,13 +123,49 @@ fn parse() -> anyhow::Result<Options> {
             other => bail!("unknown argument {other:?}\n\n{USAGE}"),
         }
     }
-    if options.address.trim().is_empty() || options.token.is_empty() {
+    if options.supervise.is_none()
+        && (options.address.trim().is_empty() || options.token.is_empty())
+    {
         bail!("a daemon address and token are required\n\n{USAGE}");
     }
     if options.count == 0 {
         bail!("--count must be at least 1");
     }
     Ok(options)
+}
+
+/// Open a daemon terminal in `cwd` and wait until its shell has settled at
+/// the prompt: no output for half a second. Its output events are drained on
+/// a thread for the rest of the run.
+fn open_terminal(client: &DaemonClient, cwd: &Path) -> anyhow::Result<Uuid> {
+    let terminal_id = Uuid::new_v4();
+    let events = client.subscribe(terminal_id, terminal_id);
+    let opened = client.request(
+        terminal_id,
+        terminal_id,
+        Command::OpenTerminal {
+            cwd: cwd.to_owned(),
+            cols: 80,
+            rows: 24,
+        },
+    )?;
+    if !matches!(opened, ResponsePayload::Ack) {
+        bail!("openTerminal returned {opened:?}");
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut output = 0;
+    while Instant::now() < deadline {
+        match events.recv_timeout(Duration::from_millis(500)) {
+            Ok(_) => output += 1,
+            Err(_) if output > 0 => break,
+            Err(_) => {}
+        }
+    }
+    if output == 0 {
+        bail!("the daemon terminal produced no output");
+    }
+    std::thread::spawn(move || while events.recv().is_ok() {});
+    Ok(terminal_id)
 }
 
 /// A small source tree: `files` files spread over nested directories.
@@ -188,7 +241,16 @@ fn main() -> anyhow::Result<()> {
     });
     create_project(&project_dir, options.files)?;
 
-    let client = DaemonClient::connect(options.address.trim(), options.token.clone())?;
+    // Dropped at the end of `main`, which stops a supervised daemon.
+    let supervisor = options
+        .supervise
+        .as_deref()
+        .map(|daemon| DaemonSupervisor::spawn(daemon, false))
+        .transpose()?;
+    let client = match &supervisor {
+        Some(supervisor) => supervisor.client(),
+        None => DaemonClient::connect(options.address.trim(), options.token.clone())?,
+    };
 
     // One project with one settled two-message session, saved the way the
     // desktop saves.
@@ -295,14 +357,28 @@ fn main() -> anyhow::Result<()> {
         ),
     )?;
     if let Some(hold) = options.hold {
+        let terminal = options
+            .terminal
+            .then(|| open_terminal(&client, &project_dir))
+            .transpose()?;
         eprintln!(
-            "rpc-latency: holding the idle connection for {:.0}s (pid {})",
+            "rpc-latency: holding the idle connection{} for {:.0}s (pid {})",
+            if terminal.is_some() {
+                " with a terminal open"
+            } else {
+                ""
+            },
             hold.as_secs_f64(),
             std::process::id()
         );
         std::thread::sleep(hold);
+        if let Some(terminal_id) = terminal {
+            client.request(terminal_id, terminal_id, Command::CloseTerminal)?;
+        }
     }
-    client.disconnect();
+    if supervisor.is_none() {
+        client.disconnect();
+    }
 
     let report = json!({
         "schema": "waku.rpc-latency/1",

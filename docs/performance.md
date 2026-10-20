@@ -254,13 +254,16 @@ Definitions:
 | transcript row built | Each `transcript_row` call (the `list()` row builder). |
 | save | Each `Waku::save`, timed on the UI thread. |
 | allocation | Each `alloc`, `alloc_zeroed` or `realloc` (counted at its full new size). |
+| terminal grid update | Each `TerminalGrid::update` ([src/terminal.rs](../src/terminal.rs)): the desktop terminal bringing its row cache up to date for a frame. |
+| terminal row rebuilt | Each row that update rebuilt (its `rebuilt_rows`). Rows are rebuilt only when Alacritty reports them damaged, or when the style, scroll offset, selection, hovered link or cursor touches them. |
 
 Report schema (`"schema": "waku.perf-counters/1"`). Counts are integers;
 `_ns` fields are nanoseconds, `_ms` milliseconds, `_bytes` bytes. Ratios are
 `null` when their denominator is zero. Fields are only ever added within a
 schema version (readers ignore what they do not know); a field that changes
 meaning bumps it. `startup` and `totals.session_visits` were added for the
-baseline harness (#9), `startup.daemon_ready_ms` for the parallel launch (#29).
+baseline harness (#9), `startup.daemon_ready_ms` for the parallel launch (#29),
+the `terminal_*` fields for damage-only terminal budgets (#178).
 
 | Field | Meaning |
 | --- | --- |
@@ -281,13 +284,14 @@ baseline harness (#9), `startup.daemon_ready_ms` for the parallel launch (#29).
 | `totals.alloc_bytes`, `totals.alloc_count` | Bytes and allocations, all threads. |
 | `totals.ui_alloc_bytes` | Bytes allocated on the UI thread, as of the last frame. |
 | `totals.session_visits` | Sessions selected by the bench visitor (`WAKU_PERF_VISIT_SESSIONS_MS`, below). |
+| `totals.terminal_grid_updates`, `totals.terminal_rows_rebuilt` | Terminal grid updates, and the rows they rebuilt, since start. `terminal_rows_rebuilt / terminal_grid_updates` is rows per terminal frame: a damage-only rebuild keeps it near the rows that changed (one for a typed character), not the grid height. |
 | `totals.commit_alloc_bytes` | UI-thread bytes allocated inside the pump drains that were stream commits. |
 | `mean_per_s.{frames,stream_commits}`, `mean_per_s.renders.*` | Totals divided by `elapsed_ms / 1000`. |
-| `peak_per_s.{frames,stream_commits,transcript_rows_built,save_ui_ns,alloc_bytes}`, `peak_per_s.renders.*` | The highest value in any one complete one-second bucket. |
+| `peak_per_s.{frames,stream_commits,transcript_rows_built,save_ui_ns,alloc_bytes,terminal_rows_rebuilt}`, `peak_per_s.renders.*` | The highest value in any one complete one-second bucket. |
 | `per_commit.transcript_rows_built` | `transcript_rows_built_in_commit_frames / commit_frames`: rows rebuilt to present one commit. |
 | `per_commit.alloc_bytes` | `commit_alloc_bytes / stream_commits`: UI-thread bytes to apply one commit (not to render it). |
 | `per_commit.renders.*` | Total renders divided by `stream_commits`. This is meaningful only for a run that does nothing but stream, which is what the budget harness drives. |
-| `series[]` | One-second buckets, oldest first, at most 3600 (`series_dropped` counts the evicted ones). Each has `t_ms` (bucket end, since start), `dur_ms`, and the per-bucket deltas `frames`, `renders.*`, `stream_commits`, `transcript_rows_built`, `save_calls`, `save_ui_ns`, `alloc_bytes` and `commit_alloc_bytes`. |
+| `series[]` | One-second buckets, oldest first, at most 3600 (`series_dropped` counts the evicted ones). Each has `t_ms` (bucket end, since start), `dur_ms`, and the per-bucket deltas `frames`, `renders.*`, `stream_commits`, `transcript_rows_built`, `save_calls`, `save_ui_ns`, `alloc_bytes`, `commit_alloc_bytes`, `terminal_grid_updates` and `terminal_rows_rebuilt`. |
 
 With `WAKU_PERF_VISIT_SESSIONS_MS=<ms>` set, a `perf-counters` build also
 selects every started session once, in catalog order, one per interval,
@@ -299,7 +303,36 @@ Budget checks map onto it directly. For example, "commits/s ≤ budget" is
 `peak_per_s.stream_commits`, "transcript renders per commit ≤ 1" is
 `per_commit.renders.transcript`, "sidebar and right panel do not render while
 streaming" is `totals.renders.sidebar` and `right_panel` over a streaming-only
-run, and "no UI time in save" is `totals.save_ui_ns`.
+run, "no UI time in save" is `totals.save_ui_ns`, and "terminal output
+rebuilds only damaged rows" is `totals.terminal_rows_rebuilt` over
+`totals.terminal_grid_updates` for a run that types into an open terminal.
+
+### Idle wakeups
+
+An idle app with its daemon must stay below 5 wakeups/s in total
+(`harness.py measure --pid <app>,<daemon>`), so nothing on either side may
+poll while nothing happens:
+
+- The daemon connection (`crates/waku-client/src/client.rs`) and the
+  daemon's sockets are evented (#18); an idle connection costs one
+  keepalive ping every few seconds.
+- The desktop's daemon supervisor (`monitor_daemon`,
+  `crates/waku-client/src/process.rs`) sleeps on a channel (#178). It is
+  woken by the managed child's exit (a thread blocked in
+  `waitid(WNOWAIT)`, which leaves reaping to the owner of the `Child`), by
+  the connection closing (`DaemonClient::on_disconnect`, which also drives
+  the remote reconnect-with-resume), and by a failed `reconfigure`. Timers
+  run only while the daemon is unreachable (restart and reconnect retry
+  with a 100 ms to 2 s backoff) and in debug builds of the app, which pass
+  `watch_for_rebuilds` and keep the 500 ms poll of the daemon binary that
+  hot-swaps a rebuilt daemon. Windows has no exit thread: the daemon's exit
+  closes its pipe, and the supervisor re-checks with the retry backoff until
+  the process is gone.
+- A daemon terminal's output thread (`crates/waku-core/src/terminal.rs`)
+  blocks on the PTY's readiness (`polling`: kqueue on macOS, epoll on Linux)
+  instead of sleeping 4 ms between non-blocking reads (#178). Each wake reads
+  everything already buffered, up to 64 KiB, into one ephemeral
+  `TerminalOutput` event; closing the terminal wakes it through the poller.
 
 ### Tracing spans and Tracy (`profiling` feature)
 
