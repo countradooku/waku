@@ -570,6 +570,40 @@ impl Orchestrator {
         self.store.reader()
     }
 
+    /// Threads matching a search across projects (#65), on a read
+    /// connection.
+    pub fn search_threads(
+        &self,
+        query: &crate::search::SearchThreadsQuery,
+    ) -> StoreResult<Vec<crate::search::ThreadSearchMatch>> {
+        self.store
+            .reader()
+            .with(|connection| crate::search::search_threads(connection, query))
+    }
+
+    /// Every match inside one thread, loaded or not (#65).
+    pub fn find_in_thread(
+        &self,
+        query: &crate::search::ThreadFindQuery,
+    ) -> StoreResult<crate::search::ThreadFindResult> {
+        self.store
+            .reader()
+            .with(|connection| crate::search::find_in_thread(connection, query))
+    }
+
+    /// The turn items around a position, for jumping to a find match.
+    pub fn items_around(
+        &self,
+        thread_id: ThreadId,
+        position: u64,
+        before: usize,
+        after: usize,
+    ) -> StoreResult<Vec<TurnItem>> {
+        self.store.reader().with(|connection| {
+            crate::search::items_around(connection, thread_id, position, before, after)
+        })
+    }
+
     pub fn store(&self) -> &Arc<Store> {
         &self.store
     }

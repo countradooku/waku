@@ -20,6 +20,7 @@ pub mod feed;
 pub mod ids;
 pub mod orchestrator;
 pub mod projection;
+pub mod search;
 pub mod store;
 
 pub use clock::{Clock, ManualClock, SystemClock};

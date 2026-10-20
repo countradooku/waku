@@ -26,7 +26,8 @@ pub use embedded::MIGRATIONS;
 
 /// Bumped in code when `apply_sql` changes meaning; a lower stored version
 /// rebuilds the projection from the log at startup.
-pub const GRAPH_SCHEMA_VERSION: i64 = 1;
+/// 2: search documents (#65).
+pub const GRAPH_SCHEMA_VERSION: i64 = 2;
 pub const GRAPH_PROJECTION: &str = "graph";
 
 /// Every storage failure of the orchestrator.

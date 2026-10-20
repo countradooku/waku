@@ -11,4 +11,5 @@ mod forward_compat;
 mod idempotency;
 mod migrations;
 mod rebuild;
+mod search;
 mod serialization;
