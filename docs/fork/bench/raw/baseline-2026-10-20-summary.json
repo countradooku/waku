@@ -1,0 +1,1362 @@
+{
+  "schema": "waku.bench-baseline/1",
+  "machine": {
+    "model": "Mac17,8",
+    "cpu": "Apple M5 Pro",
+    "cores": "18",
+    "memory_gb": 48,
+    "macos": "27.0.1 (26A434)",
+    "display_max_fps": 120,
+    "power_source": "Now drawing from 'AC Power'",
+    "commit": "37942d14027471ba3da83066a7d817ef236aa70d",
+    "dirty": true,
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)",
+    "app_binary": "/Users/radudiaconu/Desktop/Code/waku/target/release/waku",
+    "python": "3.14.8"
+  },
+  "scenarios": {
+    "burst": {
+      "runs": 3,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "replay.elapsed_s": 10.07,
+        "app.cpu_pct": 18.53,
+        "daemon.cpu_pct": 1.44,
+        "app.cpu_s": 1.86,
+        "daemon.cpu_s": 0.14,
+        "app.intr_wakeups_per_s": 217.4,
+        "daemon.intr_wakeups_per_s": 2076.8,
+        "counters.frames_per_s": 31.37,
+        "counters.commits_per_s": 7.36,
+        "counters.peak_commits_per_s": 9,
+        "counters.transcript_renders_per_commit": 4.25,
+        "counters.rows_per_commit_frame": 2.19,
+        "counters.ui_alloc_kb_per_commit": 23.9,
+        "counters.renders.sidebar": 340,
+        "counters.renders.right_panel": 0,
+        "counters.save_ui_ms": 102.66,
+        "app.rss_peak_mb": 156.7,
+        "app.footprint_peak_mb": 329.4,
+        "app.footprint_final_mb": 236.9,
+        "daemon.footprint_final_mb": 79.0,
+        "replay.max_lag_ms": 3.4
+      },
+      "range": {
+        "replay.elapsed_s": [
+          10.07,
+          10.07
+        ],
+        "app.cpu_pct": [
+          13.63,
+          20.03
+        ],
+        "daemon.cpu_pct": [
+          1.35,
+          1.84
+        ],
+        "app.cpu_s": [
+          1.37,
+          2.02
+        ],
+        "daemon.cpu_s": [
+          0.14,
+          0.19
+        ],
+        "app.intr_wakeups_per_s": [
+          173.7,
+          221.4
+        ],
+        "daemon.intr_wakeups_per_s": [
+          2073.5,
+          2077.0
+        ],
+        "counters.frames_per_s": [
+          21.58,
+          34.99
+        ],
+        "counters.commits_per_s": [
+          6.83,
+          7.36
+        ],
+        "counters.peak_commits_per_s": [
+          9,
+          9
+        ],
+        "counters.transcript_renders_per_commit": [
+          3.15,
+          4.67
+        ],
+        "counters.rows_per_commit_frame": [
+          2.18,
+          2.24
+        ],
+        "counters.ui_alloc_kb_per_commit": [
+          23.8,
+          24.8
+        ],
+        "counters.renders.sidebar": [
+          253,
+          347
+        ],
+        "counters.renders.right_panel": [
+          0,
+          0
+        ],
+        "counters.save_ui_ms": [
+          84.77,
+          110.46
+        ],
+        "app.rss_peak_mb": [
+          148.6,
+          157.9
+        ],
+        "app.footprint_peak_mb": [
+          323.0,
+          330.7
+        ],
+        "app.footprint_final_mb": [
+          230.4,
+          330.7
+        ],
+        "daemon.footprint_final_mb": [
+          78.5,
+          79.9
+        ],
+        "replay.max_lag_ms": [
+          1.0,
+          4.5
+        ]
+      },
+      "per_run": [
+        {
+          "replay.elapsed_s": 10.07,
+          "app.cpu_pct": 20.03,
+          "daemon.cpu_pct": 1.35,
+          "app.cpu_s": 2.021,
+          "daemon.cpu_s": 0.136,
+          "app.intr_wakeups_per_s": 221.4,
+          "daemon.intr_wakeups_per_s": 2076.8,
+          "counters.frames_per_s": 34.99,
+          "counters.commits_per_s": 7.36,
+          "counters.peak_commits_per_s": 9,
+          "counters.transcript_renders_per_commit": 4.667,
+          "counters.rows_per_commit_frame": 2.19,
+          "counters.ui_alloc_kb_per_commit": 23.8,
+          "counters.renders.sidebar": 347,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 84.77,
+          "app.rss_peak_mb": 157.9,
+          "app.footprint_peak_mb": 330.7,
+          "app.footprint_final_mb": 330.7,
+          "daemon.footprint_final_mb": 79.9,
+          "replay.max_lag_ms": 3.4
+        },
+        {
+          "replay.elapsed_s": 10.07,
+          "app.cpu_pct": 13.63,
+          "daemon.cpu_pct": 1.84,
+          "app.cpu_s": 1.374,
+          "daemon.cpu_s": 0.186,
+          "app.intr_wakeups_per_s": 173.7,
+          "daemon.intr_wakeups_per_s": 2073.5,
+          "counters.frames_per_s": 21.58,
+          "counters.commits_per_s": 6.83,
+          "counters.peak_commits_per_s": 9,
+          "counters.transcript_renders_per_commit": 3.146,
+          "counters.rows_per_commit_frame": 2.24,
+          "counters.ui_alloc_kb_per_commit": 24.8,
+          "counters.renders.sidebar": 253,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 110.46,
+          "app.rss_peak_mb": 148.6,
+          "app.footprint_peak_mb": 323.0,
+          "app.footprint_final_mb": 230.4,
+          "daemon.footprint_final_mb": 78.5,
+          "replay.max_lag_ms": 1.0
+        },
+        {
+          "replay.elapsed_s": 10.07,
+          "app.cpu_pct": 18.53,
+          "daemon.cpu_pct": 1.44,
+          "app.cpu_s": 1.865,
+          "daemon.cpu_s": 0.145,
+          "app.intr_wakeups_per_s": 217.4,
+          "daemon.intr_wakeups_per_s": 2077.0,
+          "counters.frames_per_s": 31.37,
+          "counters.commits_per_s": 7.36,
+          "counters.peak_commits_per_s": 9,
+          "counters.transcript_renders_per_commit": 4.247,
+          "counters.rows_per_commit_frame": 2.18,
+          "counters.ui_alloc_kb_per_commit": 23.9,
+          "counters.renders.sidebar": 340,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 102.66,
+          "app.rss_peak_mb": 156.7,
+          "app.footprint_peak_mb": 329.4,
+          "app.footprint_final_mb": 236.9,
+          "daemon.footprint_final_mb": 79.0,
+          "replay.max_lag_ms": 4.5
+        }
+      ]
+    },
+    "code-wall": {
+      "runs": 2,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "replay.elapsed_s": 25.72,
+        "app.cpu_pct": 13.48,
+        "daemon.cpu_pct": 1.61,
+        "app.cpu_s": 3.46,
+        "daemon.cpu_s": 0.41,
+        "app.intr_wakeups_per_s": 180.05,
+        "daemon.intr_wakeups_per_s": 1062.2,
+        "counters.frames_per_s": 28.19,
+        "counters.commits_per_s": 7.96,
+        "counters.peak_commits_per_s": 9.0,
+        "counters.transcript_renders_per_commit": 3.44,
+        "counters.rows_per_commit_frame": 2.15,
+        "counters.ui_alloc_kb_per_commit": 16.0,
+        "counters.renders.sidebar": 674.5,
+        "counters.renders.right_panel": 0.0,
+        "counters.save_ui_ms": 246.29,
+        "app.rss_peak_mb": 167.75,
+        "app.footprint_peak_mb": 330.35,
+        "app.footprint_final_mb": 266.75,
+        "daemon.footprint_final_mb": 52.05,
+        "replay.max_lag_ms": 0.25
+      },
+      "range": {
+        "replay.elapsed_s": [
+          25.72,
+          25.72
+        ],
+        "app.cpu_pct": [
+          9.99,
+          16.96
+        ],
+        "daemon.cpu_pct": [
+          1.61,
+          1.61
+        ],
+        "app.cpu_s": [
+          2.56,
+          4.36
+        ],
+        "daemon.cpu_s": [
+          0.41,
+          0.41
+        ],
+        "app.intr_wakeups_per_s": [
+          144.4,
+          215.7
+        ],
+        "daemon.intr_wakeups_per_s": [
+          1061.1,
+          1063.3
+        ],
+        "counters.frames_per_s": [
+          20.8,
+          35.58
+        ],
+        "counters.commits_per_s": [
+          7.92,
+          8.0
+        ],
+        "counters.peak_commits_per_s": [
+          9,
+          9
+        ],
+        "counters.transcript_renders_per_commit": [
+          2.56,
+          4.33
+        ],
+        "counters.rows_per_commit_frame": [
+          2.11,
+          2.19
+        ],
+        "counters.ui_alloc_kb_per_commit": [
+          15.7,
+          16.3
+        ],
+        "counters.renders.sidebar": [
+          491,
+          858
+        ],
+        "counters.renders.right_panel": [
+          0,
+          0
+        ],
+        "counters.save_ui_ms": [
+          237.94,
+          254.64
+        ],
+        "app.rss_peak_mb": [
+          150.2,
+          185.3
+        ],
+        "app.footprint_peak_mb": [
+          325.7,
+          335.0
+        ],
+        "app.footprint_final_mb": [
+          198.5,
+          335.0
+        ],
+        "daemon.footprint_final_mb": [
+          52.0,
+          52.1
+        ],
+        "replay.max_lag_ms": [
+          0.0,
+          0.5
+        ]
+      },
+      "per_run": [
+        {
+          "replay.elapsed_s": 25.72,
+          "app.cpu_pct": 9.99,
+          "daemon.cpu_pct": 1.61,
+          "app.cpu_s": 2.562,
+          "daemon.cpu_s": 0.412,
+          "app.intr_wakeups_per_s": 144.4,
+          "daemon.intr_wakeups_per_s": 1063.3,
+          "counters.frames_per_s": 20.8,
+          "counters.commits_per_s": 7.92,
+          "counters.peak_commits_per_s": 9,
+          "counters.transcript_renders_per_commit": 2.558,
+          "counters.rows_per_commit_frame": 2.19,
+          "counters.ui_alloc_kb_per_commit": 16.3,
+          "counters.renders.sidebar": 491,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 254.64,
+          "app.rss_peak_mb": 150.2,
+          "app.footprint_peak_mb": 325.7,
+          "app.footprint_final_mb": 198.5,
+          "daemon.footprint_final_mb": 52.1,
+          "replay.max_lag_ms": 0.5
+        },
+        {
+          "replay.elapsed_s": 25.72,
+          "app.cpu_pct": 16.96,
+          "daemon.cpu_pct": 1.61,
+          "app.cpu_s": 4.36,
+          "daemon.cpu_s": 0.413,
+          "app.intr_wakeups_per_s": 215.7,
+          "daemon.intr_wakeups_per_s": 1061.1,
+          "counters.frames_per_s": 35.58,
+          "counters.commits_per_s": 8.0,
+          "counters.peak_commits_per_s": 9,
+          "counters.transcript_renders_per_commit": 4.332,
+          "counters.rows_per_commit_frame": 2.11,
+          "counters.ui_alloc_kb_per_commit": 15.7,
+          "counters.renders.sidebar": 858,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 237.94,
+          "app.rss_peak_mb": 185.3,
+          "app.footprint_peak_mb": 335.0,
+          "app.footprint_final_mb": 335.0,
+          "daemon.footprint_final_mb": 52.0,
+          "replay.max_lag_ms": 0.0
+        }
+      ]
+    },
+    "idle": {
+      "runs": 3,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "app.cpu_pct": 0.31,
+        "app.intr_wakeups_per_s": 59.8,
+        "app.idle_wakeups_per_s": 0.8,
+        "daemon.cpu_pct": 0.18,
+        "daemon.intr_wakeups_per_s": 91.9,
+        "counters.frames_per_s": 0.0,
+        "counters.renders_per_s.transcript": 0.0,
+        "counters.renders_per_s.sidebar": 0.0,
+        "app.footprint_final_mb": 137.3,
+        "app.rss_final_mb": 108.4,
+        "daemon.footprint_final_mb": 63.7
+      },
+      "range": {
+        "app.cpu_pct": [
+          0.2,
+          1.45
+        ],
+        "app.intr_wakeups_per_s": [
+          42.5,
+          167.7
+        ],
+        "app.idle_wakeups_per_s": [
+          0.4,
+          1.2
+        ],
+        "daemon.cpu_pct": [
+          0.17,
+          0.22
+        ],
+        "daemon.intr_wakeups_per_s": [
+          88.8,
+          92.2
+        ],
+        "counters.frames_per_s": [
+          0.0,
+          1.96
+        ],
+        "counters.renders_per_s.transcript": [
+          0.0,
+          0.06
+        ],
+        "counters.renders_per_s.sidebar": [
+          0.0,
+          0.06
+        ],
+        "app.footprint_final_mb": [
+          118.1,
+          246.6
+        ],
+        "app.rss_final_mb": [
+          108.4,
+          108.5
+        ],
+        "daemon.footprint_final_mb": [
+          63.7,
+          63.8
+        ]
+      },
+      "per_run": [
+        {
+          "app.cpu_pct": 0.31,
+          "app.intr_wakeups_per_s": 59.8,
+          "app.idle_wakeups_per_s": 1.2,
+          "daemon.cpu_pct": 0.18,
+          "daemon.intr_wakeups_per_s": 92.2,
+          "counters.frames_per_s": 0.0,
+          "counters.renders_per_s.transcript": 0.0,
+          "counters.renders_per_s.sidebar": 0.0,
+          "app.footprint_final_mb": 137.3,
+          "app.rss_final_mb": 108.4,
+          "daemon.footprint_final_mb": 63.8
+        },
+        {
+          "app.cpu_pct": 1.45,
+          "app.intr_wakeups_per_s": 167.7,
+          "app.idle_wakeups_per_s": 0.8,
+          "daemon.cpu_pct": 0.22,
+          "daemon.intr_wakeups_per_s": 88.8,
+          "counters.frames_per_s": 1.96,
+          "counters.renders_per_s.transcript": 0.06,
+          "counters.renders_per_s.sidebar": 0.06,
+          "app.footprint_final_mb": 246.6,
+          "app.rss_final_mb": 108.4,
+          "daemon.footprint_final_mb": 63.7
+        },
+        {
+          "app.cpu_pct": 0.2,
+          "app.intr_wakeups_per_s": 42.5,
+          "app.idle_wakeups_per_s": 0.4,
+          "daemon.cpu_pct": 0.17,
+          "daemon.intr_wakeups_per_s": 91.9,
+          "counters.frames_per_s": 0.0,
+          "counters.renders_per_s.transcript": 0.0,
+          "counters.renders_per_s.sidebar": 0.0,
+          "app.footprint_final_mb": 118.1,
+          "app.rss_final_mb": 108.5,
+          "daemon.footprint_final_mb": 63.7
+        }
+      ]
+    },
+    "memory-1": {
+      "runs": 3,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "app_after_launch.footprint_mb": 306.1,
+        "app.footprint_final_mb": 200.0,
+        "app.footprint_peak_mb": 308.0,
+        "app.rss_final_mb": 133.9,
+        "app.rss_peak_mb": 134.3,
+        "daemon.footprint_final_mb": 117.9,
+        "visits": 7
+      },
+      "range": {
+        "app_after_launch.footprint_mb": [
+          286.4,
+          307.2
+        ],
+        "app.footprint_final_mb": [
+          162.4,
+          307.9
+        ],
+        "app.footprint_peak_mb": [
+          306.0,
+          308.2
+        ],
+        "app.rss_final_mb": [
+          133.0,
+          134.3
+        ],
+        "app.rss_peak_mb": [
+          133.3,
+          134.4
+        ],
+        "daemon.footprint_final_mb": [
+          116.0,
+          118.1
+        ],
+        "visits": [
+          7,
+          7
+        ]
+      },
+      "per_run": [
+        {
+          "app_after_launch.footprint_mb": 306.1,
+          "app.footprint_final_mb": 200.0,
+          "app.footprint_peak_mb": 308.0,
+          "app.rss_final_mb": 133.9,
+          "app.rss_peak_mb": 134.4,
+          "daemon.footprint_final_mb": 118.1,
+          "visits": 7
+        },
+        {
+          "app_after_launch.footprint_mb": 307.2,
+          "app.footprint_final_mb": 307.9,
+          "app.footprint_peak_mb": 308.2,
+          "app.rss_final_mb": 134.3,
+          "app.rss_peak_mb": 134.3,
+          "daemon.footprint_final_mb": 117.9,
+          "visits": 7
+        },
+        {
+          "app_after_launch.footprint_mb": 286.4,
+          "app.footprint_final_mb": 162.4,
+          "app.footprint_peak_mb": 306.0,
+          "app.rss_final_mb": 133.0,
+          "app.rss_peak_mb": 133.3,
+          "daemon.footprint_final_mb": 116.0,
+          "visits": 7
+        }
+      ]
+    },
+    "memory-20": {
+      "runs": 3,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "app_after_launch.footprint_mb": 307.2,
+        "app.footprint_final_mb": 273.5,
+        "app.footprint_peak_mb": 326.5,
+        "app.rss_final_mb": 224.6,
+        "app.rss_peak_mb": 224.6,
+        "daemon.footprint_final_mb": 210.2,
+        "visits": 26
+      },
+      "range": {
+        "app_after_launch.footprint_mb": [
+          291.3,
+          310.2
+        ],
+        "app.footprint_final_mb": [
+          269.8,
+          285.5
+        ],
+        "app.footprint_peak_mb": [
+          299.5,
+          412.8
+        ],
+        "app.rss_final_mb": [
+          223.1,
+          236.0
+        ],
+        "app.rss_peak_mb": [
+          223.1,
+          236.4
+        ],
+        "daemon.footprint_final_mb": [
+          190.7,
+          219.5
+        ],
+        "visits": [
+          26,
+          26
+        ]
+      },
+      "per_run": [
+        {
+          "app_after_launch.footprint_mb": 307.2,
+          "app.footprint_final_mb": 269.8,
+          "app.footprint_peak_mb": 326.5,
+          "app.rss_final_mb": 223.1,
+          "app.rss_peak_mb": 223.1,
+          "daemon.footprint_final_mb": 219.5,
+          "visits": 26
+        },
+        {
+          "app_after_launch.footprint_mb": 310.2,
+          "app.footprint_final_mb": 285.5,
+          "app.footprint_peak_mb": 412.8,
+          "app.rss_final_mb": 236.0,
+          "app.rss_peak_mb": 236.4,
+          "daemon.footprint_final_mb": 210.2,
+          "visits": 26
+        },
+        {
+          "app_after_launch.footprint_mb": 291.3,
+          "app.footprint_final_mb": 273.5,
+          "app.footprint_peak_mb": 299.5,
+          "app.rss_final_mb": 224.6,
+          "app.rss_peak_mb": 224.6,
+          "daemon.footprint_final_mb": 190.7,
+          "visits": 26
+        }
+      ]
+    },
+    "memory-5": {
+      "runs": 3,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "app_after_launch.footprint_mb": 308.8,
+        "app.footprint_final_mb": 239.8,
+        "app.footprint_peak_mb": 334.1,
+        "app.rss_final_mb": 157.5,
+        "app.rss_peak_mb": 157.8,
+        "daemon.footprint_final_mb": 153.4,
+        "visits": 11
+      },
+      "range": {
+        "app_after_launch.footprint_mb": [
+          307.7,
+          309.7
+        ],
+        "app.footprint_final_mb": [
+          226.9,
+          334.0
+        ],
+        "app.footprint_peak_mb": [
+          326.6,
+          351.7
+        ],
+        "app.rss_final_mb": [
+          155.3,
+          160.8
+        ],
+        "app.rss_peak_mb": [
+          155.4,
+          160.8
+        ],
+        "daemon.footprint_final_mb": [
+          153.0,
+          162.7
+        ],
+        "visits": [
+          11,
+          11
+        ]
+      },
+      "per_run": [
+        {
+          "app_after_launch.footprint_mb": 308.8,
+          "app.footprint_final_mb": 239.8,
+          "app.footprint_peak_mb": 351.7,
+          "app.rss_final_mb": 155.3,
+          "app.rss_peak_mb": 155.4,
+          "daemon.footprint_final_mb": 153.0,
+          "visits": 11
+        },
+        {
+          "app_after_launch.footprint_mb": 307.7,
+          "app.footprint_final_mb": 334.0,
+          "app.footprint_peak_mb": 334.1,
+          "app.rss_final_mb": 160.8,
+          "app.rss_peak_mb": 160.8,
+          "daemon.footprint_final_mb": 153.4,
+          "visits": 11
+        },
+        {
+          "app_after_launch.footprint_mb": 309.7,
+          "app.footprint_final_mb": 226.9,
+          "app.footprint_peak_mb": 326.6,
+          "app.rss_final_mb": 157.5,
+          "app.rss_peak_mb": 157.8,
+          "daemon.footprint_final_mb": 162.7,
+          "visits": 11
+        }
+      ]
+    },
+    "prose": {
+      "runs": 2,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "replay.elapsed_s": 200.07,
+        "app.cpu_pct": 6.29,
+        "daemon.cpu_pct": 0.59,
+        "app.cpu_s": 12.58,
+        "daemon.cpu_s": 1.2,
+        "app.intr_wakeups_per_s": 90.95,
+        "daemon.intr_wakeups_per_s": 190.75,
+        "counters.frames_per_s": 11.05,
+        "counters.commits_per_s": 6.7,
+        "counters.peak_commits_per_s": 8.5,
+        "counters.transcript_renders_per_commit": 1.59,
+        "counters.rows_per_commit_frame": 2.64,
+        "counters.ui_alloc_kb_per_commit": 12.45,
+        "counters.renders.sidebar": 2093.0,
+        "counters.renders.right_panel": 0.0,
+        "counters.save_ui_ms": 1909.03,
+        "app.rss_peak_mb": 138.0,
+        "app.footprint_peak_mb": 314.45,
+        "app.footprint_final_mb": 195.25,
+        "daemon.footprint_final_mb": 51.9,
+        "replay.max_lag_ms": 0.0
+      },
+      "range": {
+        "replay.elapsed_s": [
+          200.07,
+          200.07
+        ],
+        "app.cpu_pct": [
+          3.87,
+          8.71
+        ],
+        "daemon.cpu_pct": [
+          0.59,
+          0.6
+        ],
+        "app.cpu_s": [
+          7.74,
+          17.43
+        ],
+        "daemon.cpu_s": [
+          1.19,
+          1.21
+        ],
+        "app.intr_wakeups_per_s": [
+          64.5,
+          117.4
+        ],
+        "daemon.intr_wakeups_per_s": [
+          189.6,
+          191.9
+        ],
+        "counters.frames_per_s": [
+          6.27,
+          15.84
+        ],
+        "counters.commits_per_s": [
+          6.58,
+          6.82
+        ],
+        "counters.peak_commits_per_s": [
+          8,
+          9
+        ],
+        "counters.transcript_renders_per_commit": [
+          0.93,
+          2.26
+        ],
+        "counters.rows_per_commit_frame": [
+          2.36,
+          2.92
+        ],
+        "counters.ui_alloc_kb_per_commit": [
+          12.3,
+          12.6
+        ],
+        "counters.renders.sidebar": [
+          1176,
+          3010
+        ],
+        "counters.renders.right_panel": [
+          0,
+          0
+        ],
+        "counters.save_ui_ms": [
+          1887.54,
+          1930.52
+        ],
+        "app.rss_peak_mb": [
+          137.2,
+          138.8
+        ],
+        "app.footprint_peak_mb": [
+          313.3,
+          315.6
+        ],
+        "app.footprint_final_mb": [
+          185.1,
+          205.4
+        ],
+        "daemon.footprint_final_mb": [
+          51.8,
+          52.0
+        ],
+        "replay.max_lag_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "per_run": [
+        {
+          "replay.elapsed_s": 200.07,
+          "app.cpu_pct": 3.87,
+          "daemon.cpu_pct": 0.59,
+          "app.cpu_s": 7.735,
+          "daemon.cpu_s": 1.19,
+          "app.intr_wakeups_per_s": 64.5,
+          "daemon.intr_wakeups_per_s": 191.9,
+          "counters.frames_per_s": 6.27,
+          "counters.commits_per_s": 6.58,
+          "counters.peak_commits_per_s": 9,
+          "counters.transcript_renders_per_commit": 0.925,
+          "counters.rows_per_commit_frame": 2.92,
+          "counters.ui_alloc_kb_per_commit": 12.6,
+          "counters.renders.sidebar": 1176,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 1930.52,
+          "app.rss_peak_mb": 137.2,
+          "app.footprint_peak_mb": 315.6,
+          "app.footprint_final_mb": 185.1,
+          "daemon.footprint_final_mb": 51.8,
+          "replay.max_lag_ms": 0.0
+        },
+        {
+          "replay.elapsed_s": 200.07,
+          "app.cpu_pct": 8.71,
+          "daemon.cpu_pct": 0.6,
+          "app.cpu_s": 17.432,
+          "daemon.cpu_s": 1.205,
+          "app.intr_wakeups_per_s": 117.4,
+          "daemon.intr_wakeups_per_s": 189.6,
+          "counters.frames_per_s": 15.84,
+          "counters.commits_per_s": 6.82,
+          "counters.peak_commits_per_s": 8,
+          "counters.transcript_renders_per_commit": 2.263,
+          "counters.rows_per_commit_frame": 2.36,
+          "counters.ui_alloc_kb_per_commit": 12.3,
+          "counters.renders.sidebar": 3010,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 1887.54,
+          "app.rss_peak_mb": 138.8,
+          "app.footprint_peak_mb": 313.3,
+          "app.footprint_final_mb": 205.4,
+          "daemon.footprint_final_mb": 52.0,
+          "replay.max_lag_ms": 0.0
+        }
+      ]
+    },
+    "reasoning-fast": {
+      "runs": 2,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "replay.elapsed_s": 12.17,
+        "app.cpu_pct": 12.35,
+        "daemon.cpu_pct": 1.94,
+        "app.cpu_s": 1.51,
+        "daemon.cpu_s": 0.24,
+        "app.intr_wakeups_per_s": 197.3,
+        "daemon.intr_wakeups_per_s": 1238.75,
+        "counters.frames_per_s": 30.1,
+        "counters.commits_per_s": 7.07,
+        "counters.peak_commits_per_s": 9.0,
+        "counters.transcript_renders_per_commit": 3.53,
+        "counters.rows_per_commit_frame": 4.88,
+        "counters.ui_alloc_kb_per_commit": 17.85,
+        "counters.renders.sidebar": 346.0,
+        "counters.renders.right_panel": 0.0,
+        "counters.save_ui_ms": 136.46,
+        "app.rss_peak_mb": 124.2,
+        "app.footprint_peak_mb": 297.0,
+        "app.footprint_final_mb": 297.0,
+        "daemon.footprint_final_mb": 78.4,
+        "replay.max_lag_ms": 3.45
+      },
+      "range": {
+        "replay.elapsed_s": [
+          12.17,
+          12.17
+        ],
+        "app.cpu_pct": [
+          9.98,
+          14.72
+        ],
+        "daemon.cpu_pct": [
+          1.76,
+          2.11
+        ],
+        "app.cpu_s": [
+          1.22,
+          1.8
+        ],
+        "daemon.cpu_s": [
+          0.21,
+          0.26
+        ],
+        "app.intr_wakeups_per_s": [
+          174.2,
+          220.4
+        ],
+        "daemon.intr_wakeups_per_s": [
+          1238.7,
+          1238.8
+        ],
+        "counters.frames_per_s": [
+          23.07,
+          37.13
+        ],
+        "counters.commits_per_s": [
+          7.07,
+          7.07
+        ],
+        "counters.peak_commits_per_s": [
+          9,
+          9
+        ],
+        "counters.transcript_renders_per_commit": [
+          2.56,
+          4.5
+        ],
+        "counters.rows_per_commit_frame": [
+          4.59,
+          5.16
+        ],
+        "counters.ui_alloc_kb_per_commit": [
+          17.8,
+          17.9
+        ],
+        "counters.renders.sidebar": [
+          279,
+          413
+        ],
+        "counters.renders.right_panel": [
+          0,
+          0
+        ],
+        "counters.save_ui_ms": [
+          134.4,
+          138.52
+        ],
+        "app.rss_peak_mb": [
+          124.0,
+          124.4
+        ],
+        "app.footprint_peak_mb": [
+          296.8,
+          297.2
+        ],
+        "app.footprint_final_mb": [
+          296.8,
+          297.2
+        ],
+        "daemon.footprint_final_mb": [
+          78.2,
+          78.6
+        ],
+        "replay.max_lag_ms": [
+          2.5,
+          4.4
+        ]
+      },
+      "per_run": [
+        {
+          "replay.elapsed_s": 12.17,
+          "app.cpu_pct": 9.98,
+          "daemon.cpu_pct": 1.76,
+          "app.cpu_s": 1.218,
+          "daemon.cpu_s": 0.215,
+          "app.intr_wakeups_per_s": 174.2,
+          "daemon.intr_wakeups_per_s": 1238.8,
+          "counters.frames_per_s": 23.07,
+          "counters.commits_per_s": 7.07,
+          "counters.peak_commits_per_s": 9,
+          "counters.transcript_renders_per_commit": 2.556,
+          "counters.rows_per_commit_frame": 5.16,
+          "counters.ui_alloc_kb_per_commit": 17.9,
+          "counters.renders.sidebar": 279,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 134.4,
+          "app.rss_peak_mb": 124.4,
+          "app.footprint_peak_mb": 297.2,
+          "app.footprint_final_mb": 297.2,
+          "daemon.footprint_final_mb": 78.2,
+          "replay.max_lag_ms": 4.4
+        },
+        {
+          "replay.elapsed_s": 12.17,
+          "app.cpu_pct": 14.72,
+          "daemon.cpu_pct": 2.11,
+          "app.cpu_s": 1.798,
+          "daemon.cpu_s": 0.258,
+          "app.intr_wakeups_per_s": 220.4,
+          "daemon.intr_wakeups_per_s": 1238.7,
+          "counters.frames_per_s": 37.13,
+          "counters.commits_per_s": 7.07,
+          "counters.peak_commits_per_s": 9,
+          "counters.transcript_renders_per_commit": 4.495,
+          "counters.rows_per_commit_frame": 4.59,
+          "counters.ui_alloc_kb_per_commit": 17.8,
+          "counters.renders.sidebar": 413,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 138.52,
+          "app.rss_peak_mb": 124.0,
+          "app.footprint_peak_mb": 296.8,
+          "app.footprint_final_mb": 296.8,
+          "daemon.footprint_final_mb": 78.6,
+          "replay.max_lag_ms": 2.5
+        }
+      ]
+    },
+    "rpc": {
+      "runs": 3,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "requests.get_settings.p50_us": 52180.12,
+        "requests.get_settings.p95_us": 52466.83,
+        "requests.get_settings.p99_us": 52530.75,
+        "requests.hydrate_session.p50_us": 52211.88,
+        "requests.hydrate_session.p95_us": 52508.29,
+        "requests.hydrate_session.p99_us": 52599.71,
+        "requests.list_project_files.p50_us": 52212.92,
+        "requests.list_project_files.p95_us": 52337.04,
+        "requests.list_project_files.p99_us": 52389.79,
+        "requests.search_session_messages.p50_us": 52158.08,
+        "requests.search_session_messages.p95_us": 52452.67,
+        "requests.search_session_messages.p99_us": 52526.46
+      },
+      "range": {
+        "requests.get_settings.p50_us": [
+          52168.25,
+          52194.33
+        ],
+        "requests.get_settings.p95_us": [
+          52360.92,
+          52534.67
+        ],
+        "requests.get_settings.p99_us": [
+          52420.71,
+          52694.29
+        ],
+        "requests.hydrate_session.p50_us": [
+          52175.12,
+          52245.33
+        ],
+        "requests.hydrate_session.p95_us": [
+          52446.67,
+          52536.5
+        ],
+        "requests.hydrate_session.p99_us": [
+          52529.92,
+          52660.62
+        ],
+        "requests.list_project_files.p50_us": [
+          52195.04,
+          52235.58
+        ],
+        "requests.list_project_files.p95_us": [
+          52320.33,
+          52352.88
+        ],
+        "requests.list_project_files.p99_us": [
+          52372.38,
+          52421.54
+        ],
+        "requests.search_session_messages.p50_us": [
+          52136.46,
+          52204.04
+        ],
+        "requests.search_session_messages.p95_us": [
+          52441.62,
+          52459.0
+        ],
+        "requests.search_session_messages.p99_us": [
+          52523.5,
+          52570.96
+        ]
+      },
+      "per_run": [
+        {
+          "requests.get_settings.p50_us": 52194.334,
+          "requests.get_settings.p95_us": 52466.833999999995,
+          "requests.get_settings.p99_us": 52530.75,
+          "requests.hydrate_session.p50_us": 52245.333,
+          "requests.hydrate_session.p95_us": 52508.292,
+          "requests.hydrate_session.p99_us": 52599.708,
+          "requests.list_project_files.p50_us": 52235.584,
+          "requests.list_project_files.p95_us": 52352.875,
+          "requests.list_project_files.p99_us": 52389.791999999994,
+          "requests.search_session_messages.p50_us": 52136.459,
+          "requests.search_session_messages.p95_us": 52452.666000000005,
+          "requests.search_session_messages.p99_us": 52523.5
+        },
+        {
+          "requests.get_settings.p50_us": 52168.25,
+          "requests.get_settings.p95_us": 52360.917,
+          "requests.get_settings.p99_us": 52420.709,
+          "requests.hydrate_session.p50_us": 52211.875,
+          "requests.hydrate_session.p95_us": 52446.667,
+          "requests.hydrate_session.p99_us": 52529.917,
+          "requests.list_project_files.p50_us": 52212.916,
+          "requests.list_project_files.p95_us": 52337.041,
+          "requests.list_project_files.p99_us": 52372.375,
+          "requests.search_session_messages.p50_us": 52204.042,
+          "requests.search_session_messages.p95_us": 52441.625,
+          "requests.search_session_messages.p99_us": 52526.458999999995
+        },
+        {
+          "requests.get_settings.p50_us": 52180.125,
+          "requests.get_settings.p95_us": 52534.667,
+          "requests.get_settings.p99_us": 52694.291,
+          "requests.hydrate_session.p50_us": 52175.125,
+          "requests.hydrate_session.p95_us": 52536.5,
+          "requests.hydrate_session.p99_us": 52660.625,
+          "requests.list_project_files.p50_us": 52195.041,
+          "requests.list_project_files.p95_us": 52320.334,
+          "requests.list_project_files.p99_us": 52421.542,
+          "requests.search_session_messages.p50_us": 52158.083,
+          "requests.search_session_messages.p95_us": 52459.0,
+          "requests.search_session_messages.p99_us": 52570.959
+        }
+      ]
+    },
+    "start-cold": {
+      "runs": 1,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "startup.init_ms": 371.17,
+        "startup.first_frame_ms": 713.13,
+        "startup.first_content_ms": 723.86,
+        "app.rss_mb": 116.8,
+        "app.footprint_mb": 290.5
+      },
+      "range": {
+        "startup.init_ms": null,
+        "startup.first_frame_ms": null,
+        "startup.first_content_ms": null,
+        "app.rss_mb": null,
+        "app.footprint_mb": null
+      },
+      "per_run": [
+        {
+          "startup.init_ms": 371.166,
+          "startup.first_frame_ms": 713.133625,
+          "startup.first_content_ms": 723.857375,
+          "app.rss_mb": 116.8,
+          "app.footprint_mb": 290.5
+        }
+      ]
+    },
+    "start-warm": {
+      "runs": 3,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "startup.init_ms": 5.91,
+        "startup.first_frame_ms": 293.25,
+        "startup.first_content_ms": 304.76,
+        "app.rss_mb": 116.4,
+        "app.footprint_mb": 290.2
+      },
+      "range": {
+        "startup.init_ms": [
+          5.84,
+          11.05
+        ],
+        "startup.first_frame_ms": [
+          287.15,
+          354.45
+        ],
+        "startup.first_content_ms": [
+          296.02,
+          368.85
+        ],
+        "app.rss_mb": [
+          116.2,
+          125.2
+        ],
+        "app.footprint_mb": [
+          271.0,
+          293.5
+        ]
+      },
+      "per_run": [
+        {
+          "startup.init_ms": 5.836,
+          "startup.first_frame_ms": 287.153,
+          "startup.first_content_ms": 296.01625,
+          "app.rss_mb": 116.2,
+          "app.footprint_mb": 271.0
+        },
+        {
+          "startup.init_ms": 5.907,
+          "startup.first_frame_ms": 293.252208,
+          "startup.first_content_ms": 304.76475,
+          "app.rss_mb": 116.4,
+          "app.footprint_mb": 290.2
+        },
+        {
+          "startup.init_ms": 11.049,
+          "startup.first_frame_ms": 354.452459,
+          "startup.first_content_ms": 368.84825,
+          "app.rss_mb": 125.2,
+          "app.footprint_mb": 293.5
+        }
+      ]
+    },
+    "tool-storm": {
+      "runs": 2,
+      "discarded_window_not_drawn": 0,
+      "median": {
+        "replay.elapsed_s": 30.84,
+        "app.cpu_pct": 24.39,
+        "daemon.cpu_pct": 8.43,
+        "app.cpu_s": 7.53,
+        "daemon.cpu_s": 2.6,
+        "app.intr_wakeups_per_s": 224.35,
+        "daemon.intr_wakeups_per_s": 123.4,
+        "counters.frames_per_s": 43.66,
+        "counters.commits_per_s": 0.27,
+        "counters.peak_commits_per_s": 7.0,
+        "counters.transcript_renders_per_commit": 122.92,
+        "counters.rows_per_commit_frame": 7.65,
+        "counters.ui_alloc_kb_per_commit": 3910.9,
+        "counters.renders.sidebar": 1332.0,
+        "counters.renders.right_panel": 0.0,
+        "counters.save_ui_ms": 298.8,
+        "app.rss_peak_mb": 483.1,
+        "app.footprint_peak_mb": 667.5,
+        "app.footprint_final_mb": 619.0,
+        "daemon.footprint_final_mb": 503.0,
+        "replay.max_lag_ms": 0.0
+      },
+      "range": {
+        "replay.elapsed_s": [
+          30.84,
+          30.84
+        ],
+        "app.cpu_pct": [
+          23.87,
+          24.91
+        ],
+        "daemon.cpu_pct": [
+          8.17,
+          8.7
+        ],
+        "app.cpu_s": [
+          7.38,
+          7.67
+        ],
+        "daemon.cpu_s": [
+          2.52,
+          2.68
+        ],
+        "app.intr_wakeups_per_s": [
+          222.3,
+          226.4
+        ],
+        "daemon.intr_wakeups_per_s": [
+          122.7,
+          124.1
+        ],
+        "counters.frames_per_s": [
+          43.65,
+          43.66
+        ],
+        "counters.commits_per_s": [
+          0.26,
+          0.28
+        ],
+        "counters.peak_commits_per_s": [
+          7,
+          7
+        ],
+        "counters.transcript_renders_per_commit": [
+          117.33,
+          128.5
+        ],
+        "counters.rows_per_commit_frame": [
+          7.56,
+          7.75
+        ],
+        "counters.ui_alloc_kb_per_commit": [
+          3681.5,
+          4140.3
+        ],
+        "counters.renders.sidebar": [
+          1331,
+          1333
+        ],
+        "counters.renders.right_panel": [
+          0,
+          0
+        ],
+        "counters.save_ui_ms": [
+          282.58,
+          315.03
+        ],
+        "app.rss_peak_mb": [
+          475.9,
+          490.3
+        ],
+        "app.footprint_peak_mb": [
+          667.4,
+          667.6
+        ],
+        "app.footprint_final_mb": [
+          570.6,
+          667.4
+        ],
+        "daemon.footprint_final_mb": [
+          500.0,
+          506.0
+        ],
+        "replay.max_lag_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "per_run": [
+        {
+          "replay.elapsed_s": 30.84,
+          "app.cpu_pct": 24.91,
+          "daemon.cpu_pct": 8.7,
+          "app.cpu_s": 7.673,
+          "daemon.cpu_s": 2.679,
+          "app.intr_wakeups_per_s": 222.3,
+          "daemon.intr_wakeups_per_s": 122.7,
+          "counters.frames_per_s": 43.65,
+          "counters.commits_per_s": 0.26,
+          "counters.peak_commits_per_s": 7,
+          "counters.transcript_renders_per_commit": 128.5,
+          "counters.rows_per_commit_frame": 7.75,
+          "counters.ui_alloc_kb_per_commit": 4140.3,
+          "counters.renders.sidebar": 1331,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 282.58,
+          "app.rss_peak_mb": 475.9,
+          "app.footprint_peak_mb": 667.6,
+          "app.footprint_final_mb": 570.6,
+          "daemon.footprint_final_mb": 506.0,
+          "replay.max_lag_ms": 0.0
+        },
+        {
+          "replay.elapsed_s": 30.84,
+          "app.cpu_pct": 23.87,
+          "daemon.cpu_pct": 8.17,
+          "app.cpu_s": 7.377,
+          "daemon.cpu_s": 2.525,
+          "app.intr_wakeups_per_s": 226.4,
+          "daemon.intr_wakeups_per_s": 124.1,
+          "counters.frames_per_s": 43.66,
+          "counters.commits_per_s": 0.28,
+          "counters.peak_commits_per_s": 7,
+          "counters.transcript_renders_per_commit": 117.333,
+          "counters.rows_per_commit_frame": 7.56,
+          "counters.ui_alloc_kb_per_commit": 3681.5,
+          "counters.renders.sidebar": 1333,
+          "counters.renders.right_panel": 0,
+          "counters.save_ui_ms": 315.03,
+          "app.rss_peak_mb": 490.3,
+          "app.footprint_peak_mb": 667.4,
+          "app.footprint_final_mb": 667.4,
+          "daemon.footprint_final_mb": 500.0,
+          "replay.max_lag_ms": 0.0
+        }
+      ]
+    }
+  }
+}

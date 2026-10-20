@@ -207,6 +207,44 @@ def footprint_tool(pid: int) -> float | None:
     return float(match.group(1)) * scale
 
 
+_WINDOW_LIST_JS = """
+ObjC.import('CoreGraphics');
+var list = ObjC.deepUnwrap(ObjC.castRefToObject(
+    $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0)));
+JSON.stringify(list.filter(w => w.kCGWindowLayer == 0 && w.kCGWindowAlpha > 0)
+    .map(w => [w.kCGWindowOwnerPID, w.kCGWindowBounds.X, w.kCGWindowBounds.Y,
+               w.kCGWindowBounds.Width, w.kCGWindowBounds.Height]))
+"""
+
+
+def visible_fraction(pid: int) -> float | None:
+    """How much of `pid`'s largest window is on screen and not covered by
+    windows in front of it (0..1), from window bounds (no screen-recording
+    permission needed). An occluded GPUI window draws no frames, which turns
+    a streaming run into a background run. Approximate: it ignores Spaces
+    and transparency, so it is recorded, not used to discard runs."""
+    try:
+        out = subprocess.run(["osascript", "-l", "JavaScript", "-e", _WINDOW_LIST_JS],
+                             capture_output=True, text=True, timeout=10).stdout
+        windows = json.loads(out)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    # Front to back. The app's main window is its largest.
+    mine = [(i, w) for i, w in enumerate(windows) if w[0] == pid]
+    if not mine:
+        return 0.0
+    index, (_, x, y, width, height) = max(mine, key=lambda item: item[1][3] * item[1][4])
+    above = [w for w in windows[:index] if w[0] != pid]
+    steps, covered = 24, 0
+    for i in range(steps):
+        for j in range(steps):
+            px = x + (i + 0.5) * width / steps
+            py = y + (j + 0.5) * height / steps
+            if any(ax <= px < ax + aw and ay <= py < ay + ah for _, ax, ay, aw, ah in above):
+                covered += 1
+    return 1 - covered / (steps * steps)
+
+
 class Sampler(threading.Thread):
     """Polls process-tree samples every SAMPLE_INTERVAL for peak memory."""
 
@@ -214,15 +252,27 @@ class Sampler(threading.Thread):
         super().__init__(daemon=True)
         self.roles = roles
         self.samples: dict[str, list[dict]] = {role: [] for role in roles}
+        self.visibility: list[tuple[float, float]] = []
         self._halt = threading.Event()
 
     def run(self) -> None:
+        tick = 0
         while not self._halt.is_set():
             for role, pid in self.roles.items():
                 sample = tree_sample(pid)
                 if sample:
                     self.samples[role].append(sample)
+            if "app" in self.roles and tick % 2 == 0:
+                fraction = visible_fraction(self.roles["app"])
+                if fraction is not None:
+                    self.visibility.append((time.monotonic(), fraction))
+            tick += 1
             self._halt.wait(SAMPLE_INTERVAL)
+
+    def visible(self, since: float, until: float) -> float | None:
+        """Mean visible fraction of the app window in [since, until]."""
+        values = [f for t, f in self.visibility if since <= t <= until]
+        return round(sum(values) / len(values), 3) if values else None
 
     def stop(self) -> None:
         self._halt.set()
@@ -493,6 +543,10 @@ def counters_window(a: dict, b: dict) -> dict:
             pane: delta("renders", pane)
             for pane in ("transcript", "sidebar", "right_panel", "composer")
         },
+        "commit_frames": commit_frames,
+        # Commits that reached a drawn frame. A window that is hidden or fully
+        # occluded draws nothing while the stream still commits.
+        "presented_commit_ratio": round(commit_frames / commits, 3) if commits else None,
         "transcript_renders_per_commit": round(delta("renders", "transcript") / commits, 3)
         if commits else None,
         "rows_per_commit_frame": round(
@@ -590,9 +644,11 @@ def scenario_idle(ctx: Context, round_index: int, settle: float = 10, window: fl
         counters_b = app.fresh_counters(time.monotonic())
         b = {"app": tree_sample(app.pid), "daemon": tree_sample(daemon.pid)}
         sampler.stop()
+        visible = sampler.visible(a["app"]["t"], b["app"]["t"])
         result = {
             "scenario": "idle",
             "round": round_index,
+            "window_visible": visible,
             "provider_dirs": provider_dirs(home),
             "app": {**process_window(a["app"], b["app"]),
                     **memory(sampler, "app", b["app"], app.pid)},
@@ -632,10 +688,12 @@ def scenario_stream(ctx: Context, round_index: int, timeline: str) -> dict:
         final = {"app": tree_sample(app.pid), "daemon": tree_sample(daemon.pid)}
         counters_final = app.counters()
         sampler.stop()
+        visible = sampler.visible(a["app"]["t"], b["app"]["t"])
         replay = daemon.replay_line()
         result = {
             "scenario": timeline,
             "round": round_index,
+            "window_visible": visible,
             "provider_dirs": provider_dirs(home),
             "replay": replay,
             "wall_s": round(b["app"]["t"] - started, 2),
@@ -646,6 +704,11 @@ def scenario_stream(ctx: Context, round_index: int, timeline: str) -> dict:
             "counters": counters_window(counters_a, counters_b),
             "counters_report": compact_counters(counters_final or counters_b),
         }
+        ratio = result["counters"]["presented_commit_ratio"]
+        # The drawn-commit ratio decides. `window_visible` is informational:
+        # window bounds cannot see Spaces, and a window on another Space can
+        # still draw.
+        result["window_drawn"] = ratio is None or ratio >= 0.8
         stop(app.process)
         return result
     finally:
@@ -782,8 +845,10 @@ def command_run(args) -> None:
         if scenario not in ALL_SCENARIOS:
             sys.exit(f"unknown scenario {scenario}; choose from {', '.join(ALL_SCENARIOS)}")
     out.mkdir(parents=True, exist_ok=True)
-    (out / "machine.json").write_text(json.dumps(machine_info(bins), indent=2))
+    if args.first_round == 1 or not (out / "machine.json").exists():
+        (out / "machine.json").write_text(json.dumps(machine_info(bins), indent=2))
     ctx = Context(out, bins)
+    ctx.cold_done = args.first_round > 1
     results_dir = out / "results"
     results_dir.mkdir(exist_ok=True)
 
@@ -795,11 +860,12 @@ def command_run(args) -> None:
         print(f'  {result["scenario"]} r{result["round"]}: {headline(result)}', flush=True)
 
     # Cold start first: the first launch after the build.
-    if "start" in scenarios:
+    if "start" in scenarios and args.first_round == 1:
         print("start (cold)", flush=True)
         record(run_scenario(ctx, "start", 0))
-    for round_index in range(1, args.rounds + 1):
-        print(f"round {round_index}/{args.rounds}", flush=True)
+    last = args.first_round + args.rounds - 1
+    for round_index in range(args.first_round, last + 1):
+        print(f"round {round_index}/{last}", flush=True)
         for scenario in scenarios:
             try:
                 record(run_scenario(ctx, scenario, round_index))
@@ -830,6 +896,11 @@ def headline(result: dict) -> str:
 def median(values):
     values = [v for v in values if isinstance(v, (int, float))]
     return round(statistics.median(values), 2) if values else None
+
+
+def spread(values):
+    values = [v for v in values if isinstance(v, (int, float))]
+    return [round(min(values), 2), round(max(values), 2)] if len(values) > 1 else None
 
 
 def get(result: dict, path: str):
@@ -952,16 +1023,31 @@ def command_measure(args) -> None:
 def command_summarize(args) -> None:
     out = Path(args.out).resolve()
     results: dict[str, list[dict]] = {}
+    discarded: dict[str, int] = {}
     for path in sorted((out / "results").glob("*.json")):
         result = json.loads(path.read_text())
+        if "window_drawn" not in result and kind_of(result["scenario"]) == "stream":
+            # Runs recorded before the ratio existed: every drawn commit is a
+            # frame, so fewer frames than 80% of commits means it was hidden.
+            counters = result.get("counters", {})
+            result["window_drawn"] = (
+                counters.get("frames_per_s", 0) >= 0.8 * counters.get("commits_per_s", 0)
+            )
+        if result.get("window_drawn") is False:
+            discarded[result["scenario"]] = discarded.get(result["scenario"], 0) + 1
+            continue
         results.setdefault(result["scenario"], []).append(result)
     machine = read_json(out / "machine.json") or {}
     summary = {"schema": "waku.bench-baseline/1", "machine": machine, "scenarios": {}}
+    for scenario in discarded:
+        results.setdefault(scenario, [])
     for scenario, runs in results.items():
         fields = SUMMARY_FIELDS[kind_of(scenario)]
         summary["scenarios"][scenario] = {
             "runs": len(runs),
+            "discarded_window_not_drawn": discarded.get(scenario, 0),
             "median": {field: median([get(run, field) for run in runs]) for field in fields},
+            "range": {field: spread([get(run, field) for run in runs]) for field in fields},
             "per_run": [{field: get(run, field) for field in fields} for run in runs],
         }
     text = json.dumps(summary, indent=2)
@@ -988,10 +1074,18 @@ def markdown(summary: dict) -> str:
             cells = []
             for scenario in scenarios:
                 value = summary["scenarios"][scenario]["median"].get(field)
-                cells.append("" if value is None else f"{value:g}")
+                bounds = summary["scenarios"][scenario].get("range", {}).get(field)
+                cell = "" if value is None else f"{value:g}"
+                if bounds and bounds[0] != bounds[1]:
+                    cell += f" ({bounds[0]:g}–{bounds[1]:g})"
+                cells.append(cell)
             lines.append(f"| `{field}` | " + " | ".join(cells) + " |")
-        runs = ", ".join(f'{s}: {summary["scenarios"][s]["runs"]}' for s in scenarios)
-        lines.append(f"\nRuns per scenario: {runs}.\n")
+        runs = ", ".join(
+            f'{s}: {summary["scenarios"][s]["runs"]}'
+            + (f' ({summary["scenarios"][s]["discarded_window_not_drawn"]} discarded)'
+               if summary["scenarios"][s].get("discarded_window_not_drawn") else "")
+            for s in scenarios)
+        lines.append(f"\nMedian (min–max). Runs per scenario: {runs}.\n")
     return "\n".join(lines) + "\n"
 
 
@@ -1004,6 +1098,8 @@ def main() -> None:
     run.add_argument("--bins", default=str(REPO / "target" / "release"))
     run.add_argument("--rounds", type=int, default=3)
     run.add_argument("--scenarios", default="")
+    run.add_argument("--first-round", type=int, default=1,
+                     help="number of the first round (to add rounds to an --out)")
     measure = sub.add_parser("measure", help="sample any process tree (T3 Code)")
     measure.add_argument("--pid", required=True, help="root pid(s), comma-separated")
     measure.add_argument("--seconds", type=float, required=True)
