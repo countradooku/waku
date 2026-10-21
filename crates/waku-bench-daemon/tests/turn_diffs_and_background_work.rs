@@ -516,7 +516,7 @@ fn a_background_process_streams_its_output_and_stops() {
         waku_client::commands::refresh_background_work(thread_id.0),
     );
     std::thread::sleep(Duration::from_millis(300));
-    assert!(pending(&snapshot(&client, thread_id)).is_empty());
+    assert!(pending(&crate::snapshot(&client, thread_id)).is_empty());
 }
 
 #[test]

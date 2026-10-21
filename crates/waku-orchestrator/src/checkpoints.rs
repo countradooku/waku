@@ -49,7 +49,7 @@ impl std::fmt::Display for RangeError {
 
 impl std::error::Error for RangeError {}
 
-fn ready<'a>(projection: &'a ThreadProjection, id: Option<CheckpointId>) -> Option<&'a Checkpoint> {
+fn ready(projection: &ThreadProjection, id: Option<CheckpointId>) -> Option<&Checkpoint> {
     projection
         .checkpoints
         .get(&id?)
