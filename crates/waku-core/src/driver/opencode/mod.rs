@@ -220,7 +220,8 @@ impl DriverV2 for OpenCodeDriver {
         // trailing slash, the same string for create and list.
         let requested = ctx.cwd.clone();
         let cwd = tokio::task::spawn_blocking(move || {
-            std::fs::canonicalize(&requested).unwrap_or(requested)
+            // Not `\\?\`-prefixed on Windows: the service compares strings.
+            dunce::canonicalize(&requested).unwrap_or(requested)
         })
         .await
         .unwrap_or_else(|_| ctx.cwd.clone());

@@ -192,7 +192,8 @@ impl DriverV2 for DeepSeekDriver {
         let jobs = Arc::new(AtomicUsize::new(0));
         let requested = ctx.cwd.clone();
         let cwd = tokio::task::spawn_blocking(move || {
-            std::fs::canonicalize(&requested).unwrap_or(requested)
+            // Not `\\?\`-prefixed on Windows: the service compares strings.
+            dunce::canonicalize(&requested).unwrap_or(requested)
         })
         .await
         .unwrap_or_else(|_| ctx.cwd.clone());
