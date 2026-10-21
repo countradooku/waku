@@ -28,8 +28,9 @@ use uuid::Uuid;
 use waku_orchestrator::fakes::FakePorts;
 use waku_orchestrator::recovery::{RecoveryReport, recover_after_restart};
 use waku_orchestrator::{
-    DefaultExecutor, DispatchError, EffectWorkerPool, ManualClock, Orchestrator,
-    OrchestratorConfig, SequentialIds, ThreadProjection, WorkerConfig,
+    ClaimedEffect, DefaultExecutor, DispatchError, EffectContext, EffectError, EffectExecutor,
+    EffectWorkerPool, ManualClock, Orchestrator, OrchestratorConfig, SequentialIds,
+    ThreadProjection, WorkerConfig,
 };
 use waku_protocol::orchestration::*;
 
@@ -236,6 +237,40 @@ struct DaemonParts<'a> {
     adapter_events: &'a Arc<Mutex<Vec<AdapterEvent>>>,
 }
 
+/// Runs an effect only once the session manager has gone quiet. An effect
+/// worker and the adapter-event pump commit to the same thread
+/// concurrently; either order is valid, but a replay must commit in the same
+/// order every time, so the worker waits until the pump has ingested what
+/// the replayed frames produced (bounded, so a waiting driver cannot stall
+/// it).
+struct QuietExecutor {
+    inner: DefaultExecutor,
+    manager: Arc<ProviderSessionManager>,
+    adapter_events: Arc<Mutex<Vec<AdapterEvent>>>,
+}
+
+impl EffectExecutor for QuietExecutor {
+    fn execute(&self, effect: &ClaimedEffect, cx: &EffectContext<'_>) -> Result<(), EffectError> {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut last = None;
+        let mut stable = 0;
+        while Instant::now() < deadline {
+            let now = (self.manager.is_idle(), self.adapter_events.lock().len());
+            if now.0 && last == Some(now) {
+                stable += 1;
+                if stable >= 5 {
+                    break;
+                }
+            } else {
+                stable = 0;
+            }
+            last = Some(now);
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        self.inner.execute(effect, cx)
+    }
+}
+
 /// Opens the orchestrator on `database` and starts a session manager and
 /// effect workers on it. Boot 0 is the first start; a later boot runs the
 /// startup recovery first and takes fresh app ids from its own counter.
@@ -275,9 +310,13 @@ fn start_daemon(parts: DaemonParts<'_>, boot: u64) -> Result<Daemon, ReplayError
         },
         SessionManagerConfig::default(),
     );
-    let executor = Arc::new(DefaultExecutor {
-        provider: Arc::new(ManagerExecutor(manager.clone())),
-        ports: parts.ports.ports(),
+    let executor = Arc::new(QuietExecutor {
+        inner: DefaultExecutor {
+            provider: Arc::new(ManagerExecutor(manager.clone())),
+            ports: parts.ports.ports(),
+        },
+        manager: manager.clone(),
+        adapter_events: parts.adapter_events.clone(),
     });
     let pool = EffectWorkerPool::start(orchestrator.clone(), executor, WorkerConfig::default());
     let mut live = manager.subscribe();
