@@ -116,16 +116,19 @@ impl Waku {
         self.cache_image(cache_key, RemoteImageState::Loading, cx);
         let fetch_reference = reference.to_owned();
         let daemon_path = daemon_path.map(Path::to_path_buf);
-        let daemon = self.daemon.clone();
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let image = cx
                 .background_executor()
                 .spawn(async move {
-                    waku_client::persistence::read_remote_reference(
+                    // A local daemon names the file and this process reads
+                    // it; a remote one streams it (`blobDownload`).
+                    waku_client::surfaces::blobs::read_reference(
+                        &daemon_v8,
                         &fetch_reference,
                         daemon_path.as_deref(),
-                        &daemon,
                     )
+                    .ok()
                     .map(|bytes| {
                         // Header-only size probe, off the UI thread.
                         RemoteImageState::ready(Arc::new(gpui::Image::from_bytes(format, bytes)))

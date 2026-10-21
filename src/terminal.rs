@@ -273,7 +273,7 @@ impl TerminalSession {
     /// and attach an emulator to it. The same path serves a local and a
     /// remote daemon.
     fn new(
-        daemon: &waku_client::DaemonSupervisor,
+        daemon_v8: &waku_client::surfaces::DaemonV8,
         working_directory: &Path,
         columns: usize,
         rows: usize,
@@ -322,7 +322,7 @@ impl TerminalSession {
             proxy,
         };
         let link = DaemonTerminalLink::open(
-            daemon.subscribe_clients(),
+            daemon_v8.clone(),
             working_directory.to_path_buf(),
             window_size.num_cols,
             window_size.num_lines,
@@ -1055,20 +1055,20 @@ impl TerminalView {
     /// A terminal tab: a shell the daemon runs in `working_directory`, a path
     /// on the daemon host, whether the daemon is local or remote.
     pub fn new(
-        daemon: waku_client::DaemonSupervisor,
+        daemon_v8: waku_client::surfaces::DaemonV8,
         working_directory: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let local_paths = !daemon.is_remote();
+        let local_paths = daemon_v8.is_local();
         let terminal_cwd = working_directory.clone();
         let (wakeup_tx, wakeups) = smol::channel::bounded(1);
         cx.spawn(async move |this, cx| {
-            let started = cx
-                .background_executor()
-                .spawn(
-                    async move { TerminalSession::new(&daemon, &terminal_cwd, 52, 36, wakeup_tx) },
-                )
-                .await;
+            let started =
+                cx.background_executor()
+                    .spawn(async move {
+                        TerminalSession::new(&daemon_v8, &terminal_cwd, 52, 36, wakeup_tx)
+                    })
+                    .await;
             let _ = this.update(cx, |this, cx| {
                 match started {
                     Ok(session) => this.session = Some(session),
@@ -2973,47 +2973,46 @@ mod tests {
         }
     }
 
-    fn output(offset: u64, bytes: &[u8]) -> waku_client::WireDriverEvent {
-        use base64::Engine as _;
-        waku_client::WireDriverEvent::TerminalOutput(
-            waku_client::wire_event::TerminalOutputPayload {
-                data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                offset: Some(offset),
-            },
-        )
+    fn attached(offset: u64, replay: u64) -> waku_client::v8::TerminalItem {
+        waku_client::v8::TerminalItem::Attached {
+            generation: uuid::Uuid::from_u128(1),
+            cols: 20,
+            rows: 4,
+            offset,
+            replay,
+            truncated: false,
+            exited: false,
+            exit_code: None,
+            title: None,
+        }
     }
 
     /// The desktop's attach path without a window or a daemon: a reattach
-    /// replays the retained tail into the emulator, skips the live output the
-    /// replay already holds, and applies what follows (#60).
+    /// that cannot continue where the screen stopped resets the emulator,
+    /// replays the retained tail, and applies the live output after it
+    /// (#60, #55).
     #[test]
     fn daemon_terminal_replay_and_live_output_drive_the_emulator() {
         let (proxy, wakeups, ui_events) = test_proxy(true);
         let mut feed = feed_for(&proxy);
-        feed.update(TerminalUpdate::Output(b"stale screen".to_vec()));
-        let _ = ui_events.try_iter().count();
-
         let mut stream = waku_client::terminal::TerminalStream::default();
-        let snapshot = waku_client::TerminalSnapshot {
-            generation: 0,
-            cols: 20,
-            rows: 4,
-            offset: 17,
-            replay: b"$ ls\r\nREADME.md\r\n".to_vec(),
-            truncated: false,
-            exited: false,
-            exit_code: None,
-        };
-        for update in stream.attach(snapshot, false) {
+        for update in stream.item(attached(0, 0)) {
             feed.update(update);
         }
-        // Queued before the attach response, and already in the replay.
-        for event in [output(0, b"$ ls\r\n"), output(6, b"README.md\r\n")] {
-            if let Some(update) = stream.apply(event) {
-                feed.update(update);
-            }
+        for update in stream.data(b"stale".to_vec()) {
+            feed.update(update);
         }
-        if let Some(update) = stream.apply(output(17, b"$ ")) {
+        let _ = ui_events.try_iter().count();
+
+        // The connection dropped; the daemon replays its last 17 bytes.
+        let replay = b"$ ls\r\nREADME.md\r\n".to_vec();
+        for update in stream.item(attached(17, replay.len() as u64)) {
+            feed.update(update);
+        }
+        for update in stream.data(replay) {
+            feed.update(update);
+        }
+        for update in stream.data(b"$ ".to_vec()) {
             feed.update(update);
         }
         assert_eq!(

@@ -1347,11 +1347,18 @@ impl Waku {
         self.refresh_command_palette_results("", false, cx);
         cx.notify();
 
-        let fetch = self
-            .store
-            .provider_sessions(provider, PROVIDER_SESSION_CATALOG_LIMIT);
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
-            let result = cx.background_executor().spawn(async move { fetch() }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    waku_client::surfaces::providers::provider_sessions(
+                        &daemon_v8,
+                        provider,
+                        PROVIDER_SESSION_CATALOG_LIMIT,
+                    )
+                })
+                .await;
             let _ = waku.update(cx, |waku, cx| {
                 if !waku.command_palette.open
                     || waku.command_palette.provider_session_generation != generation

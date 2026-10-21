@@ -106,6 +106,7 @@ settings.search: 設定を検索
 daemon.expose_title: 管理対象デーモンを公開
 daemon.expose_description: このマシン以外の Waku クライアントから接続できるようにします。変更時はデーモンだけが再起動します。
 daemon.status_local: このマシンのみ
+daemon.version: "デーモン %{version}"
 daemon.status_exposed: 公開中
 daemon.status_restarting: 再起動中
 daemon.connection_title: リスナーアクセス

@@ -340,21 +340,12 @@ impl Waku {
     pub(super) fn ensure_worktree_cleanup_status(&mut self, cx: &mut Context<Self>) {
         self.storage_settings.generation += 1;
         let generation = self.storage_settings.generation;
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::GetWorktreeCleanupStatus,
-                    )? {
-                        waku_client::ResponsePayload::WorktreeCleanupStatus { status } => {
-                            Ok(status)
-                        }
-                        _ => anyhow::bail!("the daemon returned an invalid cleanup status"),
-                    }
+                    waku_client::surfaces::settings::worktree_cleanup_status(&daemon_v8)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -385,21 +376,16 @@ impl Waku {
         self.storage_settings.running = true;
         self.storage_settings.error = None;
         // Unsaved rule edits do not exist: every control saves on change.
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
+        let settings_sync = self.settings_sync.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::RunWorktreeCleanup,
-                    )? {
-                        waku_client::ResponsePayload::WorktreeCleanupReport { report } => {
-                            Ok(report)
-                        }
-                        _ => anyhow::bail!("the daemon returned an invalid cleanup report"),
-                    }
+                    // Cleanup runs with the saved rules; let the latest edit
+                    // of them land first.
+                    settings_sync.wait_settled(PROVIDER_SETTINGS_SETTLE);
+                    waku_client::surfaces::settings::run_worktree_cleanup(&daemon_v8)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {

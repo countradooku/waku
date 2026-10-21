@@ -11,6 +11,7 @@ pub mod computer_use;
 pub mod driver;
 pub mod persistence;
 mod process;
+pub mod surfaces;
 pub mod terminal;
 /// Protocol v8 (RFC 0003); shadows the protocol crate's `v8` module and
 /// re-exports its types.
@@ -27,12 +28,22 @@ pub use waku_protocol::*;
 pub use workspace_client::WorkspaceClient;
 
 pub mod git_branch {
-    pub use waku_protocol::git::{BranchEntry, BranchSnapshot};
+    pub use crate::v8::{BranchEntry, BranchSnapshot};
+
+    /// The branch a snapshot shows: the current one, else the detached head.
+    pub trait DisplayBranch {
+        fn display_branch(&self) -> Option<&str>;
+    }
+
+    impl DisplayBranch for BranchSnapshot {
+        fn display_branch(&self) -> Option<&str> {
+            crate::surfaces::vcs::display_branch(self)
+        }
+    }
 }
 
 pub mod git_commit {
-    pub use waku_protocol::git::AgentInvocation;
-    pub use waku_protocol::git::CommitSnapshot as Snapshot;
+    pub use crate::v8::CommitSnapshot as Snapshot;
 }
 
 pub mod worktree {

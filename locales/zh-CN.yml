@@ -102,6 +102,7 @@ settings.search: 搜索设置
 daemon.expose_title: 暴露由 Waku 管理的守护进程
 daemon.expose_description: 允许本机之外的 Waku 客户端连接。更改此项只会重启守护进程。
 daemon.status_local: 仅本机
+daemon.version: "守护进程 %{version}"
 daemon.status_exposed: 已暴露
 daemon.status_restarting: 正在重启
 daemon.connection_title: 监听访问
