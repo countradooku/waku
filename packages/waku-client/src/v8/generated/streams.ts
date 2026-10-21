@@ -24,6 +24,26 @@ export interface Streams {
     spec: T.CommandOutputSpec;
     item: T.CommandOutputItem;
   };
+  drafts: {
+    spec: T.DraftsSpec;
+    item: T.DraftsItem;
+  };
+  providers: {
+    spec: T.ProvidersSpec;
+    item: T.ProvidersItem;
+  };
+  terminal: {
+    spec: T.TerminalSpec;
+    item: T.TerminalItem;
+  };
+  terminalList: {
+    spec: T.TerminalListSpec;
+    item: T.TerminalListItem;
+  };
+  vcsStatus: {
+    spec: T.VcsStatusSpec;
+    item: T.VcsStatusItem;
+  };
 }
 
 export type StreamName = keyof Streams;
@@ -44,4 +64,9 @@ export const STREAMS: { readonly [S in StreamName]: StreamInfo } = {
   shell: { scope: "read", cursor: "sequence", data: false },
   thread: { scope: "read", cursor: "sequence", data: false },
   commandOutput: { scope: "read", cursor: "none", data: false },
+  drafts: { scope: "read", cursor: "revision", data: false },
+  providers: { scope: "read", cursor: "revision", data: false },
+  terminal: { scope: "read", cursor: "offset", data: true },
+  terminalList: { scope: "read", cursor: "none", data: false },
+  vcsStatus: { scope: "read", cursor: "none", data: false },
 };

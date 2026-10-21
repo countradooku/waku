@@ -3,7 +3,9 @@
     "frame_preface",
     "frame_msg_ping",
     "frame_data_chunk",
-    "frame_data_fin"
+    "frame_data_fin",
+    "frame_data_upload",
+    "frame_data_terminal_input"
   ],
   "messages": [
     {
@@ -153,18 +155,467 @@
     {
       "direction": "server",
       "name": "server_items_command_output"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_daemon_info"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_daemon_info"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_daemon_shutdown"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_daemon_shutdown"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_files_tree"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_files_tree"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_files_search_entries"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_files_search_entries"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_files_search_contents"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_files_search_contents"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_files_write"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_files_write"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_fs_browse"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_fs_browse"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_composer_slash_commands"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_composer_slash_commands"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_skills_list"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_skills_list"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_skills_set_enabled"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_skills_set_enabled"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_skills_trash"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_skills_trash"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_drafts_get"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_drafts_get"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_drafts_apply"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_drafts_apply"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_blobs_put"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_blobs_put"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_blobs_stat"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_blobs_stat"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_attachments_import"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_attachments_import"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_attachments_import_path"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_attachments_import_path"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_status"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_status"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_refs"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_refs"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_switch_ref"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_switch_ref"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_worktrees"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_worktrees"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_create_worktree"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_create_worktree"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_remove_worktree"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_remove_worktree"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_commit_preview"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_commit_preview"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_stage"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_stage"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_generate_commit_message"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_generate_commit_message"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_commit"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_commit"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_push"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_push"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_vcs_pull"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_vcs_pull"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_review_diff"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_review_diff"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_terminal_open"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_terminal_open"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_terminal_resize"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_terminal_resize"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_terminal_clear"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_terminal_clear"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_terminal_restart"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_terminal_restart"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_terminal_close"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_terminal_close"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_providers_list"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_providers_list"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_providers_probe"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_providers_probe"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_providers_models"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_providers_models"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_providers_plan_usage"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_providers_plan_usage"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_usage_history"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_usage_history"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_settings_update"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_settings_update"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_storage_worktree_cleanup_status"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_storage_worktree_cleanup_status"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_storage_run_worktree_cleanup"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_storage_run_worktree_cleanup"
+    },
+    {
+      "direction": "client",
+      "name": "client_call_computer_use_permissions"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_computer_use_permissions"
+    },
+    {
+      "direction": "client",
+      "name": "client_subscribe_drafts"
+    },
+    {
+      "direction": "server",
+      "name": "server_items_drafts"
+    },
+    {
+      "direction": "client",
+      "name": "client_subscribe_providers"
+    },
+    {
+      "direction": "server",
+      "name": "server_items_providers"
+    },
+    {
+      "direction": "client",
+      "name": "client_subscribe_terminal"
+    },
+    {
+      "direction": "server",
+      "name": "server_items_terminal"
+    },
+    {
+      "direction": "client",
+      "name": "client_subscribe_terminal_list"
+    },
+    {
+      "direction": "server",
+      "name": "server_items_terminal_list"
+    },
+    {
+      "direction": "client",
+      "name": "client_subscribe_vcs_status"
+    },
+    {
+      "direction": "server",
+      "name": "server_items_vcs_status"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_error_vcs"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_error_conflict"
     }
   ],
   "routes": {
     "calls": {
       "1": "settings.get",
+      "10": "daemon.info",
+      "11": "daemon.shutdown",
+      "12": "files.tree",
+      "13": "files.searchEntries",
+      "14": "files.searchContents",
+      "15": "files.write",
+      "16": "fs.browse",
+      "17": "composer.slashCommands",
+      "18": "skills.list",
+      "19": "skills.setEnabled",
       "2": "projects.list",
+      "20": "skills.trash",
+      "21": "drafts.get",
+      "22": "drafts.apply",
+      "23": "blobs.put",
+      "24": "blobs.stat",
+      "25": "attachments.import",
+      "26": "attachments.importPath",
+      "27": "vcs.status",
+      "28": "vcs.refs",
+      "29": "vcs.switchRef",
       "3": "files.read",
+      "30": "vcs.worktrees",
+      "31": "vcs.createWorktree",
+      "32": "vcs.removeWorktree",
+      "33": "vcs.commitPreview",
+      "34": "vcs.stage",
+      "35": "vcs.generateCommitMessage",
+      "36": "vcs.commit",
+      "37": "vcs.push",
+      "38": "vcs.pull",
+      "39": "review.diff",
       "4": "orchestration.dispatch",
-      "5": "threads.historyPage"
+      "40": "terminal.open",
+      "41": "terminal.resize",
+      "42": "terminal.clear",
+      "43": "terminal.restart",
+      "44": "terminal.close",
+      "45": "providers.list",
+      "46": "providers.probe",
+      "47": "providers.models",
+      "48": "providers.planUsage",
+      "49": "usage.history",
+      "5": "threads.historyPage",
+      "50": "settings.update",
+      "51": "storage.worktreeCleanupStatus",
+      "52": "storage.runWorktreeCleanup",
+      "53": "computerUse.permissions"
     },
     "channels": {
       "1": "settings",
+      "10": "drafts",
+      "11": "providers",
+      "12": "terminal",
+      "13": "terminalList",
+      "14": "vcsStatus",
       "2": "blobDownload",
       "3": "thread",
       "4": "shell",

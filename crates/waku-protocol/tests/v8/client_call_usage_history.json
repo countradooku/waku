@@ -1,0 +1,1 @@
+{"type":"call","id":49,"method":"usage.history","params":{"window":{"type":"trailingDays","days":7},"projectIds":["9a0ec700-0000-4000-8000-000000000003"]}}

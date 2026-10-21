@@ -1,0 +1,1 @@
+{"type":"call","id":24,"method":"blobs.stat","params":{"reference":"waku-attachment:3f2a0000-0000-4000-8000-000000000013","path":"/Users/dev/.waku-fork/attachments/3f2a/notes/a.txt"}}

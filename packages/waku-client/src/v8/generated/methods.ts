@@ -36,6 +36,182 @@ export interface Methods {
     params: T.ArchivedParams;
     result: T.ArchivedPage;
   };
+  "daemon.info": {
+    params: T.NoParams;
+    result: T.DaemonInfo;
+  };
+  "daemon.shutdown": {
+    params: T.DaemonShutdownParams;
+    result: T.Ack;
+  };
+  "files.tree": {
+    params: T.FilesTreeParams;
+    result: Array<T.TreeEntry>;
+  };
+  "files.searchEntries": {
+    params: T.FilesSearchEntriesParams;
+    result: Array<T.FileEntry>;
+  };
+  "files.searchContents": {
+    params: T.FilesSearchContentsParams;
+    result: Array<T.ContentHit>;
+  };
+  "files.write": {
+    params: T.FilesWriteParams;
+    result: T.FileRevision;
+  };
+  "fs.browse": {
+    params: T.FsBrowseParams;
+    result: T.Directory;
+  };
+  "composer.slashCommands": {
+    params: T.ComposerSlashCommandsParams;
+    result: Array<T.SlashCommand>;
+  };
+  "skills.list": {
+    params: T.SkillsListParams;
+    result: T.SkillsCatalog;
+  };
+  "skills.setEnabled": {
+    params: T.SkillsSetEnabledParams;
+    result: T.Ack;
+  };
+  "skills.trash": {
+    params: T.SkillsTrashParams;
+    result: T.Ack;
+  };
+  "drafts.get": {
+    params: T.NoParams;
+    result: T.DraftsSnapshot;
+  };
+  "drafts.apply": {
+    params: T.DraftsApplyParams;
+    result: T.DraftsRevision;
+  };
+  "blobs.put": {
+    params: T.BlobsPutParams;
+    result: T.BlobPut;
+  };
+  "blobs.stat": {
+    params: T.BlobsStatParams;
+    result: T.BlobStat;
+  };
+  "attachments.import": {
+    params: T.AttachmentsImportParams;
+    result: T.StoredAttachment;
+  };
+  "attachments.importPath": {
+    params: T.AttachmentsImportPathParams;
+    result: T.StoredAttachment;
+  };
+  "vcs.status": {
+    params: T.RootParams;
+    result: T.GitStatus;
+  };
+  "vcs.refs": {
+    params: T.RootParams;
+    result: T.BranchSnapshot | null;
+  };
+  "vcs.switchRef": {
+    params: T.VcsSwitchRefParams;
+    result: T.BranchSnapshot;
+  };
+  "vcs.worktrees": {
+    params: T.RootParams;
+    result: Array<T.GitWorktree>;
+  };
+  "vcs.createWorktree": {
+    params: T.VcsCreateWorktreeParams;
+    result: T.CreatedWorktree;
+  };
+  "vcs.removeWorktree": {
+    params: T.VcsRemoveWorktreeParams;
+    result: T.Ack;
+  };
+  "vcs.commitPreview": {
+    params: T.RootParams;
+    result: T.CommitSnapshot;
+  };
+  "vcs.stage": {
+    params: T.VcsStageParams;
+    result: T.GitStatus;
+  };
+  "vcs.generateCommitMessage": {
+    params: T.VcsGenerateCommitMessageParams;
+    result: T.CommitMessage;
+  };
+  "vcs.commit": {
+    params: T.VcsCommitParams;
+    result: T.CommitResult;
+  };
+  "vcs.push": {
+    params: T.RootOpParams;
+    result: T.Ack;
+  };
+  "vcs.pull": {
+    params: T.RootOpParams;
+    result: T.PullResult;
+  };
+  "review.diff": {
+    params: T.ReviewDiffParams;
+    result: T.ReviewDiff;
+  };
+  "terminal.open": {
+    params: T.TerminalOpenParams;
+    result: T.TerminalOpened;
+  };
+  "terminal.resize": {
+    params: T.TerminalResizeParams;
+    result: T.Ack;
+  };
+  "terminal.clear": {
+    params: T.TerminalParams;
+    result: T.Ack;
+  };
+  "terminal.restart": {
+    params: T.TerminalParams;
+    result: T.TerminalGeneration;
+  };
+  "terminal.close": {
+    params: T.TerminalParams;
+    result: T.Ack;
+  };
+  "providers.list": {
+    params: T.NoParams;
+    result: Array<T.ProviderStatus>;
+  };
+  "providers.probe": {
+    params: T.ProvidersProbeParams;
+    result: T.ProviderProbeResult;
+  };
+  "providers.models": {
+    params: T.ProvidersModelsParams;
+    result: T.ProviderModels;
+  };
+  "providers.planUsage": {
+    params: T.InstanceParams;
+    result: T.PlanUsage | null;
+  };
+  "usage.history": {
+    params: T.UsageHistoryParams;
+    result: T.UsageHistory;
+  };
+  "settings.update": {
+    params: T.SettingsUpdateParams;
+    result: T.SettingsSnapshot;
+  };
+  "storage.worktreeCleanupStatus": {
+    params: T.NoParams;
+    result: T.WorktreeCleanupStatus;
+  };
+  "storage.runWorktreeCleanup": {
+    params: T.StorageRunCleanupParams;
+    result: T.WorktreeCleanupReport;
+  };
+  "computerUse.permissions": {
+    params: T.ComputerUsePermissionsParams;
+    result: T.ComputerPermissions;
+  };
 }
 
 export type MethodName = keyof Methods;
@@ -58,4 +234,48 @@ export const METHODS: { readonly [M in MethodName]: MethodInfo } = {
   "threads.historyPage": { scope: "read", opId: false },
   "threads.turnItem": { scope: "read", opId: false },
   "threads.archived": { scope: "read", opId: false },
+  "daemon.info": { scope: "read", opId: false },
+  "daemon.shutdown": { scope: "admin", opId: false },
+  "files.tree": { scope: "files:read", opId: false },
+  "files.searchEntries": { scope: "files:read", opId: false },
+  "files.searchContents": { scope: "files:read", opId: false },
+  "files.write": { scope: "files:write", opId: true },
+  "fs.browse": { scope: "files:read", opId: false },
+  "composer.slashCommands": { scope: "read", opId: false },
+  "skills.list": { scope: "read", opId: false },
+  "skills.setEnabled": { scope: "settings:write", opId: true },
+  "skills.trash": { scope: "settings:write", opId: true },
+  "drafts.get": { scope: "read", opId: false },
+  "drafts.apply": { scope: "operate", opId: true },
+  "blobs.put": { scope: "operate", opId: false },
+  "blobs.stat": { scope: "read", opId: false },
+  "attachments.import": { scope: "operate", opId: true },
+  "attachments.importPath": { scope: "operate", opId: true },
+  "vcs.status": { scope: "read", opId: false },
+  "vcs.refs": { scope: "read", opId: false },
+  "vcs.switchRef": { scope: "vcs:write", opId: true },
+  "vcs.worktrees": { scope: "read", opId: false },
+  "vcs.createWorktree": { scope: "vcs:write", opId: true },
+  "vcs.removeWorktree": { scope: "vcs:write", opId: true },
+  "vcs.commitPreview": { scope: "read", opId: false },
+  "vcs.stage": { scope: "vcs:write", opId: true },
+  "vcs.generateCommitMessage": { scope: "operate", opId: false },
+  "vcs.commit": { scope: "vcs:write", opId: true },
+  "vcs.push": { scope: "vcs:write", opId: true },
+  "vcs.pull": { scope: "vcs:write", opId: true },
+  "review.diff": { scope: "read", opId: false },
+  "terminal.open": { scope: "terminal", opId: true },
+  "terminal.resize": { scope: "terminal", opId: false },
+  "terminal.clear": { scope: "terminal", opId: false },
+  "terminal.restart": { scope: "terminal", opId: false },
+  "terminal.close": { scope: "terminal", opId: false },
+  "providers.list": { scope: "read", opId: false },
+  "providers.probe": { scope: "read", opId: false },
+  "providers.models": { scope: "read", opId: false },
+  "providers.planUsage": { scope: "read", opId: false },
+  "usage.history": { scope: "read", opId: false },
+  "settings.update": { scope: "settings:write", opId: true },
+  "storage.worktreeCleanupStatus": { scope: "read", opId: false },
+  "storage.runWorktreeCleanup": { scope: "settings:write", opId: true },
+  "computerUse.permissions": { scope: "read", opId: false },
 };

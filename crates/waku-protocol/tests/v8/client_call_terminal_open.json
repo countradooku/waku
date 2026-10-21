@@ -1,0 +1,1 @@
+{"type":"call","id":40,"method":"terminal.open","params":{"root":{"type":"project","projectId":"9a0ec700-0000-4000-8000-000000000003"},"cols":120,"rows":32,"title":"shell","opId":"0b1d0000-0000-4000-8000-000000000010"}}

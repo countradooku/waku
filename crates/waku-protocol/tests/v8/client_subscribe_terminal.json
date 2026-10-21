@@ -1,0 +1,1 @@
+{"type":"subscribe","channel":12,"stream":{"type":"terminal","terminalId":"7e2a0000-0000-4000-8000-000000000011","interactive":true},"after":{"type":"offset","generation":"6e4e0000-0000-4000-8000-000000000012","offset":4096},"window":1048576}

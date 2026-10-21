@@ -1,0 +1,1 @@
+{"type":"call","id":11,"method":"daemon.shutdown","params":{"reason":"app quit"}}

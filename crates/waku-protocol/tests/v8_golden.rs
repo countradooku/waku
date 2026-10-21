@@ -27,6 +27,9 @@ use waku_protocol::v8::orchestration::{
 };
 use waku_protocol::v8::*;
 
+#[path = "v8_golden/catalog.rs"]
+mod catalog;
+
 enum Sample {
     Client(ClientMessage),
     Server(ServerMessage),
@@ -41,24 +44,100 @@ const BLOB: &str = "waku-blob:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd1
 
 /// The call ids and channels the samples use, for decoding replies and items.
 fn routes() -> Routes {
-    Routes {
-        calls: [
-            (1, "settings.get"),
-            (2, "projects.list"),
-            (3, "files.read"),
-            (4, "orchestration.dispatch"),
-            (5, "threads.historyPage"),
-        ]
-        .into(),
-        channels: [
-            (1, "settings"),
-            (2, "blobDownload"),
-            (3, "thread"),
-            (4, "shell"),
-            (5, "commandOutput"),
-        ]
-        .into(),
+    let mut calls: BTreeMap<u32, &'static str> = [
+        (1, "settings.get"),
+        (2, "projects.list"),
+        (3, "files.read"),
+        (4, "orchestration.dispatch"),
+        (5, "threads.historyPage"),
+    ]
+    .into();
+    for call in catalog::calls() {
+        calls.insert(call.id, call.method.static_name().unwrap());
     }
+    let mut channels: BTreeMap<u32, &'static str> = [
+        (1, "settings"),
+        (2, "blobDownload"),
+        (3, "thread"),
+        (4, "shell"),
+        (5, "commandOutput"),
+    ]
+    .into();
+    for stream in catalog::streams() {
+        channels.insert(stream.channel, stream.spec.static_name().unwrap());
+    }
+    Routes { calls, channels }
+}
+
+/// `domain.verbName` as `domain_verb_name`.
+fn snake(name: &str) -> String {
+    let mut out = String::new();
+    for character in name.chars() {
+        if character == '.' {
+            out.push('_');
+        } else if character.is_ascii_uppercase() {
+            out.push('_');
+            out.push(character.to_ascii_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+fn leak(name: String) -> &'static str {
+    Box::leak(name.into_boxed_str())
+}
+
+/// The catalog's calls, replies, subscriptions and items (#53 part 2).
+fn catalog_samples() -> Vec<(&'static str, Sample)> {
+    use Sample::{Client, Server};
+    let mut samples = Vec::new();
+    for call in catalog::calls() {
+        let name = snake(call.method.static_name().unwrap());
+        samples.push((
+            leak(format!("client_call_{name}")),
+            Client(ClientMessage::Call {
+                id: call.id,
+                method: call.method,
+            }),
+        ));
+        samples.push((
+            leak(format!("server_reply_{name}")),
+            Server(ServerMessage::Reply(Reply::ok(call.id, call.result))),
+        ));
+    }
+    for stream in catalog::streams() {
+        let name = snake(stream.spec.static_name().unwrap());
+        samples.push((
+            leak(format!("client_subscribe_{name}")),
+            Client(ClientMessage::Subscribe(Subscribe {
+                channel: stream.channel,
+                stream: stream.spec,
+                after: stream.after,
+                window: stream.window,
+            })),
+        ));
+        samples.push((
+            leak(format!("server_items_{name}")),
+            Server(ServerMessage::Items {
+                channel: stream.channel,
+                items: stream.items,
+            }),
+        ));
+    }
+    samples.push((
+        "server_reply_error_vcs",
+        Server(ServerMessage::Reply(Reply::error(30, catalog::vcs_error()))),
+    ));
+    samples.push((
+        "server_reply_error_conflict",
+        Server(ServerMessage::Reply(Reply::error(
+            21,
+            catalog::conflict_error(),
+        ))),
+    ));
+    samples
 }
 
 fn settings() -> Settings {
@@ -73,6 +152,7 @@ fn settings() -> Settings {
             ("claude".into(), "/opt/claude/bin/claude".into()),
             ("codex".into(), "/usr/local/bin/codex".into()),
         ]),
+        storage: StorageSettings::default(),
     }
 }
 
@@ -338,6 +418,7 @@ fn orchestration_samples() -> Vec<(&'static str, Sample)> {
 fn samples() -> Vec<(&'static str, Sample)> {
     let mut samples = base_samples();
     samples.extend(orchestration_samples());
+    samples.extend(catalog_samples());
     samples
 }
 
@@ -407,6 +488,7 @@ fn base_samples() -> Vec<(&'static str, Sample)> {
                 stream: StreamSpec::BlobDownload(BlobDownloadSpec {
                     reference: BLOB.into(),
                     offset: Some(1024),
+                    path: None,
                 }),
                 after: None,
                 window: Some(DEFAULT_DATA_WINDOW),
@@ -603,6 +685,16 @@ fn frame_samples() -> Vec<(&'static str, Vec<u8>)> {
         ("frame_msg_ping", frame::encode_msg(&golden_ping())),
         ("frame_data_chunk", frame::encode_data(2, false, b"chunk-1")),
         ("frame_data_fin", frame::encode_data(2, true, b"")),
+        // An upload's first chunk (`blobs.put` on channel 40) and a
+        // terminal's input.
+        (
+            "frame_data_upload",
+            frame::encode_data(40, false, b"\x89PNG"),
+        ),
+        (
+            "frame_data_terminal_input",
+            frame::encode_data(12, false, b"ls\r"),
+        ),
     ]
 }
 
@@ -766,6 +858,15 @@ fn frames_decode_from_their_golden_bytes() {
             }
             ("frame_data_fin", Frame::Data { channel, fin, body }) => {
                 assert_eq!((channel, fin, body.len()), (2, true, 0));
+            }
+            ("frame_data_upload", Frame::Data { channel, fin, body }) => {
+                assert_eq!(
+                    (channel, fin, body.as_slice()),
+                    (40, false, &b"\x89PNG"[..])
+                );
+            }
+            ("frame_data_terminal_input", Frame::Data { channel, fin, body }) => {
+                assert_eq!((channel, fin, body.as_slice()), (12, false, &b"ls\r"[..]));
             }
             (name, frame) => panic!("{name}: unexpected {frame:?}"),
         }

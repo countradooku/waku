@@ -33,6 +33,85 @@ export function normalizeBlobDownloadItem(value: any): T.BlobDownloadItem {
   }
 }
 
+export function normalizeCleanupReason(value: any): T.CleanupReason {
+  switch (value?.type) {
+    case "taskDeleted": {
+      return value;
+    }
+    case "inactive": {
+      return value;
+    }
+    case "finished": {
+      return value;
+    }
+    case "merged": {
+      return value;
+    }
+    case "unchanged": {
+      return value;
+    }
+    case "noRuleApplies": {
+      return value;
+    }
+    case "taskRunning": {
+      return value;
+    }
+    case "liveRuntime": {
+      return value;
+    }
+    case "openTerminal": {
+      return value;
+    }
+    case "outsideManagedFolder": {
+      return value;
+    }
+    case "notWakuBranch": {
+      return value;
+    }
+    case "notLinkedWorktree": {
+      return value;
+    }
+    case "branchChanged": {
+      return value;
+    }
+    case "uncommittedChanges": {
+      return value;
+    }
+    case "ignoredFiles": {
+      return value;
+    }
+    case "unpushedCommits": {
+      return value;
+    }
+    case "inactiveFor": {
+      return value;
+    }
+    case "finishedFor": {
+      return value;
+    }
+    case "notFinished": {
+      return value;
+    }
+    case "notMerged": {
+      return value;
+    }
+    case "hasCommits": {
+      return value;
+    }
+    case "baseUnavailable": {
+      return value;
+    }
+    case "changedDuringCleanup": {
+      return value;
+    }
+    case "error": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.CleanupReason;
+  }
+}
+
 export function normalizeClientMessage(value: any): T.ClientMessage {
   switch (value?.type) {
     case "hello": {
@@ -219,6 +298,11 @@ export function normalizeCommandOutputItem(value: any): T.CommandOutputItem {
   }
 }
 
+export function normalizeComposerSlashCommandsParams(value: any): T.ComposerSlashCommandsParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
 export function normalizeContextTransfer(value: any): T.ContextTransfer {
   if (value["resolution"] != null) value["resolution"] = normalizeTransferResolution(value["resolution"]);
   return value;
@@ -333,6 +417,47 @@ export function normalizeDomainEvent(value: any): T.DomainEvent {
   }
 }
 
+export function normalizeDraftChange(value: any): T.DraftChange {
+  if (value["target"] != null) value["target"] = normalizeDraftTarget(value["target"]);
+  return value;
+}
+
+export function normalizeDraftTarget(value: any): T.DraftTarget {
+  switch (value?.type) {
+    case "newThread": {
+      return value;
+    }
+    case "thread": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.DraftTarget;
+  }
+}
+
+export function normalizeDraftsApplyParams(value: any): T.DraftsApplyParams {
+  if (value["changes"] != null) value["changes"] = value["changes"].map((item: any) => normalizeDraftChange(item));
+  return value;
+}
+
+export function normalizeDraftsItem(value: any): T.DraftsItem {
+  switch (value?.type) {
+    case "snapshot": {
+      return value;
+    }
+    case "changed": {
+      if (value["changes"] != null) value["changes"] = value["changes"].map((item: any) => normalizeDraftChange(item));
+      return value;
+    }
+    case "synchronized": {
+      if (value["cursor"] != null) value["cursor"] = normalizeStreamCursor(value["cursor"]);
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.DraftsItem;
+  }
+}
+
 export function normalizeEnd(value: any): T.End {
   if (value["reason"] != null) value["reason"] = normalizeEndReason(value["reason"]);
   if (value["resumeAfter"] != null) value["resumeAfter"] = normalizeStreamCursor(value["resumeAfter"]);
@@ -408,6 +533,26 @@ export function normalizeErrorDetails(value: any): T.ErrorDetails {
 }
 
 export function normalizeFilesReadParams(value: any): T.FilesReadParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeFilesSearchContentsParams(value: any): T.FilesSearchContentsParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeFilesSearchEntriesParams(value: any): T.FilesSearchEntriesParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeFilesTreeParams(value: any): T.FilesTreeParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeFilesWriteParams(value: any): T.FilesWriteParams {
   if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
   return value;
 }
@@ -505,6 +650,26 @@ export function normalizePlanKind(value: any): T.PlanKind {
   }
 }
 
+export function normalizeProvidersItem(value: any): T.ProvidersItem {
+  switch (value?.type) {
+    case "snapshot": {
+      return value;
+    }
+    case "statusUpdated": {
+      return value;
+    }
+    case "planUsageUpdated": {
+      return value;
+    }
+    case "synchronized": {
+      if (value["cursor"] != null) value["cursor"] = normalizeStreamCursor(value["cursor"]);
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.ProvidersItem;
+  }
+}
+
 export function normalizeResponseCapability(value: any): T.ResponseCapability {
   switch (value?.type) {
     case "live": {
@@ -519,6 +684,50 @@ export function normalizeResponseCapability(value: any): T.ResponseCapability {
     default:
       return { type: "unknown", rawType: String(value?.type) } as T.ResponseCapability;
   }
+}
+
+export function normalizeReviewDiff(value: any): T.ReviewDiff {
+  if (value["patch"] != null) value["patch"] = normalizeTextPayload(value["patch"]);
+  if (value["source"] != null) value["source"] = normalizeReviewDiffSource(value["source"]);
+  return value;
+}
+
+export function normalizeReviewDiffParams(value: any): T.ReviewDiffParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  if (value["source"] != null) value["source"] = normalizeReviewDiffSource(value["source"]);
+  return value;
+}
+
+export function normalizeReviewDiffSource(value: any): T.ReviewDiffSource {
+  switch (value?.type) {
+    case "uncommitted": {
+      return value;
+    }
+    case "unstaged": {
+      return value;
+    }
+    case "staged": {
+      return value;
+    }
+    case "committed": {
+      return value;
+    }
+    case "branch": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.ReviewDiffSource;
+  }
+}
+
+export function normalizeRootOpParams(value: any): T.RootOpParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeRootParams(value: any): T.RootParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
 }
 
 export function normalizeRootRef(value: any): T.RootRef {
@@ -679,6 +888,21 @@ export function normalizeStreamSpec(value: any): T.StreamSpec {
     case "commandOutput": {
       return value;
     }
+    case "drafts": {
+      return value;
+    }
+    case "providers": {
+      return value;
+    }
+    case "terminal": {
+      return value;
+    }
+    case "terminalList": {
+      return normalizeTerminalListSpec(value) as T.StreamSpec;
+    }
+    case "vcsStatus": {
+      return normalizeVcsStatusSpec(value) as T.StreamSpec;
+    }
     default:
       return { type: "unknown", rawType: String(value?.type) } as T.StreamSpec;
   }
@@ -688,6 +912,67 @@ export function normalizeSubscribe(value: any): T.Subscribe {
   if (value["after"] != null) value["after"] = normalizeStreamCursor(value["after"]);
   if (value["stream"] != null) value["stream"] = normalizeStreamSpec(value["stream"]);
   return value;
+}
+
+export function normalizeTerminalItem(value: any): T.TerminalItem {
+  switch (value?.type) {
+    case "attached": {
+      return value;
+    }
+    case "resized": {
+      return value;
+    }
+    case "reset": {
+      return value;
+    }
+    case "exited": {
+      return value;
+    }
+    case "error": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.TerminalItem;
+  }
+}
+
+export function normalizeTerminalListItem(value: any): T.TerminalListItem {
+  switch (value?.type) {
+    case "snapshot": {
+      return value;
+    }
+    case "upserted": {
+      return value;
+    }
+    case "removed": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.TerminalListItem;
+  }
+}
+
+export function normalizeTerminalListSpec(value: any): T.TerminalListSpec {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeTerminalOpenParams(value: any): T.TerminalOpenParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeTextPayload(value: any): T.TextPayload {
+  switch (value?.type) {
+    case "inline": {
+      return value;
+    }
+    case "blob": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.TextPayload;
+  }
 }
 
 export function normalizeThreadItem(value: any): T.ThreadItem {
@@ -873,6 +1158,70 @@ export function normalizeTurnItemKind(value: any): T.TurnItemKind {
   }
 }
 
+export function normalizeUsageHistory(value: any): T.UsageHistory {
+  if (value["window"] != null) value["window"] = normalizeUsageWindow(value["window"]);
+  return value;
+}
+
+export function normalizeUsageHistoryParams(value: any): T.UsageHistoryParams {
+  if (value["window"] != null) value["window"] = normalizeUsageWindow(value["window"]);
+  return value;
+}
+
+export function normalizeUsageWindow(value: any): T.UsageWindow {
+  switch (value?.type) {
+    case "trailingDays": {
+      return value;
+    }
+    case "months": {
+      return value;
+    }
+    case "thisMonth": {
+      return value;
+    }
+    case "lastMonth": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.UsageWindow;
+  }
+}
+
+export function normalizeVcsCommitParams(value: any): T.VcsCommitParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeVcsGenerateCommitMessageParams(value: any): T.VcsGenerateCommitMessageParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeVcsStageParams(value: any): T.VcsStageParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeVcsStatusItem(value: any): T.VcsStatusItem {
+  switch (value?.type) {
+    case "status": {
+      return value;
+    }
+    default:
+      return { type: "unknown", rawType: String(value?.type) } as T.VcsStatusItem;
+  }
+}
+
+export function normalizeVcsStatusSpec(value: any): T.VcsStatusSpec {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
+export function normalizeVcsSwitchRefParams(value: any): T.VcsSwitchRefParams {
+  if (value["root"] != null) value["root"] = normalizeRootRef(value["root"]);
+  return value;
+}
+
 export function normalizeWorkspaceStrategy(value: any): T.WorkspaceStrategy {
   switch (value?.type) {
     case "root": {
@@ -889,6 +1238,21 @@ export function normalizeWorkspaceStrategy(value: any): T.WorkspaceStrategy {
   }
 }
 
+export function normalizeWorktreeCleanupEntry(value: any): T.WorktreeCleanupEntry {
+  if (value["reason"] != null) value["reason"] = normalizeCleanupReason(value["reason"]);
+  return value;
+}
+
+export function normalizeWorktreeCleanupReport(value: any): T.WorktreeCleanupReport {
+  if (value["entries"] != null) value["entries"] = value["entries"].map((item: any) => normalizeWorktreeCleanupEntry(item));
+  return value;
+}
+
+export function normalizeWorktreeCleanupStatus(value: any): T.WorktreeCleanupStatus {
+  if (value["lastReport"] != null) value["lastReport"] = normalizeWorktreeCleanupReport(value["lastReport"]);
+  return value;
+}
+
 /** Normalizes a reply's `ok` by the method of its call. */
 export const resultNormalizers: { readonly [M in MethodName]: (value: any) => MethodResultOf<M> } = {
   "settings.get": (value: any) => value,
@@ -899,6 +1263,50 @@ export const resultNormalizers: { readonly [M in MethodName]: (value: any) => Me
   "threads.historyPage": (value: any) => normalizeHistoryPage(value),
   "threads.turnItem": (value: any) => normalizeTurnItem(value),
   "threads.archived": (value: any) => normalizeArchivedPage(value),
+  "daemon.info": (value: any) => value,
+  "daemon.shutdown": (value: any) => value,
+  "files.tree": (value: any) => value,
+  "files.searchEntries": (value: any) => value,
+  "files.searchContents": (value: any) => value,
+  "files.write": (value: any) => value,
+  "fs.browse": (value: any) => value,
+  "composer.slashCommands": (value: any) => value,
+  "skills.list": (value: any) => value,
+  "skills.setEnabled": (value: any) => value,
+  "skills.trash": (value: any) => value,
+  "drafts.get": (value: any) => value,
+  "drafts.apply": (value: any) => value,
+  "blobs.put": (value: any) => value,
+  "blobs.stat": (value: any) => value,
+  "attachments.import": (value: any) => value,
+  "attachments.importPath": (value: any) => value,
+  "vcs.status": (value: any) => value,
+  "vcs.refs": (value: any) => value,
+  "vcs.switchRef": (value: any) => value,
+  "vcs.worktrees": (value: any) => value,
+  "vcs.createWorktree": (value: any) => value,
+  "vcs.removeWorktree": (value: any) => value,
+  "vcs.commitPreview": (value: any) => value,
+  "vcs.stage": (value: any) => value,
+  "vcs.generateCommitMessage": (value: any) => value,
+  "vcs.commit": (value: any) => value,
+  "vcs.push": (value: any) => value,
+  "vcs.pull": (value: any) => value,
+  "review.diff": (value: any) => normalizeReviewDiff(value),
+  "terminal.open": (value: any) => value,
+  "terminal.resize": (value: any) => value,
+  "terminal.clear": (value: any) => value,
+  "terminal.restart": (value: any) => value,
+  "terminal.close": (value: any) => value,
+  "providers.list": (value: any) => value,
+  "providers.probe": (value: any) => value,
+  "providers.models": (value: any) => value,
+  "providers.planUsage": (value: any) => value,
+  "usage.history": (value: any) => normalizeUsageHistory(value),
+  "settings.update": (value: any) => value,
+  "storage.worktreeCleanupStatus": (value: any) => normalizeWorktreeCleanupStatus(value),
+  "storage.runWorktreeCleanup": (value: any) => normalizeWorktreeCleanupReport(value),
+  "computerUse.permissions": (value: any) => value,
 };
 
 /** Normalizes one item by the stream of its subscription. */
@@ -908,4 +1316,9 @@ export const itemNormalizers: { readonly [S in StreamName]: (value: any) => Stre
   shell: (value: any) => normalizeShellItem(value),
   thread: (value: any) => normalizeThreadItem(value),
   commandOutput: (value: any) => normalizeCommandOutputItem(value),
+  drafts: (value: any) => normalizeDraftsItem(value),
+  providers: (value: any) => normalizeProvidersItem(value),
+  terminal: (value: any) => normalizeTerminalItem(value),
+  terminalList: (value: any) => normalizeTerminalListItem(value),
+  vcsStatus: (value: any) => normalizeVcsStatusItem(value),
 };

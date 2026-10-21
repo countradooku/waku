@@ -1,0 +1,1 @@
+{"type":"reply","id":30,"error":{"code":"vcs","message":"Git command failed: rejected (non-fast-forward)","retryable":false,"details":{"type":"vcs","kind":"nonFastForward"}}}

@@ -1,0 +1,1 @@
+{"type":"reply","id":39,"ok":{"source":{"type":"uncommitted"},"numstat":"10\t1\tsrc/main.rs\n-\t-\tlogo.png\n","files":[{"path":"src/main.rs","additions":10,"deletions":1,"binary":false},{"path":"logo.png","binary":true}],"patch":{"type":"blob","reference":"waku-blob:0a1b2c3d4e5f6071.bin","size":2000000},"completeContext":false}}

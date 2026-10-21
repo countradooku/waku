@@ -1,0 +1,1 @@
+{"type":"items","channel":14,"items":[{"type":"status","status":{"repository":"/Users/dev/waku","branch":"main","head":"4a1f2c3","upstream":"origin/main","ahead":1,"behind":0,"files":[{"path":"src/main.rs","indexStatus":"M","worktreeStatus":" "},{"path":"src/new.rs","previousPath":"src/old.rs","indexStatus":"R","worktreeStatus":" "}]},"at":1760000000000}]}
