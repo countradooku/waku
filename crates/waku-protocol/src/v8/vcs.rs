@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{RootRef, TextPayload};
-use crate::orchestration::ModelSelection;
+use crate::orchestration::{ModelSelection, RunId};
 
 /// A review patch above this many bytes is sent as a blob reference.
 pub const MAX_INLINE_PATCH_BYTES: u64 = 1024 * 1024;
@@ -229,12 +229,23 @@ pub struct PullResult {
     pub conflicts: Vec<String>,
 }
 
-/// Which changes `review.diff` compares. The last turn of a thread is
-/// `threads.turnDiff`.
+/// Which changes a [`ReviewDiff`] compares. `review.diff` takes the working
+/// tree sources; `turn` and `thread` are the sources of `threads.turnDiff`
+/// and `threads.fullDiff` (checkpoint to checkpoint), which `review.diff`
+/// refuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ReviewDiffSource {
+    /// One run: its turn-start checkpoint to the checkpoint it ended with.
+    Turn { run_id: RunId },
+    /// The whole thread: the first live run's turn-start checkpoint to the
+    /// last completed run's checkpoint.
+    Thread,
     /// Working tree and index against `HEAD`, untracked files included.
     Uncommitted,
     /// Working tree against the index.

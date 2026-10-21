@@ -18,9 +18,9 @@ use super::daemon::*;
 use super::files::*;
 use super::orchestration::{
     ArchivedPage, ArchivedParams, CommandOutputItem, CommandOutputSpec, DispatchParams,
-    DispatchResult, HistoryPage, HistoryPageParams, ShellItem, ShellSpec, ThreadFindParams,
-    ThreadFindResult, ThreadItem, ThreadSearchHit, ThreadSearchParams, ThreadSnapshot,
-    ThreadSnapshotParams, ThreadSpec, TurnItemParams,
+    DispatchResult, FullDiffParams, HistoryPage, HistoryPageParams, ShellItem, ShellSpec,
+    ThreadFindParams, ThreadFindResult, ThreadItem, ThreadSearchHit, ThreadSearchParams,
+    ThreadSnapshot, ThreadSnapshotParams, ThreadSpec, TurnDiffParams, TurnItemParams,
 };
 use super::providers::*;
 use super::terminal::*;
@@ -124,6 +124,12 @@ methods! {
     /// Every match inside one thread, snippets around the current one, and
     /// optionally the turn items there.
     "threads.find" => ThreadsFind(ThreadFindParams) -> ThreadFindResult, scope = Read;
+    /// What one run changed: checkpoint to checkpoint, the `review.diff`
+    /// shape.
+    "threads.turnDiff" => ThreadsTurnDiff(TurnDiffParams) -> ReviewDiff, scope = Read;
+    /// What the thread's live runs changed, from before the first to the
+    /// last completed one.
+    "threads.fullDiff" => ThreadsFullDiff(FullDiffParams) -> ReviewDiff, scope = Read;
 
     // -- #53 part 2: the non-orchestration catalog (RFC 0003 §5.2) --------
 

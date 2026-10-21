@@ -96,6 +96,20 @@ pub enum Command {
     },
     #[serde(rename = "project.remove")]
     ProjectRemove { project_id: ProjectId },
+    /// A project in a fresh folder of its own under the daemon's projectless
+    /// root, for a task that has no project (one folder per task). The
+    /// daemon creates the folder and records it as `project.create`; a retry
+    /// with the same command id finds the project it made.
+    #[serde(rename = "project.create_scratch")]
+    ProjectCreateScratch {
+        project_id: ProjectId,
+        /// The sidebar name; "No project" when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Names the folder (its slug), like the first prompt would.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
 
     // Thread lifecycle and sidebar state (#64)
     #[serde(rename = "thread.create")]
@@ -276,6 +290,21 @@ pub enum Command {
         run_id: RunId,
         subagent_id: NodeId,
     },
+    /// Stop a background process or monitor a provider thread reports in
+    /// `pendingBackgroundTasks` (subagents use `subagent.stop`).
+    #[serde(rename = "background_work.stop")]
+    BackgroundWorkStop {
+        thread_id: ThreadId,
+        task_id: String,
+        /// The provider thread that holds the task; any of the thread's
+        /// when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_thread_id: Option<ProviderThreadId>,
+    },
+    /// Ask the live session which background work still runs and drop what
+    /// it no longer reports (without a live session, nothing runs).
+    #[serde(rename = "background_work.refresh")]
+    BackgroundWorkRefresh { thread_id: ThreadId },
 
     // Checkpoints, provider sessions and lineage
     #[serde(rename = "checkpoint.rollback")]
@@ -332,6 +361,7 @@ impl Command {
             Self::ProjectRename { .. } => "project.rename",
             Self::ProjectReorder { .. } => "project.reorder",
             Self::ProjectRemove { .. } => "project.remove",
+            Self::ProjectCreateScratch { .. } => "project.create_scratch",
             Self::ThreadCreate { .. } => "thread.create",
             Self::ThreadArchive { .. } => "thread.archive",
             Self::ThreadUnarchive { .. } => "thread.unarchive",
@@ -365,6 +395,8 @@ impl Command {
             Self::RuntimeRequestRespond { .. } => "runtime_request.respond",
             Self::UserInputDismiss { .. } => "user_input.dismiss",
             Self::SubagentStop { .. } => "subagent.stop",
+            Self::BackgroundWorkStop { .. } => "background_work.stop",
+            Self::BackgroundWorkRefresh { .. } => "background_work.refresh",
             Self::CheckpointRollback { .. } => "checkpoint.rollback",
             Self::ProviderSessionDetach { .. } => "provider_session.detach",
             Self::ThreadFork { .. } => "thread.fork",
@@ -379,7 +411,8 @@ impl Command {
             Self::ProjectCreate { project_id, .. }
             | Self::ProjectRename { project_id, .. }
             | Self::ProjectReorder { project_id, .. }
-            | Self::ProjectRemove { project_id } => CommandTarget::Project(*project_id),
+            | Self::ProjectRemove { project_id }
+            | Self::ProjectCreateScratch { project_id, .. } => CommandTarget::Project(*project_id),
             Self::ThreadFork {
                 source_thread_id, ..
             }
@@ -419,6 +452,8 @@ impl Command {
             | Self::RuntimeRequestRespond { thread_id, .. }
             | Self::UserInputDismiss { thread_id, .. }
             | Self::SubagentStop { thread_id, .. }
+            | Self::BackgroundWorkStop { thread_id, .. }
+            | Self::BackgroundWorkRefresh { thread_id }
             | Self::CheckpointRollback { thread_id, .. }
             | Self::ProviderSessionDetach { thread_id, .. }
             | Self::ProviderSwitch { thread_id, .. } => CommandTarget::Thread(*thread_id),

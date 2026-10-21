@@ -103,6 +103,21 @@ fn ingest(draft: &mut Draft<'_>, input: &IngestEnvelope) -> Result<WriteGuard, C
             draft.put_provider_session(session.clone());
             Ok(WriteGuard::None)
         }
+        AdapterEvent::AvailableCommandsUpdated { commands } => {
+            let Some(session) = draft
+                .provider_session(input.provider_session_id)
+                .filter(|session| &session.available_commands != commands)
+                .cloned()
+            else {
+                return Ok(WriteGuard::None);
+            };
+            draft.put_provider_session(ProviderSession {
+                available_commands: commands.clone(),
+                updated_at: draft.now,
+                ..session
+            });
+            Ok(WriteGuard::None)
+        }
         AdapterEvent::ProviderThreadUpdated { thread, .. } => provider_thread(draft, input, thread),
         AdapterEvent::ProviderTurnUpdated { turn } => provider_turn(draft, input, turn),
         AdapterEvent::NodeUpdated { node } => {
@@ -657,6 +672,7 @@ fn turn_terminal(
                     draft.effect(Effect::CheckpointCapture {
                         run_id: Some(run.id),
                         scope_id,
+                        turn_start: false,
                     });
                 }
                 None => {

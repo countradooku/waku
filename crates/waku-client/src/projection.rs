@@ -659,6 +659,8 @@ mod tests {
         state.merge_history_page(HistoryPage {
             items: vec![older.clone(), stale],
             runs: Vec::new(),
+            checkpoint_scopes: Vec::new(),
+            checkpoints: Vec::new(),
             next: Some("h1.next".into()),
         });
         assert_eq!(state.ordered_turn_items()[0], &older);
@@ -668,6 +670,8 @@ mod tests {
         state.merge_history_page(HistoryPage {
             items: Vec::new(),
             runs: Vec::new(),
+            checkpoint_scopes: Vec::new(),
+            checkpoints: Vec::new(),
             next: None,
         });
         assert!(!state.has_more_history);

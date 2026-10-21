@@ -432,6 +432,13 @@ export type Command = {
   type: "project.remove";
   projectId: string;
 } | {
+  type: "project.create_scratch";
+  /** The sidebar name; "No project" when absent. */
+  name?: string;
+  projectId: string;
+  /** Names the folder (its slug), like the first prompt would. */
+  prompt?: string;
+} | {
   type: "thread.create";
   importedNativeThread?: ProviderRef;
   interactionMode?: InteractionMode;
@@ -580,6 +587,18 @@ export type Command = {
   type: "subagent.stop";
   runId: string;
   subagentId: NodeId;
+  threadId: string;
+} | {
+  type: "background_work.stop";
+  /**
+   * The provider thread that holds the task; any of the thread's
+   * when absent.
+   */
+  providerThreadId?: string;
+  taskId: string;
+  threadId: string;
+} | {
+  type: "background_work.refresh";
   threadId: string;
 } | {
   type: "checkpoint.rollback";
@@ -1299,6 +1318,15 @@ export type FsBrowseParams = {
   path?: string;
 };
 
+/**
+ * `threads.fullDiff` params: what the thread's live runs changed, from the
+ * first one's turn-start checkpoint to the last completed one's checkpoint.
+ */
+export type FullDiffParams = {
+  ignoreWhitespace?: boolean;
+  threadId: string;
+};
+
 export type GitStatus = {
   ahead: number;
   behind: number;
@@ -1370,6 +1398,12 @@ export type HistoryOrigin = "native" | "waku_import" | (string & {});
  * belong to. `next` continues further back.
  */
 export type HistoryPage = {
+  /**
+   * The checkpoint scopes and checkpoints of `runs`, so a client can
+   * rewind to (or diff) a run it paged in.
+   */
+  checkpointScopes?: Array<CheckpointScope>;
+  checkpoints?: Array<Checkpoint>;
   /** Wire-projected, ascending by `position`. */
   items: Array<TurnItem>;
   next?: string;
@@ -1552,6 +1586,11 @@ export type OrderKey = string;
 export type PendingBackgroundTask = {
   childThreadId?: string;
   description?: string;
+  /**
+   * The command turn item whose output the process streams: subscribe to
+   * `commandOutput{threadId, itemId}` for it.
+   */
+  itemId?: string;
   kind: PendingTaskKind;
   parentTaskId?: string;
   taskId: string;
@@ -1715,6 +1754,12 @@ export type ProviderRetry = {
 };
 
 export type ProviderSession = {
+  /**
+   * Slash commands the live session reported (ACP's
+   * `available_commands_update`, Claude's `system/init`), replaced whole
+   * on every report. Clients merge them with `composer.slashCommands`.
+   */
+  availableCommands?: Array<SessionCommand>;
   capabilities?: Capabilities;
   createdAt: number;
   cwd: string;
@@ -1926,10 +1971,17 @@ export type ReviewDiffParams = {
 };
 
 /**
- * Which changes `review.diff` compares. The last turn of a thread is
- * `threads.turnDiff`.
+ * Which changes a [`ReviewDiff`] compares. `review.diff` takes the working
+ * tree sources; `turn` and `thread` are the sources of `threads.turnDiff`
+ * and `threads.fullDiff` (checkpoint to checkpoint), which `review.diff`
+ * refuses.
  */
 export type ReviewDiffSource = {
+  type: "turn";
+  runId: string;
+} | {
+  type: "thread";
+} | {
   type: "uncommitted";
 } | {
   type: "unstaged";
@@ -2122,6 +2174,13 @@ export type SessionCaps = {
   pending_requests_survive_restart?: boolean;
   provider_switching_via_handoff?: boolean;
   runtime_mode_switch_in_session?: boolean;
+};
+
+/** A slash command a provider session reported. */
+export type SessionCommand = {
+  description?: string;
+  /** Without the leading `/`. */
+  name: string;
 };
 
 export type SessionInfo = {
@@ -2874,6 +2933,16 @@ export type TurnCaps = {
   queued_messages?: boolean;
   steering_by_interrupt_restart?: boolean;
   terminal_status_quality?: Quality;
+};
+
+/**
+ * `threads.turnDiff` params: what run `runId` changed, from the checkpoint
+ * captured before it started to the one it ended with.
+ */
+export type TurnDiffParams = {
+  ignoreWhitespace?: boolean;
+  runId: string;
+  threadId: string;
 };
 
 /** One display row of a thread. */

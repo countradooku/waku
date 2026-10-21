@@ -236,6 +236,8 @@ impl EffectExecutor for DefaultExecutor {
             | Effect::ProviderThreadRollback { .. }
             | Effect::ProviderSessionDetach { .. }
             | Effect::ProviderRuntimeContinue { .. }
+            | Effect::BackgroundWorkStop { .. }
+            | Effect::BackgroundWorkRefresh { .. }
             | Effect::DelegatedTasksStop { .. } => self.provider.execute(claimed, cx),
             Effect::WorkspacePrepare { run_id, strategy } => {
                 let thread = self.thread(claimed, cx)?;
@@ -292,7 +294,11 @@ impl EffectExecutor for DefaultExecutor {
                     ),
                 }
             }
-            Effect::CheckpointCapture { run_id, scope_id } => {
+            Effect::CheckpointCapture {
+                run_id,
+                scope_id,
+                turn_start,
+            } => {
                 let thread = self.thread(claimed, cx)?;
                 let Some(scope) = thread.checkpoint_scopes.get(scope_id) else {
                     return Err(EffectError::Permanent(format!(
@@ -305,13 +311,23 @@ impl EffectExecutor for DefaultExecutor {
                     .filter(|checkpoint| checkpoint.scope_id == *scope_id)
                     .collect::<Vec<_>>();
                 existing.sort_by_key(|checkpoint| checkpoint.ordinal_within_scope);
+                if *turn_start && !existing.is_empty() {
+                    // Already recorded (a replay after a crash).
+                    return Ok(());
+                }
                 let git_ref = checkpoint_ref(thread.id(), *scope_id, existing.len() as u32);
+                // The run's own changes: against its turn-start checkpoint
+                // when that was captured, else against HEAD.
                 let base = existing
-                    .last()
+                    .iter()
+                    .rev()
+                    .find(|checkpoint| checkpoint.status == CheckpointStatus::Ready)
                     .map(|checkpoint| checkpoint.git_ref.as_str());
                 let result = match self.ports.checkpoints.capture(&scope.cwd, &git_ref, base) {
                     Ok(captured) => Ok(captured),
-                    Err(error) if error.retryable && claimed.will_retry => {
+                    // A turn-start capture never holds the provider turn
+                    // behind a retry: the run starts without it.
+                    Err(error) if error.retryable && claimed.will_retry && !turn_start => {
                         return Err(EffectError::Retryable(error.message));
                     }
                     Err(error) => Err(error.message),
@@ -322,6 +338,7 @@ impl EffectExecutor for DefaultExecutor {
                         thread_id: thread.id(),
                         run_id: *run_id,
                         scope_id: *scope_id,
+                        turn_start: *turn_start,
                         result,
                     },
                 )

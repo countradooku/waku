@@ -11,6 +11,7 @@
 //! only on `waku-protocol` for the shared wire and disk types; `waku-core`
 //! implements the effect ports and `waku-daemon` composes everything.
 
+pub mod checkpoints;
 pub mod clock;
 pub mod command;
 pub mod decide;

@@ -956,6 +956,17 @@ impl DriverSession for CodexSession {
         Ok(())
     }
 
+    async fn refresh_background_work(&self) -> DriverResult<()> {
+        let listed = self.background_terminals().await?;
+        let events = self
+            .shared
+            .state
+            .lock()
+            .background_listed(&self.shared, &listed);
+        self.shared.emit_coalesced(events).await;
+        Ok(())
+    }
+
     fn has_pending_background_work(&self) -> bool {
         self.shared.state.lock().has_live_background()
     }

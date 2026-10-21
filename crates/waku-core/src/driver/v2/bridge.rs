@@ -820,6 +820,8 @@ impl Translator {
             AdapterEvent::GoalUpdated { goal } => {
                 out.push(DriverEvent::GoalUpdated(goal.as_ref().map(legacy_goal)));
             }
+            // Drivers with a legacy side channel report commands on it.
+            AdapterEvent::AvailableCommandsUpdated { .. } => {}
             AdapterEvent::AccountUsageUpdated { usage } => {
                 out.push(DriverEvent::PlanUsageUpdated(usage));
             }

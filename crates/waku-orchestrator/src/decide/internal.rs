@@ -43,6 +43,13 @@ pub(super) fn decide(
         InternalCommand::CheckpointCaptured {
             run_id,
             scope_id,
+            turn_start: true,
+            result,
+            ..
+        } => turn_start_captured(draft, *run_id, *scope_id, result)?,
+        InternalCommand::CheckpointCaptured {
+            run_id,
+            scope_id,
             result,
             ..
         } => checkpoint_captured(draft, *run_id, *scope_id, result)?,
@@ -234,6 +241,61 @@ pub(super) fn decide(
             unreachable!("routed to decide::recovery")
         }
     }
+    Ok(())
+}
+
+/// The checkpoint a run's provider turn starts from: ordinal 0 of the run's
+/// root scope, captured before `provider_turn.start` (v7's turn-start
+/// snapshot), so the run's own checkpoint diffs against it and edits made
+/// between turns are attributed to neither. Its `app_run_ordinal` is the
+/// run's ordinal minus one: rolling back to it removes the run and every
+/// later one, so the first message can be rewound (to 0). It shows no
+/// changed-files row and does not complete the run.
+fn turn_start_captured(
+    draft: &mut Draft<'_>,
+    run_id: Option<RunId>,
+    scope_id: CheckpointScopeId,
+    result: &Result<crate::command::CapturedCheckpoint, String>,
+) -> Result<(), CommandError> {
+    let scope = draft
+        .scope(scope_id)
+        .cloned()
+        .ok_or_else(|| CommandError::not_found("checkpoint scope", scope_id))?;
+    // A replayed capture, or one that lost the race with the run's end.
+    if !draft.checkpoints_in_scope(scope_id).is_empty() {
+        return Ok(());
+    }
+    let run = run_id.and_then(|run_id| draft.run(run_id)).cloned();
+    let id = CheckpointId(draft.derived("checkpoint", format!("{scope_id}:0")));
+    let (git_ref, status) = match result {
+        Ok(captured) => (captured.git_ref.clone(), CheckpointStatus::Ready),
+        Err(_) => (
+            checkpoint_ref(draft.thread_id(), scope_id, 0),
+            CheckpointStatus::Error,
+        ),
+    };
+    let now = draft.now;
+    draft.put_checkpoint(Checkpoint {
+        id,
+        thread_id: draft.thread_id(),
+        scope_id,
+        run_id,
+        node_id: scope.node_id,
+        parent_checkpoint_id: None,
+        ordinal_within_scope: 0,
+        app_run_ordinal: scope
+            .advances_app_run_count
+            .then(|| {
+                run.as_ref()
+                    .and_then(|run| run.ordinal)
+                    .map(|ordinal| ordinal.saturating_sub(1))
+            })
+            .flatten(),
+        git_ref,
+        status,
+        files: Vec::new(),
+        captured_at: now,
+    });
     Ok(())
 }
 

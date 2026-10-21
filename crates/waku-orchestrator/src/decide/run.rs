@@ -577,6 +577,14 @@ pub(super) fn start_run(draft: &mut Draft<'_>, run_id: RunId, intent: InputInten
     }
     draft.thread.updated_at = now;
     draft.touch_thread(ThreadChange::Activity);
+    // The turn-start checkpoint, ahead of the provider turn in the thread's
+    // lane: what the run's diff starts from, and what rewinding its message
+    // restores (for the first run, the state before anything ran).
+    draft.effect(Effect::CheckpointCapture {
+        run_id: Some(run.id),
+        scope_id,
+        turn_start: true,
+    });
     draft.effect(Effect::ProviderTurnStart {
         run_id: run.id,
         attempt_id,

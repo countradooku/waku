@@ -305,6 +305,7 @@ pub fn go_running(env: &Env, thread_id: ThreadId, run_id: RunId) -> Option<Inges
                 last_error: None,
                 detached_at: None,
                 detach_reason: None,
+                available_commands: Vec::new(),
             },
         },
     ));
@@ -633,6 +634,7 @@ pub fn turn(env: &Env, thread_id: ThreadId, user: &str, reply: &str) -> RunId {
                 thread_id,
                 run_id: Some(run_id),
                 scope_id,
+                turn_start: false,
                 result: Ok(CapturedCheckpoint {
                     git_ref: format!("refs/waku/t/{thread_id}/{scope_id}/0"),
                     files: Vec::new(),

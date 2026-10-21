@@ -393,6 +393,12 @@ fn legacy_source(source: ReviewDiffSource) -> Result<crate::workspace::ReviewDif
         ReviewDiffSource::Staged => Legacy::Staged,
         ReviewDiffSource::Committed => Legacy::Committed,
         ReviewDiffSource::Branch => Legacy::Branch,
+        ReviewDiffSource::Turn { .. } | ReviewDiffSource::Thread => {
+            return Err(bad_request(
+                "source",
+                "a turn or thread diff is threads.turnDiff or threads.fullDiff",
+            ));
+        }
         ReviewDiffSource::Unknown => {
             return Err(bad_request("source", "unknown review diff source"));
         }
@@ -437,19 +443,37 @@ pub(super) fn review_diff(
     else {
         return Err(unexpected());
     };
-    let size = data.patch.len() as u64;
+    build_review_diff(
+        context,
+        params.source,
+        data.numstat,
+        data.patch,
+        data.complete_context,
+    )
+}
+
+/// A [`ReviewDiff`] from collected Git output: `numstat` parsed, the patch
+/// inline up to [`MAX_INLINE_PATCH_BYTES`] and a blob above it.
+pub(crate) fn build_review_diff(
+    context: &V8Context,
+    source: ReviewDiffSource,
+    numstat: String,
+    patch: String,
+    complete_context: bool,
+) -> Result<ReviewDiff, Error> {
+    let size = patch.len() as u64;
     let patch = if size > MAX_INLINE_PATCH_BYTES {
-        let (reference, _) = super::store_blob(context, "text/plain", data.patch.into_bytes())?;
+        let (reference, _) = super::store_blob(context, "text/plain", patch.into_bytes())?;
         TextPayload::Blob { reference, size }
     } else {
-        TextPayload::Inline { value: data.patch }
+        TextPayload::Inline { value: patch }
     };
     Ok(ReviewDiff {
-        source: params.source,
-        files: parse_numstat(&data.numstat),
-        numstat: data.numstat,
+        source,
+        files: parse_numstat(&numstat),
+        numstat,
         patch,
-        complete_context: data.complete_context,
+        complete_context,
     })
 }
 

@@ -382,6 +382,46 @@ fn collect_review_diff(
     })
 }
 
+/// A checkpoint-to-checkpoint diff (`threads.turnDiff`, `threads.fullDiff`):
+/// `numstat`, and the patch with full context when it is small enough (as
+/// `review.diff` collects it). Both refs must resolve in `cwd`.
+pub struct RefDiff {
+    pub numstat: String,
+    pub patch: String,
+    pub complete_context: bool,
+}
+
+pub fn collect_ref_diff(
+    cwd: &Path,
+    from: &str,
+    to: &str,
+    ignore_whitespace: bool,
+) -> anyhow::Result<RefDiff> {
+    ensure_repository(cwd)?;
+    let resolved = |git_ref: &str| {
+        resolve(cwd, git_ref).ok_or_else(|| anyhow!("checkpoint `{git_ref}` is unavailable"))
+    };
+    let range = DiffRange {
+        from: resolved(from)?,
+        to: resolved(to)?,
+    };
+    let numstat = diff_output(cwd, &range, &["--numstat"], ignore_whitespace)?;
+    let hydrated = diff_output(cwd, &range, &["--unified=2147483647"], ignore_whitespace)?;
+    let (patch, complete_context) = if hydrated.len() <= MAX_HYDRATED_PATCH_BYTES {
+        (hydrated, true)
+    } else {
+        (
+            diff_output(cwd, &range, &["--unified=3"], ignore_whitespace)?,
+            false,
+        )
+    };
+    Ok(RefDiff {
+        numstat,
+        patch,
+        complete_context,
+    })
+}
+
 fn resolve_diff_range(cwd: &Path, source: ReviewDiffSource) -> anyhow::Result<DiffRange> {
     let head = resolve(cwd, "HEAD").unwrap_or_else(|| EMPTY_TREE.to_owned());
     Ok(match source {

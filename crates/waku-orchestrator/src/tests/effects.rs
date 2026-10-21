@@ -174,6 +174,7 @@ fn restart_cancels_process_bound_and_requeues_replay_safe_effects() {
             Effect::CheckpointCapture {
                 run_id: Some(run),
                 scope_id: fresh(),
+                turn_start: false,
             },
             Effect::RuntimeRequestRespond {
                 provider_session_id: fresh(),
@@ -205,9 +206,10 @@ fn restart_cancels_process_bound_and_requeues_replay_safe_effects() {
         .filter(|(_, _, status)| *status == EffectStatus::Running)
         .map(|(_, kind, _)| kind)
         .collect::<Vec<_>>();
+    // The thread lane starts with the run's turn-start checkpoint.
     assert_eq!(
         running_before,
-        ["provider_turn.start", "thread_title.generate"]
+        ["checkpoint.capture", "thread_title.generate"]
     );
 
     env.reopen();
@@ -228,8 +230,16 @@ fn restart_cancels_process_bound_and_requeues_replay_safe_effects() {
     );
     // Replay-safe and running: back to pending.
     assert_eq!(by_type("thread_title.generate").2, EffectStatus::Pending);
-    // Replay-safe and pending: untouched.
     assert_eq!(by_type("checkpoint.capture").2, EffectStatus::Pending);
+    // Replay-safe and pending: untouched.
+    assert_eq!(
+        outbox
+            .iter()
+            .filter(|(_, kind, status)| kind == "checkpoint.capture"
+                && *status == EffectStatus::Pending)
+            .count(),
+        2
+    );
     assert_eq!(by_type("terminal.cleanup").2, EffectStatus::Pending);
     assert_eq!(
         report.cancelled,
@@ -238,7 +248,13 @@ fn restart_cancels_process_bound_and_requeues_replay_safe_effects() {
             by_type("runtime_request.respond").0
         ]
     );
-    assert_eq!(report.requeued, vec![by_type("thread_title.generate").0]);
+    assert_eq!(
+        report.requeued,
+        vec![
+            by_type("checkpoint.capture").0,
+            by_type("thread_title.generate").0
+        ]
+    );
     let reason: String = env
         .orchestrator
         .store()

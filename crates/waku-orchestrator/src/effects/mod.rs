@@ -97,6 +97,21 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<RunId>,
         scope_id: CheckpointScopeId,
+        /// The turn-start checkpoint, captured before the run's provider
+        /// turn starts (ordinal 0 of its scope); otherwise the checkpoint
+        /// that ends the run.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        turn_start: bool,
+    },
+    #[serde(rename = "background_work.stop")]
+    BackgroundWorkStop {
+        provider_session_id: ProviderSessionId,
+        provider_thread_id: ProviderThreadId,
+        task_id: String,
+    },
+    #[serde(rename = "background_work.refresh")]
+    BackgroundWorkRefresh {
+        provider_session_id: ProviderSessionId,
     },
     #[serde(rename = "provider_session.detach")]
     ProviderSessionDetach {
@@ -149,10 +164,12 @@ pub enum EffectType {
     AttachmentCleanup,
     WorktreeCleanup,
     DelegatedTasksStop,
+    BackgroundWorkStop,
+    BackgroundWorkRefresh,
 }
 
 impl EffectType {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::WorkspacePrepare,
         Self::ProviderTurnStart,
         Self::ProviderTurnSteer,
@@ -168,6 +185,8 @@ impl EffectType {
         Self::AttachmentCleanup,
         Self::WorktreeCleanup,
         Self::DelegatedTasksStop,
+        Self::BackgroundWorkStop,
+        Self::BackgroundWorkRefresh,
     ];
 
     /// The provider-control effects a stop or delete cancels.
@@ -197,6 +216,8 @@ impl EffectType {
             Self::AttachmentCleanup => "attachment.cleanup",
             Self::WorktreeCleanup => "worktree.cleanup",
             Self::DelegatedTasksStop => "delegated_tasks.stop",
+            Self::BackgroundWorkStop => "background_work.stop",
+            Self::BackgroundWorkRefresh => "background_work.refresh",
         }
     }
 
@@ -215,6 +236,8 @@ impl EffectType {
                 | Self::ProviderTurnInterrupt
                 | Self::ProviderTurnRestart
                 | Self::RuntimeRequestRespond
+                | Self::BackgroundWorkStop
+                | Self::BackgroundWorkRefresh
         )
     }
 
@@ -261,6 +284,8 @@ impl Effect {
             Self::AttachmentCleanup { .. } => EffectType::AttachmentCleanup,
             Self::WorktreeCleanup { .. } => EffectType::WorktreeCleanup,
             Self::DelegatedTasksStop { .. } => EffectType::DelegatedTasksStop,
+            Self::BackgroundWorkStop { .. } => EffectType::BackgroundWorkStop,
+            Self::BackgroundWorkRefresh { .. } => EffectType::BackgroundWorkRefresh,
         }
     }
 

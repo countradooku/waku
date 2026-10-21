@@ -125,6 +125,11 @@ fn decide_client(
         | ProjectRename { .. }
         | ProjectReorder { .. }
         | ProjectRemove { .. } => project::decide(cx, command),
+        // The daemon host creates the folder and dispatches `project.create`
+        // in its place; the orchestrator never touches the filesystem.
+        ProjectCreateScratch { .. } => Err(CommandError::unsupported(
+            "project.create_scratch without a daemon host",
+        )),
         ThreadCreate { .. } => thread::create(cx, envelope),
         QueuedRunReorder { .. } | QueuedRunEdit { .. } | QueuedRunPromoteToSteer { .. } => Err(
             CommandError::unsupported(format!("{} (Phase 3)", command.command_type())),
@@ -147,6 +152,8 @@ fn decide_client(
                 RuntimeRequestRespond { .. }
                 | UserInputDismiss { .. }
                 | SubagentStop { .. }
+                | BackgroundWorkStop { .. }
+                | BackgroundWorkRefresh { .. }
                 | CheckpointRollback { .. }
                 | ProviderSessionDetach { .. } => request::decide_client(&mut draft, envelope)?,
                 _ => thread::decide_lifecycle(&mut draft, envelope)?,

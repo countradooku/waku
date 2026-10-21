@@ -189,6 +189,7 @@ fn step(
                         thread_id: thread,
                         run_id: Some(run),
                         scope_id: scope,
+                        turn_start: false,
                         result,
                     },
                 );

@@ -39,7 +39,9 @@ pub(crate) fn handle(
         | Method::ThreadsTurnItem(_)
         | Method::ThreadsArchived(_)
         | Method::ThreadsSearch(_)
-        | Method::ThreadsFind(_)) => {
+        | Method::ThreadsFind(_)
+        | Method::ThreadsTurnDiff(_)
+        | Method::ThreadsFullDiff(_)) => {
             super::orchestration::handle(context, method).expect("an orchestration method")
         }
         Method::Unknown { name } => Err(Error::new(

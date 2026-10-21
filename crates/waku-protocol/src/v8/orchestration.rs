@@ -12,7 +12,7 @@ use super::{Scope, StreamCursor};
 use crate::orchestration::{
     AppThread, Checkpoint, CheckpointScope, Command, CommandId, ContextHandoff, ContextTransfer,
     DomainEvent, ExecutionNode, Message, Plan, Project, ProjectId, ProviderSession, ProviderThread,
-    ProviderTurn, Run, RunAttempt, RuntimeRequest, Subagent, ThreadId, TurnItem, TurnItemId,
+    ProviderTurn, Run, RunAttempt, RunId, RuntimeRequest, Subagent, ThreadId, TurnItem, TurnItemId,
     WorkspaceStrategy,
 };
 
@@ -253,8 +253,37 @@ pub struct HistoryPage {
     pub items: Vec<TurnItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<Run>,
+    /// The checkpoint scopes and checkpoints of `runs`, so a client can
+    /// rewind to (or diff) a run it paged in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoint_scopes: Vec<CheckpointScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<Checkpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<HistoryCursor>,
+}
+
+/// `threads.turnDiff` params: what run `runId` changed, from the checkpoint
+/// captured before it started to the one it ended with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct TurnDiffParams {
+    pub thread_id: ThreadId,
+    pub run_id: RunId,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ignore_whitespace: bool,
+}
+
+/// `threads.fullDiff` params: what the thread's live runs changed, from the
+/// first one's turn-start checkpoint to the last completed one's checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct FullDiffParams {
+    pub thread_id: ThreadId,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ignore_whitespace: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
