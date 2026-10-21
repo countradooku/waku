@@ -142,7 +142,7 @@ pub struct SettlementFacts {
 impl SettlementFacts {
     /// Snoozed and not woken early by a finished or failed run.
     pub fn snoozed(&self, now: Timestamp) -> bool {
-        if !self.snoozed_until.is_some_and(|until| until > now) {
+        if self.snoozed_until.is_none_or(|until| until <= now) {
             return false;
         }
         let completed_after_snooze = matches!(
