@@ -31,6 +31,7 @@ pub mod acp_session;
 pub mod amp_session;
 pub mod attachments;
 pub mod blob_store;
+pub mod blob_sweep;
 pub mod checkpoint;
 mod claude_metadata;
 pub mod claude_session;

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
+use uuid::Uuid;
 use waku_protocol::v8::{
     Ack, CommandScope, ComposerDraft, ComposerDrafts, ComposerSlashCommandsParams, DraftAttachment,
     DraftChange, DraftTarget, DraftsApplyParams, DraftsItem, DraftsRevision, DraftsSnapshot,
@@ -15,8 +16,8 @@ use waku_protocol::v8::{
 };
 
 use super::{
-    Domain, absolute_path, bad_request, call, content_revision, display_path, provider_kind,
-    seconds_to_ms, unexpected, workspace,
+    Domain, absolute_path, bad_request, call, content_revision, display_path, not_found,
+    provider_kind, seconds_to_ms, unexpected, workspace,
 };
 use crate::persistence::{
     ComposerDraft as LegacyDraft, ComposerDraftAttachment, ComposerDraftChange,
@@ -26,7 +27,7 @@ use crate::protocol::{Command, ResponsePayload};
 use crate::v8::V8Context;
 use crate::v8::connection::StreamSink;
 use crate::v8::methods::root_path;
-use crate::v8::orchestration::projects;
+use crate::v8::orchestration::{live_project, live_threads, projects};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
 pub(super) fn slash_commands(
@@ -226,17 +227,49 @@ fn wire_drafts(drafts: LegacyDrafts) -> ComposerDrafts {
     }
 }
 
-fn load_drafts(context: &V8Context) -> Result<DraftsSnapshot, Error> {
+fn stored_drafts(context: &V8Context) -> Result<LegacyDrafts, Error> {
     match call(context, Command::LoadComposerDrafts, Domain::General)? {
-        ResponsePayload::ComposerDrafts { drafts } => {
-            let drafts = wire_drafts(drafts);
-            Ok(DraftsSnapshot {
-                revision: content_revision(&drafts),
-                drafts,
-            })
-        }
+        ResponsePayload::ComposerDrafts { drafts } => Ok(drafts),
         other => Err(unexpected(&other)),
     }
+}
+
+/// The keys of `drafts` that name no live orchestration project or thread
+/// (D6: drafts are keyed by orchestration ids, never legacy session ids):
+/// projects first, then threads.
+fn stale_keys(context: &V8Context, drafts: &LegacyDrafts) -> Result<(Vec<Uuid>, Vec<Uuid>), Error> {
+    let mut projects = Vec::new();
+    for &project_id in drafts.new_sessions.keys() {
+        if !live_project(context, project_id)? {
+            projects.push(project_id);
+        }
+    }
+    let live = live_threads(context, drafts.sessions.keys().copied())?;
+    let threads = drafts
+        .sessions
+        .keys()
+        .filter(|thread_id| !live.contains(thread_id))
+        .copied()
+        .collect();
+    Ok((projects, threads))
+}
+
+/// The drafts of live projects and threads; stale ones are pruned by the
+/// next `drafts.apply`.
+fn load_drafts(context: &V8Context) -> Result<DraftsSnapshot, Error> {
+    let mut stored = stored_drafts(context)?;
+    let (projects, threads) = stale_keys(context, &stored)?;
+    for project_id in projects {
+        stored.new_sessions.remove(&project_id);
+    }
+    for thread_id in threads {
+        stored.sessions.remove(&thread_id);
+    }
+    let drafts = wire_drafts(stored);
+    Ok(DraftsSnapshot {
+        revision: content_revision(&drafts),
+        drafts,
+    })
 }
 
 pub(super) fn drafts(context: &V8Context) -> Result<DraftsSnapshot, Error> {
@@ -264,17 +297,30 @@ pub(super) fn apply_drafts(
     let mut legacy = Vec::with_capacity(params.changes.len());
     let mut changes = Vec::with_capacity(params.changes.len());
     for change in params.changes {
-        let target = match change.target {
-            DraftTarget::NewThread { project_id } => ComposerDraftTarget::NewSession { project_id },
-            DraftTarget::Thread { thread_id } => ComposerDraftTarget::Session {
-                session_id: thread_id,
-            },
-            DraftTarget::Unknown => return Err(bad_request("changes.target", "unknown target")),
-        };
         // An empty draft is a removal.
         let draft = change
             .draft
             .filter(|draft| !draft.text.is_empty() || !draft.attachments.is_empty());
+        // The storage keeps the legacy names; the keys are orchestration
+        // ids. Only a live project or thread gets a draft; removing one of
+        // anything else is a no-op.
+        let target = match change.target {
+            DraftTarget::NewThread { project_id } => {
+                if draft.is_some() && !live_project(context, project_id)? {
+                    return Err(not_found("project", project_id.to_string()));
+                }
+                ComposerDraftTarget::NewSession { project_id }
+            }
+            DraftTarget::Thread { thread_id } => {
+                if draft.is_some() && live_threads(context, [thread_id])?.is_empty() {
+                    return Err(not_found("thread", thread_id.to_string()));
+                }
+                ComposerDraftTarget::Session {
+                    session_id: thread_id,
+                }
+            }
+            DraftTarget::Unknown => return Err(bad_request("changes.target", "unknown target")),
+        };
         legacy.push(ComposerDraftChange {
             target,
             draft: draft.clone().map(legacy_draft),
@@ -284,6 +330,23 @@ pub(super) fn apply_drafts(
             draft,
         });
     }
+    // Prune the drafts of removed projects and deleted threads (and any
+    // legacy session ids) on the way.
+    let (stale_projects, stale_threads) = stale_keys(context, &stored_drafts(context)?)?;
+    legacy.extend(
+        stale_projects
+            .into_iter()
+            .map(|project_id| ComposerDraftTarget::NewSession { project_id })
+            .chain(
+                stale_threads
+                    .into_iter()
+                    .map(|session_id| ComposerDraftTarget::Session { session_id }),
+            )
+            .map(|target| ComposerDraftChange {
+                target,
+                draft: None,
+            }),
+    );
     call(
         context,
         Command::ApplyComposerDraftChanges { changes: legacy },

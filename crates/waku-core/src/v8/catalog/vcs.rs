@@ -19,7 +19,7 @@ use super::{Domain, backend_error, bad_request, display_path, now_ms, workspace}
 use crate::v8::V8Context;
 use crate::v8::connection::StreamSink;
 use crate::v8::methods::{project_not_found, root_path};
-use crate::v8::orchestration::projects;
+use crate::v8::orchestration::{live_threads, projects};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
 /// Tells `vcsStatus` streams that this daemon changed a repository, so they
@@ -173,6 +173,12 @@ pub(super) fn create_worktree(
         .into_iter()
         .find(|project| project.id.0 == params.project_id)
         .ok_or_else(|| project_not_found(params.project_id))?;
+    // The worktree is named for an orchestration thread (D6), when given.
+    if let Some(thread_id) = params.thread_id
+        && live_threads(context, [thread_id])?.is_empty()
+    {
+        return Err(super::not_found("thread", thread_id.to_string()));
+    }
     let result = workspace(
         context,
         WorkspaceOperation::CreateWorktree {

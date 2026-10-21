@@ -42,8 +42,8 @@ fn orchestration(
     thread_id: Uuid,
 ) -> Arc<crate::Orchestration> {
     use waku_protocol::orchestration::{
-        Actor, Command as OrchestrationCommand, CommandEnvelope, CommandId, CreationSource,
-        InteractionMode, ProjectId, RuntimeMode, ThreadId, WorkspaceStrategy,
+        Command as OrchestrationCommand, InteractionMode, ProjectId, RuntimeMode, ThreadId,
+        WorkspaceStrategy,
     };
     let orchestrator = waku_orchestrator::Orchestrator::open(
         waku_orchestrator::OrchestratorConfig::new(root.join("state.sqlite")),
@@ -54,16 +54,7 @@ fn orchestration(
         },
     )
     .unwrap();
-    let dispatch = |id: &str, command| {
-        orchestrator
-            .dispatch(CommandEnvelope {
-                command_id: CommandId::new(id).unwrap(),
-                issued_by: Actor::User,
-                source: CreationSource::Desktop,
-                command,
-            })
-            .unwrap();
-    };
+    let dispatch = |id: &str, command| dispatch(&orchestrator, id, command);
     dispatch(
         "project-demo",
         OrchestrationCommand::ProjectCreate {
@@ -87,6 +78,23 @@ fn orchestration(
         },
     );
     crate::Orchestration::new(orchestrator, Default::default())
+}
+
+/// Dispatches `command` as the user.
+fn dispatch(
+    orchestrator: &waku_orchestrator::Orchestrator,
+    id: &str,
+    command: waku_protocol::orchestration::Command,
+) {
+    use waku_protocol::orchestration::{Actor, CommandEnvelope, CommandId, CreationSource};
+    orchestrator
+        .dispatch(CommandEnvelope {
+            command_id: CommandId::new(id).unwrap(),
+            issued_by: Actor::User,
+            source: CreationSource::Desktop,
+            command,
+        })
+        .unwrap();
 }
 
 struct Daemon {
@@ -567,12 +575,21 @@ fn vcs_status_stage_commit_push_pull_and_worktrees() {
     assert_eq!(remote_code(missing).code, ErrorCode::Vcs);
 
     daemon.use_test_worktrees(&client);
+    // A worktree is named for an orchestration thread.
+    let unknown = client.call::<method::VcsCreateWorktree>(VcsCreateWorktreeParams {
+        project_id: daemon.project_id,
+        base_ref: Some("main".into()),
+        branch_hint: "try the idea".into(),
+        thread_id: Some(Uuid::new_v4()),
+        op_id: op(),
+    });
+    assert_eq!(remote_code(unknown).code, ErrorCode::NotFound);
     let worktree = client
         .call::<method::VcsCreateWorktree>(VcsCreateWorktreeParams {
             project_id: daemon.project_id,
             base_ref: Some("main".into()),
             branch_hint: "try the idea".into(),
-            thread_id: None,
+            thread_id: Some(daemon.thread_id),
             op_id: op(),
         })
         .unwrap();
@@ -1073,6 +1090,124 @@ fn drafts_apply_with_revisions_and_stream_changes() {
             .threads
             .is_empty()
     );
+
+    // Keys are orchestration ids: only a live project or thread gets a
+    // draft (D6: no legacy session ids).
+    let text = |text: &str| {
+        Some(ComposerDraft {
+            text: text.into(),
+            attachments: Vec::new(),
+        })
+    };
+    let unknown = client.call::<method::DraftsApply>(DraftsApplyParams {
+        base_revision: None,
+        changes: vec![DraftChange {
+            target: DraftTarget::Thread {
+                thread_id: Uuid::new_v4(),
+            },
+            draft: text("lost"),
+        }],
+        op_id: op(),
+    });
+    assert_eq!(remote_code(unknown).code, ErrorCode::NotFound);
+    client
+        .call::<method::DraftsApply>(DraftsApplyParams {
+            base_revision: None,
+            changes: vec![
+                DraftChange {
+                    target: DraftTarget::NewThread {
+                        project_id: daemon.project_id,
+                    },
+                    draft: text("next task"),
+                },
+                DraftChange {
+                    target: DraftTarget::Thread { thread_id: thread },
+                    draft: text("follow-up"),
+                },
+            ],
+            op_id: op(),
+        })
+        .unwrap();
+    // A deleted thread's draft is gone.
+    client
+        .call::<method::OrchestrationDispatch>(waku_protocol::v8::orchestration::DispatchParams {
+            command_id: waku_protocol::orchestration::CommandId::new("delete-thread").unwrap(),
+            command: waku_protocol::v8::orchestration::DispatchCommand(
+                waku_protocol::orchestration::Command::ThreadDelete {
+                    thread_id: waku_protocol::orchestration::ThreadId(thread),
+                },
+            ),
+        })
+        .unwrap();
+    let current = client.call::<method::DraftsGet>(NoParams {}).unwrap();
+    assert!(current.drafts.threads.is_empty());
+    assert_eq!(
+        current.drafts.new_threads[&daemon.project_id].text,
+        "next task"
+    );
+}
+
+#[test]
+fn provider_sessions_leave_out_conversations_a_live_thread_holds() {
+    use waku_protocol::orchestration::{
+        Command as OrchestrationCommand, DriverKind, InteractionMode, ProjectId, ProviderRef,
+        RuntimeMode, ThreadId, WorkspaceStrategy,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let project_id = Uuid::new_v4();
+    let orchestration = orchestration(root.path(), project_id, root.path(), Uuid::new_v4());
+    let orchestrator = &orchestration.orchestrator;
+    let imported = ThreadId(Uuid::new_v4());
+    dispatch(
+        orchestrator,
+        "import",
+        OrchestrationCommand::ThreadCreate {
+            thread_id: imported,
+            project_id: ProjectId(project_id),
+            title: None,
+            model_selection: ModelSelection::new("codex"),
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
+            workspace: WorkspaceStrategy::Root { branch: None },
+            imported_native_thread: Some(ProviderRef::strong(DriverKind::Codex, "native-1")),
+        },
+    );
+    let backend = WakuBackend::new(
+        DaemonSettingsStore::open(root.path().join("settings.json")).unwrap(),
+        StateStore::daemon(root.path().join("app.db")),
+    )
+    .unwrap();
+    let context = crate::v8::V8Context::new(
+        TOKEN.into(),
+        crate::v8::BackendHandle::new(Arc::new(backend), crate::server::test_event_sink()),
+        crate::v8::SettingsBus::default(),
+        ShutdownSignal::new(),
+    )
+    .with_orchestration(Some(orchestration.clone()));
+    let codex = crate::model::ProviderKind::Codex;
+    assert_eq!(
+        super::providers::imported_native_ids(&context, codex).unwrap(),
+        std::collections::HashSet::from(["native-1".to_owned()])
+    );
+    assert!(
+        super::providers::imported_native_ids(&context, crate::model::ProviderKind::Claude)
+            .unwrap()
+            .is_empty()
+    );
+    // Deleting the thread offers the conversation again.
+    dispatch(
+        orchestrator,
+        "delete",
+        OrchestrationCommand::ThreadDelete {
+            thread_id: imported,
+        },
+    );
+    assert!(
+        super::providers::imported_native_ids(&context, codex)
+            .unwrap()
+            .is_empty()
+    );
+    orchestration.shutdown();
 }
 
 #[test]

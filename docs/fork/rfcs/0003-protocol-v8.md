@@ -595,7 +595,14 @@ Input is sent as DATA frames on an `interactive` terminal subscription's channel
 > - **Settings and storage.** `Settings` gains `storage: StorageSettings{worktreesDirectory?, previousWorktreesDirectories, worktreeCleanup}` (#62). `settings.update`'s `SettingsPatch` replaces whole fields (`providerBinaryOverrides` is the whole map); `storage` paths are validated (absolute, `~` expanded, never the filesystem root) and moving the folder keeps the old one in `previousWorktreesDirectories`. Cleanup times are milliseconds.
 > - **`vcsStatus`** has no filesystem watcher yet: while subscribed it re-reads the repository every 2 s, at most once a second, and at once after this daemon's own `vcs.*` mutations; it sends a `status` only when it changed and ends with the error when the root is not a repository.
 > - **`computerUse.permissions{prompt: true}`** from anything but the local socket answers `forbidden`.
-> - **Not on the wire.** `SweepBlobs` has no method; until the daemon schedules the sweep itself, nothing replaces the desktop's call once it leaves v7.
+> - **Not on the wire.** `SweepBlobs` has no method: the daemon schedules blob sweeps itself (below).
+
+> **Changed by merging the catalog into the #55 cut-over** (D6: no compatibility with upstream Waku).
+> - **Projects and threads come from the orchestrator** everywhere, never from the legacy task state. `RootRef::project` and `RootRef::thread` resolve through it (a thread's worktree, else its project's path), and so do the project ids of `skills.list`, `usage.history` and `vcs.createWorktree`. A server composed without an orchestrator answers project and thread roots, `drafts.*`, the `drafts` stream and `providerSessions.list` with `unsupported`.
+> - **Drafts** are keyed by orchestration ids: `newThread{projectId}` by a project that is not removed, `thread{threadId}` by a thread that is not deleted. Setting a draft for any other id answers `notFound`; removing one is a no-op. Drafts of removed projects, deleted threads (and any legacy session id) are left out of `drafts.get`, the `drafts` stream and the revision, and are pruned from storage by the next `drafts.apply`.
+> - **`vcs.createWorktree{threadId}`** must name a thread that is not deleted (`notFound` otherwise).
+> - **`providerSessions.list`** leaves out the conversations that a thread which is not deleted already holds: the orchestrator's provider threads with the instance's driver and that native id. `threadImport` is not served yet; until it is, a client adopts a listed conversation with `thread.create{importedNativeThread: {driver, nativeId}}`, and `resumeCursor` is what `threadImport` will take back unchanged.
+> - **Blob sweeps are scheduled by the daemon** (`waku_core::blob_sweep`), replacing the desktop's v7 `SweepBlobs`. A sweep deletes blobs and attachment trees older than the one-hour grace period that nothing references: the turn items and messages of threads that are not deleted, the composer drafts, and, until v7 is deleted, the legacy sessions the desktop still writes. One thread sleeps until a sweep is due: once 5 minutes after startup, an hour and a minute after a blob or attachment is stored (so an upload nothing came to reference is reclaimed), and a minute after references are released (a thread deleted or rolled back, a v7 `SweepBlobs`). Draft edits request nothing: a draft is cleared on every send, and a discarded draft's attachments were stored first, so the sweep after their store reclaims them. Requests coalesce into the earliest due time and sweeps are at least 10 minutes apart; nothing polls. Under the daemon host, v7 `SweepBlobs` only requests a sweep, because sweeping the legacy references alone would delete what the orchestrator holds. Images the wire projection moves out of tool output are referenced by no row, so they too go after the grace period; a client that needs one again re-reads the turn item, which stores it again.
 
 ### 5.3 Orchestration commands
 
@@ -926,7 +933,7 @@ Every v7 message, command, operation, response, event and constant appears below
 | `ReadBlob{reference}` | `blobDownload` stream (or `blobs.stat.localPath` locally) |
 | `ReadAttachment{reference, path}` | `blobDownload` stream (`path`) |
 | `LocateBlob{reference}`, `LocateAttachment{reference, path}` (added in v7 by #22) | `blobs.stat{reference, path?}.localPath` (local socket only) |
-| `SweepBlobs` | Removed from the wire; daemon effect `attachment.cleanup` |
+| `SweepBlobs` | Removed from the wire; daemon-scheduled sweeps (§5.2 notes), and the `attachment.cleanup` effect for a cancelled queued run's attachments |
 | `GetWorktreeCleanupStatus`, `RunWorktreeCleanup` (added in v7 by #62) | `storage.worktreeCleanupStatus`, `storage.runWorktreeCleanup` |
 | `ForkSessionFromResponse{turnCount}` | `dispatch threadFork{throughRunOrdinal}` |
 | `RewindSessionToMessage{turnCount}` | `dispatch checkpointRollback{restoreFiles: true}`, then `messageDispatch` of the edited text |
@@ -1118,7 +1125,7 @@ commands! { "messageDispatch" => MessageDispatch(MessageDispatchCommand), scope 
 5. **Removal.** Remove the legacy endpoint, the `legacy` module, `SaveTaskState`, the duplicate `event_to_wire` in `daemon.rs`, and the ts-rs export.
 
 **Existing data and other clients:**
-- **Persisted state.** No persisted state uses the wire format. `waku-blob:` and `waku-attachment:` references stay valid. Composer drafts are migrated by the daemon.
+- **Persisted state.** No persisted state uses the wire format. `waku-blob:` and `waku-attachment:` references stay valid. Composer drafts are not migrated (D6): their keys are orchestration project and thread ids, and drafts under any other id are pruned (§5.2 notes).
 - **Expo app.** `apps/mobile` stays on legacy and stops working against the fork's daemon at step 5. That is accepted under D2. Native apps arrive later via codegen.
 - **Version skew.** A local daemon and the desktop ship together. A remote daemon with a different major answers `rejected{versionUnsupported}`, and the client asks the user to update one side.
 

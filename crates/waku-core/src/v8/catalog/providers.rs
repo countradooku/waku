@@ -445,11 +445,14 @@ pub(super) fn provider_sessions(
         .limit
         .unwrap_or(MAX_PROVIDER_SESSIONS)
         .min(MAX_PROVIDER_SESSIONS) as usize;
+    // Conversations a live thread already holds are not offered again; ask
+    // for enough more to fill `limit` after leaving them out.
+    let imported = imported_native_ids(context, kind)?;
     let sessions = match call(
         context,
         Command::ListProviderSessions {
             provider: kind,
-            limit,
+            limit: (limit + imported.len()).min(MAX_PROVIDER_SESSIONS as usize),
         },
         Domain::Provider,
     )? {
@@ -458,6 +461,8 @@ pub(super) fn provider_sessions(
     };
     sessions
         .into_iter()
+        .filter(|session| !imported.contains(session.cursor.native_id()))
+        .take(limit)
         .map(|session| {
             Ok(ProviderSessionSummary {
                 instance_id: kind.id().into(),
@@ -472,6 +477,30 @@ pub(super) fn provider_sessions(
             })
         })
         .collect()
+}
+
+/// The native ids of `kind`'s conversations that a thread which is not
+/// deleted already holds, from the orchestrator's provider threads.
+pub(super) fn imported_native_ids(
+    context: &V8Context,
+    kind: crate::model::ProviderKind,
+) -> Result<std::collections::HashSet<String>, Error> {
+    let orchestrator = crate::v8::orchestration::orchestrator(context)?;
+    let driver = waku_protocol::orchestration::DriverKind::from(kind);
+    orchestrator.reader().with(|connection| {
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT p.native_id FROM p_provider_threads p
+                   JOIN p_threads t ON t.thread_id = p.thread_id
+                  WHERE p.driver = ?1 AND p.native_id IS NOT NULL
+                    AND t.deleted_at IS NULL",
+            )
+            .map_err(super::internal)?;
+        let rows = statement
+            .query_map([driver.as_str()], |row| row.get::<_, String>(0))
+            .map_err(super::internal)?;
+        rows.collect::<Result<_, _>>().map_err(super::internal)
+    })
 }
 
 fn legacy_window(window: UsageWindow) -> Result<crate::usage_history::UsageWindow, Error> {
