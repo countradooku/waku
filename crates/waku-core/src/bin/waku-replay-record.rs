@@ -3,19 +3,25 @@
 //! ```text
 //! cargo run -p waku-core --bin waku-replay-record -- \
 //!   --provider fake --scenario simple [--fixtures DIR] [--out PATH] [--renumber-ids]
+//!   [--binary PATH] [--cli-version V] [--service-url URL]
 //! ```
 //!
-//! Runs `<fixtures>/<scenario>/input.json` against the provider through its
-//! `DriverV2`, writes `<fixtures>/<scenario>/<provider>.ndjson` sanitized,
-//! fails closed on any leaked secret, then replays the file and keeps it only
-//! if replay passes. Only drivers ported to `DriverV2` can record; today that
-//! is the in-repo `fake` provider, and each port (#46–#52) adds its own.
+//! Runs `<fixtures>/<scenario>/input.json` (or `input.<provider>.json`)
+//! against the provider through its `DriverV2`, writes
+//! `<fixtures>/<scenario>/<provider>.ndjson` sanitized, fails closed on any
+//! leaked secret, then replays the file and keeps it only if replay passes.
+//! Only drivers ported to `DriverV2` can record: the in-repo `fake`, and the
+//! HTTP drivers `opencode` and `deepseek`, which record against a running
+//! service given by `--service-url` (OpenCode: `http://opencode:<password>@
+//! 127.0.0.1:<port>`; DeepSeek: a `dsh web` URL) so neither the recording
+//! nor its replay check discovers or starts one.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
+use waku_core::driver::deepseek::{DEEPSEEK_PROTOCOL, DEEPSEEK_PROVIDER, DeepSeekDriver};
 use waku_core::driver::opencode::{OPENCODE_PROTOCOL, OPENCODE_PROVIDER, OpenCodeDriver};
 use waku_core::driver::v2::fake::{
     FAKE_PROTOCOL, FAKE_PROVIDER, FakeDriver, FakeProfile, fake_instance,
@@ -77,6 +83,18 @@ fn target(args: &Args) -> Option<Target> {
                 driver: Arc::new(OpenCodeDriver),
                 instance,
                 protocol: OPENCODE_PROTOCOL,
+                live: Arc::new(ProcessTransportFactory),
+            }
+        }
+        DEEPSEEK_PROVIDER => {
+            let mut instance = InstanceConfig::new(DEEPSEEK_PROVIDER, DriverKind::DeepSeek);
+            instance.binary = args.binary.clone().unwrap_or_else(|| "dsh".into());
+            instance.cli_version = args.cli_version.clone();
+            instance.extra = serde_json::json!({ "baseUrl": service(DEEPSEEK_PROVIDER)? });
+            Target {
+                driver: Arc::new(DeepSeekDriver),
+                instance,
+                protocol: DEEPSEEK_PROTOCOL,
                 live: Arc::new(ProcessTransportFactory),
             }
         }

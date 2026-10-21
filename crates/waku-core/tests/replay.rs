@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+use waku_core::driver::deepseek::{DEEPSEEK_PROVIDER, DeepSeekDriver, deepseek_replay_instance};
 use waku_core::driver::opencode::{OPENCODE_PROVIDER, OpenCodeDriver, opencode_replay_instance};
 use waku_core::driver::v2::fake::{
     FAKE_PROVIDER, FakeDriver, FakeProfile, fake_capabilities, fake_instance,
@@ -55,6 +56,7 @@ fn driver_for(provider: &str) -> Arc<dyn DriverV2> {
     match provider {
         FAKE_PROVIDER => Arc::new(FakeDriver),
         OPENCODE_PROVIDER => Arc::new(OpenCodeDriver),
+        DEEPSEEK_PROVIDER => Arc::new(DeepSeekDriver),
         other => panic!("no DriverV2 for {other} yet"),
     }
 }
@@ -65,6 +67,7 @@ fn instance_of(provider: &str) -> InstanceConfig {
     match provider {
         FAKE_PROVIDER => fake_instance(FakeProfile::default()),
         OPENCODE_PROVIDER => opencode_replay_instance(),
+        DEEPSEEK_PROVIDER => deepseek_replay_instance(),
         other => panic!("no DriverV2 for {other} yet"),
     }
 }
@@ -674,7 +677,7 @@ fn every_fixture_has_assertions() {
     let covered_by_provider = |provider: &str| -> &'static [&'static str] {
         match provider {
             OPENCODE_PROVIDER => OPENCODE_SCENARIOS,
-            DEEPSEEK_PROVIDER_ID => DEEPSEEK_SCENARIOS,
+            DEEPSEEK_PROVIDER => DEEPSEEK_SCENARIOS,
             _ => &[],
         }
     };
@@ -1173,5 +1176,255 @@ fn opencode_background_shells_outlive_their_turn() {
 
 // -- DeepSeek Harness (#52): `dsh web` RPC + WebSocket downlinks -------------------
 
-const DEEPSEEK_PROVIDER_ID: &str = "deepseek";
-const DEEPSEEK_SCENARIOS: &[&str] = &[];
+const DEEPSEEK_SCENARIOS: &[&str] = &[
+    "simple",
+    "multi_turn",
+    "tool_call_read_only",
+    "tool_call_approval",
+    "plan_questions",
+    "turn_interrupt",
+    "turn_interrupt_mid_tool",
+    "message_steering",
+    "provider_thread_resume",
+    "thread_rollback",
+    "thread_fork_native",
+    "usage_limit",
+    "runtime_exit_unexpected",
+    "background_work",
+    "subagent",
+];
+
+const DEEPSEEK_SESSION: &str = "6f1c0b9e-4d2a-4c3b-9a8e-1f2d3c4b5a60";
+const DEEPSEEK_FORK: &str = "7a2d1c0f-5e3b-4d4c-8b9f-2e3f4d5c6b71";
+
+fn deepseek(scenario: &str) -> ScenarioResult {
+    replay_provider(scenario, DEEPSEEK_PROVIDER)
+}
+
+#[test]
+fn deepseek_simple() {
+    let result = deepseek("simple");
+    let main = &result.projection;
+    assert_eq!(statuses(main), [RunStatus::Completed]);
+    assert_eq!(
+        assistant_texts(&result, main_id(&result)),
+        ["fixture simple ok"]
+    );
+    assert_eq!(
+        native_thread(main, runs(main)[0]).as_deref(),
+        Some(DEEPSEEK_SESSION)
+    );
+    let turns = provider_turns(main);
+    let native = turns[0].native_turn_ref.as_ref().unwrap();
+    // The `turn/start` seq is the strong native turn id.
+    assert_eq!(native.native_id.as_deref(), Some("2"));
+    assert_eq!(native.strength, RefStrength::Strong);
+    assert_eq!(
+        turns[0].token_usage.as_ref().map(|usage| usage.used),
+        Some(930)
+    );
+    assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+    let session = main.provider_sessions.values().next().unwrap();
+    assert_eq!(
+        session.capabilities,
+        waku_core::driver::deepseek::deepseek_capabilities(&deepseek_replay_instance())
+    );
+}
+
+#[test]
+fn deepseek_multi_turn() {
+    let result = deepseek("multi_turn");
+    let main = &result.projection;
+    assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+    assert_eq!(
+        assistant_texts(&result, main_id(&result)),
+        ["Echo: first", "Echo: second"]
+    );
+}
+
+#[test]
+fn deepseek_tool_call_read_only() {
+    let result = deepseek("tool_call_read_only");
+    let main = &result.projection;
+    assert_eq!(statuses(main), [RunStatus::Completed]);
+    let rows = items(&result, main_id(&result));
+    let read = rows
+        .iter()
+        .find(|item| item.title.as_deref() == Some("README.md"))
+        .expect("the read row, titled by the Host's view");
+    assert_eq!(read.status, ItemStatus::Completed);
+    assert!(main.runtime_requests.is_empty());
+}
+
+#[test]
+fn deepseek_tool_call_approval_passes_outcomes_through() {
+    let result = deepseek("tool_call_approval");
+    let main = &result.projection;
+    assert_eq!(statuses(main), [RunStatus::Completed]);
+    let request = main.runtime_requests.values().next().unwrap();
+    assert_eq!(request.kind, RuntimeRequestKind::CommandApproval);
+    assert_eq!(request.status, RequestStatus::Resolved);
+    assert_eq!(
+        request
+            .options
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect::<Vec<_>>(),
+        ["allowed-once", "rejected"]
+    );
+    let rows = items(&result, main_id(&result));
+    assert!(rows.iter().any(|item| matches!(
+        &item.kind,
+        TurnItemKind::CommandExecution { input, .. } if input == "ls"
+    ) && item.status == ItemStatus::Completed));
+}
+
+#[test]
+fn deepseek_plan_questions() {
+    let result = deepseek("plan_questions");
+    let main = &result.projection;
+    assert_eq!(statuses(main), [RunStatus::Completed]);
+    let plan = main.plans.values().next().unwrap();
+    assert!(matches!(&plan.kind, PlanKind::TodoList { steps, .. } if steps.len() == 2));
+    let request = main.runtime_requests.values().next().unwrap();
+    assert_eq!(request.kind, RuntimeRequestKind::UserInput);
+    assert_eq!(request.status, RequestStatus::Resolved);
+    assert_eq!(
+        assistant_texts(&result, main_id(&result)),
+        ["You chose Blue."]
+    );
+}
+
+#[test]
+fn deepseek_turn_interrupt() {
+    let result = deepseek("turn_interrupt");
+    assert_eq!(statuses(&result.projection), [RunStatus::Interrupted]);
+    assert_eq!(terminals(&result), [TurnOutcome::Interrupted]);
+}
+
+#[test]
+fn deepseek_turn_interrupt_mid_tool() {
+    let result = deepseek("turn_interrupt_mid_tool");
+    assert_eq!(statuses(&result.projection), [RunStatus::Interrupted]);
+    assert_eq!(terminals(&result), [TurnOutcome::Interrupted]);
+    let rows = items(&result, main_id(&result));
+    assert!(rows.iter().any(|item| matches!(
+        &item.kind,
+        TurnItemKind::CommandExecution { input, .. } if input == "sleep 600"
+    ) && item.status.is_terminal()));
+}
+
+#[test]
+fn deepseek_message_steering_is_native() {
+    let result = deepseek("message_steering");
+    let main = &result.projection;
+    assert_eq!(statuses(main), [RunStatus::Completed]);
+    let run = runs(main)[0];
+    assert_eq!(
+        main.attempts
+            .values()
+            .filter(|attempt| attempt.run_id == run.id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        assistant_texts(&result, main_id(&result)),
+        ["Working", "Steered: use tabs"]
+    );
+}
+
+#[test]
+fn deepseek_provider_thread_resume() {
+    let result = deepseek("provider_thread_resume");
+    let main = &result.projection;
+    assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+    assert_eq!(main.provider_sessions.len(), 2);
+    let all = runs(main);
+    assert_eq!(all[0].provider_thread_id, all[1].provider_thread_id);
+}
+
+#[test]
+fn deepseek_rollback_forks_at_the_kept_turn() {
+    let result = deepseek("thread_rollback");
+    let main = &result.projection;
+    assert_eq!(
+        statuses(main),
+        [
+            RunStatus::Completed,
+            RunStatus::RolledBack,
+            RunStatus::Completed
+        ]
+    );
+    let all = runs(main);
+    assert_ne!(all[0].provider_thread_id, all[2].provider_thread_id);
+    assert_eq!(native_thread(main, all[2]).as_deref(), Some(DEEPSEEK_FORK));
+}
+
+#[test]
+fn deepseek_fork_is_native() {
+    let result = deepseek("thread_fork_native");
+    assert!(matches!(result.forks[..], [ForkResult::Native { .. }]));
+    let fork = &result.threads["fork-a"];
+    assert_eq!(statuses(fork), [RunStatus::Completed]);
+    assert_eq!(
+        assistant_texts(&result, fork.thread.id),
+        ["Echo: in the fork"]
+    );
+}
+
+#[test]
+fn deepseek_usage_limit_takes_the_structured_reset_time() {
+    let result = deepseek("usage_limit");
+    let main = &result.projection;
+    assert_eq!(statuses(main), [RunStatus::Failed]);
+    let failure = runs(main)[0].failure.clone().unwrap();
+    assert_eq!(failure.class, FailureClass::UsageLimit);
+    assert_eq!(failure.reset_at, Some(1_767_229_200_000));
+    assert_eq!(
+        main.thread
+            .limit_recovery
+            .as_ref()
+            .and_then(|recovery| recovery.reset_at),
+        Some(1_767_229_200_000)
+    );
+}
+
+#[test]
+fn deepseek_host_exit_fails_the_turn_and_loses_the_session() {
+    let result = deepseek("runtime_exit_unexpected");
+    let main = &result.projection;
+    assert_eq!(statuses(main), [RunStatus::Failed]);
+    let failure = runs(main)[0].failure.clone().unwrap();
+    assert_eq!(failure.class, FailureClass::TransportError);
+    assert_eq!(terminals(&result).len(), 1);
+}
+
+#[test]
+fn deepseek_background_jobs_outlive_their_turn() {
+    let result = deepseek("background_work");
+    assert_eq!(statuses(&result.projection), [RunStatus::Completed]);
+    let work = result
+        .adapter_events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BackgroundWorkUpdated { work } => {
+                Some((work.task.task_id.clone(), work.live))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        work,
+        [("job_1".to_owned(), true), ("job_1".to_owned(), false)]
+    );
+}
+
+#[test]
+fn deepseek_subagent_jobs_are_subagents() {
+    let result = deepseek("subagent");
+    let main = &result.projection;
+    assert_eq!(statuses(main), [RunStatus::Completed]);
+    let subagent = main.subagents.values().next().unwrap();
+    assert_eq!(subagent.status, SubagentStatus::Completed);
+    assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+}

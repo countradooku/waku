@@ -6,7 +6,7 @@ mod amp;
 mod claude;
 mod codex;
 mod computer_use;
-mod deepseek;
+pub mod deepseek;
 pub mod opencode;
 mod pi;
 mod support;
@@ -233,7 +233,18 @@ pub(crate) fn start_local(
         ProviderKind::Cursor | ProviderKind::Fx | ProviderKind::Grok | ProviderKind::Kimi => {
             Arc::new(acp::AcpDriver::start(provider, options, events)?)
         }
-        ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),
+        // Ported to `DriverV2` (#52); one pooled `dsh web` per binary.
+        ProviderKind::DeepSeek => Arc::new(v2::bridge::V1Bridge::start(
+            Arc::new(deepseek::DeepSeekDriver),
+            v2::InstanceConfig::new(
+                "deepseek",
+                waku_protocol::orchestration::DriverKind::DeepSeek,
+            ),
+            options,
+            events,
+            Arc::new(v2::ProcessTransportFactory),
+            v2::bridge::runtime(),
+        )?),
         // OpenCode is not a per-workspace server: one adopted background
         // service carries every workspace. Ported to `DriverV2` (#49) and
         // served through the bridge until the orchestrator cutover.

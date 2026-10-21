@@ -21,10 +21,17 @@ session that spans the whole conversation**:
 | Pi RPC mode (NDJSON request/response over stdio) | [driver/pi.rs](../crates/waku-core/src/driver/pi.rs) | Pi, Oh My Pi |
 | Claude streaming-input session (NDJSON over stdio) | [driver/claude.rs](../crates/waku-core/src/driver/claude.rs) | Claude Code |
 | Amp streaming-JSON session (NDJSON over stdio) | [driver/amp.rs](../crates/waku-core/src/driver/amp.rs) | Amp |
-| Harness client API (typed HTTP + downlink streams) | [driver/deepseek.rs](../crates/waku-core/src/driver/deepseek.rs) | DeepSeek Harness |
+| Harness client API (typed HTTP + WebSocket downlinks), `DriverV2` | [driver/deepseek/](../crates/waku-core/src/driver/deepseek/mod.rs) | DeepSeek Harness |
 
 DeepSeek Harness has no dedicated section below yet; its driver's module
-comment is the current reference.
+comment and RFC 0002's amendments (#52) are the current reference. Since
+the `DriverV2` port each session holds a lease on the pooled `dsh web` and
+opens its own `/api/events.mux` and `/api/events.host` WebSockets through
+`driver::v2::http`; the Host process no longer runs reader threads. Approval
+outcomes are passed through as option ids (`allowed-once`, `rejected`, or
+whatever the request lists), agent presets are fixed at `session.create`
+(a change starts a new provider thread with a handoff), and capabilities are
+in [capabilities_deepseek.json](../crates/waku-core/src/driver/deepseek/capabilities_deepseek.json).
 
 ## The driver contract
 
