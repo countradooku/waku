@@ -308,6 +308,8 @@ fn main() -> ExitCode {
         input,
         out: out.clone(),
         renumber_ids: args.renumber_ids,
+        // A live model can think for minutes per turn.
+        patience: Some(std::time::Duration::from_secs(300)),
     });
     match result {
         Ok(transcript) => {

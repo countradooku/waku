@@ -426,6 +426,9 @@ pub struct RecordRequest {
     pub input: super::ScenarioInput,
     pub out: PathBuf,
     pub renumber_ids: bool,
+    /// How long the live run may wait for a turn (a real model thinks for
+    /// minutes); `None` keeps the harness default.
+    pub patience: Option<std::time::Duration>,
 }
 
 /// Records a scenario (RFC 0002 "Recorder"): runs it live through the real
@@ -446,6 +449,9 @@ pub fn record_scenario(
             instance.clone(),
             Transports::Live(recorder.clone()),
         )?;
+        if let Some(patience) = request.patience {
+            harness.set_patience(patience);
+        }
         let live = harness.run(&request.input).map(|_| ());
         (harness.workspace.clone(), harness.home.clone(), live)
     };

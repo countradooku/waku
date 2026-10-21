@@ -1006,6 +1006,7 @@ fn the_recorder_reproduces_the_committed_fixture() {
         input: input("simple"),
         out: out.clone(),
         renumber_ids: false,
+        patience: None,
     })
     .unwrap();
     assert!(Path::new(&out).exists());

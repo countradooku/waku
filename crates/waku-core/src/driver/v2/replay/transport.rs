@@ -230,6 +230,35 @@ impl ReplayTransportFactory {
         self.state.lock().progress
     }
 
+    /// Where the transcript waits and which channels exist, for a failure
+    /// message.
+    pub fn describe_position(&self) -> String {
+        let state = self.state.lock();
+        let line = state
+            .transcript
+            .lines
+            .get(state.cursor)
+            .copied()
+            .unwrap_or(0);
+        let next = state
+            .transcript
+            .entries
+            .get(state.cursor)
+            .map_or_else(|| "the end".to_owned(), ReplayEntry::describe);
+        let mut channels = state
+            .channels
+            .iter()
+            .map(|(name, channel)| {
+                format!("{name}{}", if channel.killed { " (killed)" } else { "" })
+            })
+            .collect::<Vec<_>>();
+        channels.sort();
+        format!(
+            "transcript at line {line} ({next}); channels: {}",
+            channels.join(", ")
+        )
+    }
+
     /// Fails with the first recorded error, or with the entries never
     /// reached.
     pub fn assert_exhausted(&self) -> Result<(), ReplayError> {

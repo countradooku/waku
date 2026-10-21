@@ -203,6 +203,7 @@ pub struct ReplayHarness {
     manager: Arc<ProviderSessionManager>,
     pool: Option<EffectWorkerPool>,
     stopping: Arc<AtomicBool>,
+    patience: Duration,
     ports: FakePorts,
     instance: InstanceConfig,
     project: ProjectId,
@@ -459,6 +460,7 @@ impl ReplayHarness {
             manager: daemon.manager,
             pool: Some(daemon.pool),
             stopping: daemon.stopping,
+            patience: Duration::from_secs(20),
             ports,
             instance,
             project: ProjectId(Uuid::nil()),
@@ -635,11 +637,14 @@ impl ReplayHarness {
             if Instant::now() > deadline {
                 return Err(ReplayError::Harness(format!(
                     "the scenario did not settle (unsettled effects: {}, manager idle: {}, \
-                     clock: {}): {}",
+                     clock: {}): {}; {}",
                     snapshot.1,
                     snapshot.2,
                     waku_orchestrator::Clock::now(&*self.clock),
-                    self.unsettled_effect_details()
+                    self.unsettled_effect_details(),
+                    self.replay
+                        .as_ref()
+                        .map_or_else(|| "live".to_owned(), |replay| replay.describe_position())
                 )));
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -649,11 +654,14 @@ impl ReplayHarness {
     /// How long a wait may take: a replay answers at once, a live model
     /// can think for minutes.
     fn patience(&self) -> Duration {
-        if self.replay.is_some() {
-            Duration::from_secs(20)
-        } else {
-            Duration::from_secs(300)
-        }
+        self.patience
+    }
+
+    /// How long a wait may take: 20 s by default, which a replay or the
+    /// in-process fake agent never needs; a live model can think for
+    /// minutes (the recorder raises it).
+    pub fn set_patience(&mut self, patience: Duration) {
+        self.patience = patience;
     }
 
     /// Waits until the thread has no active and no queued run. `settle`
