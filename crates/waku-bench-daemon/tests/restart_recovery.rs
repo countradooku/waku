@@ -22,6 +22,8 @@ use waku_protocol::orchestration::*;
 use waku_protocol::v8::orchestration::{DispatchCommand, DispatchParams, ThreadSnapshotParams};
 
 const TOKEN: &str = "restart-secret";
+/// Overrides the per-user daemon socket path (`waku_protocol::identity`).
+const DAEMON_SOCKET_ENV: &str = "WAKU_DAEMON_SOCKET";
 /// The sample timeline at this rate takes about 3 s, long enough to kill
 /// the daemon while the answer streams.
 const RATE: &str = "0.004";
@@ -445,7 +447,7 @@ fn the_desktop_attaches_to_a_running_service_and_a_turn_outlives_it() {
     std::fs::write(scratch.root.join("local.token"), TOKEN).unwrap();
     // SAFETY: only this test reads the variable (through the supervisor's
     // identity paths); the other tests pass their socket explicitly.
-    unsafe { std::env::set_var(waku_protocol::DAEMON_SOCKET_ENV, scratch.socket()) };
+    unsafe { std::env::set_var(DAEMON_SOCKET_ENV, scratch.socket()) };
     assert_eq!(
         waku_protocol::identity::local_token_path(),
         scratch.root.join("local.token")
@@ -492,5 +494,5 @@ fn the_desktop_attaches_to_a_running_service_and_a_turn_outlives_it() {
     )));
     drop(client);
     drop(desktop);
-    unsafe { std::env::remove_var(waku_protocol::DAEMON_SOCKET_ENV) };
+    unsafe { std::env::remove_var(DAEMON_SOCKET_ENV) };
 }

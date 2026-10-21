@@ -9,10 +9,11 @@
 //! {"atUs":50000,"kind":"textDelta","payload":"### Root"}
 //! ```
 //!
-//! `kind` and `payload` are exactly the daemon's `WireDriverEvent`, so the
-//! bench daemon sends them verbatim and the fake provider CLIs translate them
-//! into provider-native messages. Committed timelines are gzip-compressed
-//! (`*.jsonl.gz`); plain `*.jsonl` files load too, for hand-written ones.
+//! `kind` and `payload` describe one provider event in a provider-neutral
+//! shape ([`validate_event`] lists them); the fake provider CLIs translate
+//! each into provider-native messages, which the real daemon's drivers
+//! ingest. Committed timelines are gzip-compressed (`*.jsonl.gz`); plain
+//! `*.jsonl` files load too, for hand-written ones.
 
 use std::io::{Read as _, Write as _};
 use std::path::Path;
@@ -23,13 +24,14 @@ use anyhow::{Context as _, bail, ensure};
 use flate2::Compression;
 use flate2::GzBuilder;
 use flate2::read::GzDecoder;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use waku_protocol::WireDriverEvent;
+use waku_protocol::model::{ActivityItem, ActivityKind};
 
 pub const FORMAT_VERSION: u32 = 1;
 
-/// Every checked-in timeline, in the order the fixture lists its sessions.
+/// Every checked-in timeline, in the order the fixture lists its threads.
 pub const BUILTIN_NAMES: [&str; 6] = [
     "prose",
     "burst",
@@ -77,18 +79,65 @@ impl TimedEvent {
         }
     }
 
-    /// The typed wire event. Timelines are validated on load, so a
-    /// malformed event only reaches here from a hand-built timeline; it
-    /// becomes an `error` event rather than a panic.
-    pub fn to_wire(&self) -> WireDriverEvent {
-        self.try_to_wire().unwrap_or_else(|error| {
-            WireDriverEvent::Error(format!("invalid {} event: {error}", self.kind))
-        })
+    /// Whether `kind` and `payload` are an event the fakes translate.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_event(&self.kind, &self.payload)
     }
+}
 
-    pub fn try_to_wire(&self) -> serde_json::Result<WireDriverEvent> {
-        WireDriverEvent::from_parts(&self.kind, self.payload.clone())
+/// `activity`: a plain activity row without tool details.
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct ActivityPayload {
+    id: Option<String>,
+    kind: ActivityKind,
+    title: String,
+    detail: Option<String>,
+    complete: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct UsagePayload {
+    context_tokens: Option<u64>,
+    context_window: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct TurnFinishedPayload {
+    success: bool,
+    summary: Option<String>,
+}
+
+fn shaped<T: DeserializeOwned>(payload: &Value) -> anyhow::Result<()> {
+    T::deserialize(payload)
+        .map(drop)
+        .map_err(anyhow::Error::from)
+}
+
+/// The event kinds a timeline may hold, with their payloads:
+///
+/// | `kind` | `payload` |
+/// | --- | --- |
+/// | `turnStarted` | `null` |
+/// | `textDelta`, `reasoningDelta`, `error` | a string |
+/// | `richActivity` | an `ActivityItem` (tool calls, edits, images) |
+/// | `activity` | `{id?, kind, title, detail?, complete}` |
+/// | `usageUpdated` | `{contextTokens?, contextWindow?}` |
+/// | `turnFinished` | `{success, summary?}` |
+pub fn validate_event(kind: &str, payload: &Value) -> anyhow::Result<()> {
+    match kind {
+        "turnStarted" => ensure!(payload.is_null(), "turnStarted carries no payload"),
+        "textDelta" | "reasoningDelta" | "error" => shaped::<String>(payload)?,
+        "richActivity" => shaped::<ActivityItem>(payload)?,
+        "activity" => shaped::<ActivityPayload>(payload)?,
+        "usageUpdated" => shaped::<UsagePayload>(payload)?,
+        "turnFinished" => shaped::<TurnFinishedPayload>(payload)?,
+        other => bail!("unknown event kind {other:?}"),
     }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -160,7 +209,7 @@ impl Timeline {
     }
 
     /// Parse plain or gzip-compressed JSON Lines and validate every event
-    /// against the daemon's own wire decoder.
+    /// ([`validate_event`]).
     pub fn parse(bytes: &[u8]) -> anyhow::Result<Self> {
         let text = if bytes.starts_with(&[0x1f, 0x8b]) {
             let mut text = String::new();
@@ -194,10 +243,8 @@ impl Timeline {
             );
             previous = event.at_us;
             event
-                .try_to_wire()
-                .map_err(anyhow::Error::from)
-                .and_then(waku_protocol::event_from_wire)
-                .with_context(|| format!("line {}: not a valid driver event", index + 1))?;
+                .validate()
+                .with_context(|| format!("line {}: not a valid timeline event", index + 1))?;
             events.push(event);
         }
         ensure!(

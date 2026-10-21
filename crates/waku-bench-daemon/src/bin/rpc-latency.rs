@@ -1,34 +1,40 @@
-//! `rpc-latency`: client-side round-trip latency of daemon requests.
+//! `rpc-latency`: client-side round-trip latency of protocol v8 calls.
 //!
-//! Connects with `waku-client`, exactly as the desktop does, seeds one small
-//! project and session through the ordinary `saveTaskState`, then times
-//! sequential requests (one in flight at a time):
+//! Connects with `waku_client::v8::V8Client`, exactly as the desktop does,
+//! creates one project over a generated source tree with
+//! `orchestration.dispatch` (`project.create`, and `thread.create` unless
+//! `--thread` names one), then times sequential calls (one in flight at a
+//! time):
 //!
-//! | Name | Request |
+//! | Name | Call |
 //! | --- | --- |
-//! | `get_settings` | `getSettings`: the smallest round trip, the transport floor |
-//! | `hydrate_session` | `hydrateSession` of a two-message session |
-//! | `list_project_files` | `workspace.listProjectFiles` over the seeded project (the composer's `@` file search) |
-//! | `search_session_messages` | `searchSessionMessages` (sidebar search) |
+//! | `settings_get` | `settings.get`: the smallest round trip, the transport floor |
+//! | `threads_snapshot` | `threads.snapshot` (compact, as the desktop subscribes) of `--thread`, else of the created empty thread |
+//! | `files_search_entries` | `files.searchEntries` over the project (the composer's `@` file index), every entry |
+//! | `threads_search` | `threads.search` (sidebar search) |
 //!
 //! ```text
-//! rpc-latency [--address ADDR] [--token TOKEN] [--count N] [--warmup N]
+//! rpc-latency [--address ADDR] [--token TOKEN] [--thread ID] [--count N] [--warmup N]
 //!             [--files N] [--project DIR] [--label TEXT] [--out FILE]
 //!             [--hold SECONDS] [--terminal] [--supervise DAEMON]
 //! ```
 //!
-//! `--hold` keeps the connection open and idle after the timed requests, so
-//! an outside sampler (`scripts/bench/harness.py measure --pid`) can count
-//! the idle wakeups of a connected daemon and client pair without a GUI.
-//! `--terminal` keeps a daemon terminal open (its shell at the prompt) for
-//! the hold. `--supervise DAEMON` launches that `waku-daemon` binary through
-//! the desktop's `DaemonSupervisor`, as a release app does, instead of
-//! connecting to `--address`, so the hold also covers the supervisor (#178).
-//! Give it a private `HOME` and `WAKU_DAEMON_SOCKET`.
+//! Against `waku-bench-daemon`, pass its `WAKU_BENCH_THREAD_ID` as
+//! `--thread`: that thread holds one settled two-message turn.
+//!
+//! `--hold` keeps the connection open and idle after the timed calls, so an
+//! outside sampler (`scripts/bench/harness.py measure --pid`) can count the
+//! idle wakeups of a connected daemon and client pair without a GUI.
+//! `--terminal` keeps a daemon terminal open (its shell at the prompt,
+//! subscribed as the desktop's terminal pane is) for the hold.
+//! `--supervise DAEMON` launches that `waku-daemon` binary through the
+//! desktop's `DaemonSupervisor`, as a release app does, instead of
+//! connecting to `--address`, so the hold also covers the supervisor
+//! (#178). Give it a private `HOME` and `WAKU_DAEMON_SOCKET`.
 //!
 //! The address and token default to `$WAKU_DAEMON_ADDRESS` and
 //! `$WAKU_DAEMON_TOKEN`. Point it only at a disposable daemon: it adds a
-//! project and a session to the daemon's database.
+//! project (and a thread) to the daemon's database.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -36,25 +42,35 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, anyhow, bail};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use waku_bench_daemon::fixture;
-use waku_client::{
-    Command, DaemonClient, DaemonSupervisor, ResponsePayload, WorkspaceOperation, WorkspaceResult,
+use waku_client::DaemonSupervisor;
+use waku_client::v8::files::FilesSearchEntriesParams;
+use waku_client::v8::orchestration::{
+    DispatchCommand, DispatchParams, ThreadSearchParams, ThreadSnapshotParams,
 };
-use waku_core::model::ProviderKind;
-use waku_protocol::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV};
+use waku_client::v8::terminal::{TerminalItem, TerminalOpenParams, TerminalParams, TerminalSpec};
+use waku_client::v8::{
+    MethodDef, NoParams, RootRef, StreamEvent, StreamItem, SubscribeOptions, Subscription,
+    V8Client, method, stream,
+};
+use waku_protocol::orchestration::{
+    Command, CommandId, InteractionMode, ModelSelection, ProjectId, RuntimeMode, ThreadId,
+    WorkspaceStrategy,
+};
 
 const USAGE: &str = "\
-usage: rpc-latency [--address ADDR] [--token TOKEN] [--count N] [--warmup N]
+usage: rpc-latency [--address ADDR] [--token TOKEN] [--thread ID] [--count N] [--warmup N]
                    [--files N] [--project DIR] [--label TEXT] [--out FILE]
                    [--hold SECONDS] [--terminal] [--supervise DAEMON]
 
-  --address ADDR   daemon address (default: $WAKU_DAEMON_ADDRESS)
+  --address ADDR   daemon address: host:port or unix:PATH (default: $WAKU_DAEMON_ADDRESS)
   --token TOKEN    daemon token (default: $WAKU_DAEMON_TOKEN)
-  --count N        timed requests per kind (default: 1000)
-  --warmup N       untimed requests per kind first (default: 50)
+  --thread ID      thread to snapshot (waku-bench-daemon's WAKU_BENCH_THREAD_ID);
+                   default: a thread created here, which has no turns
+  --count N        timed calls per kind (default: 1000)
+  --warmup N       untimed calls per kind first (default: 50)
   --files N        files to create in the seeded project (default: 500)
   --project DIR    project directory to create and seed (default: a temp dir)
-  --label TEXT     recorded in the JSON (e.g. waku-daemon)
+  --label TEXT     recorded in the JSON (e.g. waku-bench-daemon)
   --out FILE       also write the JSON report here
   --hold SECONDS   stay connected and idle this long before disconnecting
   --terminal       keep a daemon terminal open during the hold
@@ -62,14 +78,13 @@ usage: rpc-latency [--address ADDR] [--token TOKEN] [--count N] [--warmup N]
                    of connecting to --address (set HOME and WAKU_DAEMON_SOCKET
                    to private paths)
 
-Seeds a project and a session through saveTaskState: use a disposable daemon.";
-
-/// Fixed so repeated runs against one daemon reuse the same rows.
-const RPC_PROJECT_ID: Uuid = Uuid::from_u128(0xbe4c_0000_0000_4000_8000_0000_0000_0f0f);
+Creates a project (and a thread) through orchestration.dispatch: use a
+disposable daemon.";
 
 struct Options {
     address: String,
     token: String,
+    thread: Option<Uuid>,
     count: usize,
     warmup: usize,
     files: usize,
@@ -83,8 +98,9 @@ struct Options {
 
 fn parse() -> anyhow::Result<Options> {
     let mut options = Options {
-        address: std::env::var(DAEMON_ADDRESS_ENV).unwrap_or_default(),
-        token: std::env::var(DAEMON_TOKEN_ENV).unwrap_or_default(),
+        address: std::env::var("WAKU_DAEMON_ADDRESS").unwrap_or_default(),
+        token: std::env::var("WAKU_DAEMON_TOKEN").unwrap_or_default(),
+        thread: None,
         count: 1_000,
         warmup: 50,
         files: 500,
@@ -105,6 +121,7 @@ fn parse() -> anyhow::Result<Options> {
         match argument.as_str() {
             "--address" => options.address = value()?,
             "--token" => options.token = value()?,
+            "--thread" => options.thread = Some(value()?.parse().context("--thread")?),
             "--count" => options.count = value()?.parse().context("--count")?,
             "--warmup" => options.warmup = value()?.parse().context("--warmup")?,
             "--files" => options.files = value()?.parse().context("--files")?,
@@ -134,29 +151,54 @@ fn parse() -> anyhow::Result<Options> {
     Ok(options)
 }
 
-/// Open a daemon terminal in `cwd` and wait until its shell has settled at
-/// the prompt: no output for half a second. Its output events are drained on
-/// a thread for the rest of the run.
-fn open_terminal(client: &DaemonClient, cwd: &Path) -> anyhow::Result<Uuid> {
-    let terminal_id = Uuid::new_v4();
-    let events = client.subscribe(terminal_id, terminal_id);
-    let opened = client.request(
-        terminal_id,
-        terminal_id,
-        Command::OpenTerminal {
-            cwd: cwd.to_owned(),
+fn dispatch(client: &V8Client, command: Command) -> anyhow::Result<()> {
+    client
+        .call::<method::OrchestrationDispatch>(DispatchParams {
+            command_id: CommandId::new(format!("rpc-latency:{}", Uuid::new_v4().simple()))
+                .map_err(|error| anyhow!("{error:?}"))?,
+            command: DispatchCommand(command),
+        })
+        .map(drop)
+        .map_err(|error| anyhow!("orchestration.dispatch failed: {error:?}"))
+}
+
+/// Open a daemon terminal in `root` and subscribe to it as the desktop's
+/// terminal pane does, then wait until its shell has settled at the prompt:
+/// no output for half a second. Its output is drained on a thread for the
+/// rest of the run.
+fn open_terminal(client: &V8Client, root: RootRef) -> anyhow::Result<(Uuid, Subscription)> {
+    let opened = client
+        .call::<method::TerminalOpen>(TerminalOpenParams {
+            root,
             cols: 80,
             rows: 24,
+            title: None,
+            op_id: Uuid::new_v4(),
+        })
+        .map_err(|error| anyhow!("terminal.open failed: {error:?}"))?;
+    let subscription = client.subscribe::<stream::Terminal>(
+        TerminalSpec {
+            terminal_id: opened.terminal_id,
+            interactive: true,
         },
-    )?;
-    if !matches!(opened, ResponsePayload::Ack) {
-        bail!("openTerminal returned {opened:?}");
-    }
+        SubscribeOptions::default(),
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut output = 0;
     while Instant::now() < deadline {
-        match events.recv_timeout(Duration::from_millis(500)) {
-            Ok(_) => output += 1,
+        match subscription
+            .events()
+            .recv_timeout(Duration::from_millis(500))
+        {
+            Ok(StreamEvent::Data { bytes, .. }) => {
+                subscription.consumed(bytes.len() as u32);
+                output += bytes.len();
+            }
+            Ok(StreamEvent::Item(StreamItem::Terminal(TerminalItem::Error { message }))) => {
+                bail!("the daemon terminal failed: {message}");
+            }
+            Ok(StreamEvent::End(end)) => bail!("the terminal stream ended: {end:?}"),
+            Ok(_) => {}
             Err(_) if output > 0 => break,
             Err(_) => {}
         }
@@ -164,8 +206,7 @@ fn open_terminal(client: &DaemonClient, cwd: &Path) -> anyhow::Result<Uuid> {
     if output == 0 {
         bail!("the daemon terminal produced no output");
     }
-    std::thread::spawn(move || while events.recv().is_ok() {});
-    Ok(terminal_id)
+    Ok((opened.terminal_id, subscription))
 }
 
 /// A small source tree: `files` files spread over nested directories.
@@ -211,21 +252,21 @@ impl Samples {
     }
 }
 
-fn time_requests(
-    client: &DaemonClient,
+fn time_calls<M: MethodDef>(
+    client: &V8Client,
     warmup: usize,
     count: usize,
-    command: impl Fn() -> Command,
-    check: impl Fn(&ResponsePayload) -> bool,
+    params: impl Fn() -> M::Params,
+    check: impl Fn(&M::Result) -> anyhow::Result<()>,
 ) -> anyhow::Result<Samples> {
     let mut samples = Samples(Vec::with_capacity(count));
     for index in 0..warmup + count {
         let started = Instant::now();
-        let response = client.request(Uuid::nil(), Uuid::nil(), command())?;
+        let result = client
+            .call::<M>(params())
+            .map_err(|error| anyhow!("{} failed: {error:?}", M::NAME))?;
         let elapsed = started.elapsed();
-        if !check(&response) {
-            bail!("unexpected response: {response:?}");
-        }
+        check(&result)?;
         if index >= warmup {
             samples.0.push(elapsed);
         }
@@ -240,6 +281,7 @@ fn main() -> anyhow::Result<()> {
         std::env::temp_dir().join(format!("waku-rpc-latency-{}", std::process::id()))
     });
     create_project(&project_dir, options.files)?;
+    let project_dir = std::path::absolute(&project_dir)?;
 
     // Dropped at the end of `main`, which stops a supervised daemon.
     let supervisor = options
@@ -247,37 +289,55 @@ fn main() -> anyhow::Result<()> {
         .as_deref()
         .map(|daemon| DaemonSupervisor::spawn(daemon, false))
         .transpose()?;
-    let client = match &supervisor {
-        Some(supervisor) => supervisor.client(),
-        None => DaemonClient::connect(options.address.trim(), options.token.clone())?,
+    let (address, token) = match &supervisor {
+        Some(supervisor) => supervisor
+            .endpoint()
+            .context("the supervised daemon has no endpoint")?,
+        None => (options.address.trim().to_owned(), options.token.clone()),
     };
+    let client = V8Client::connect(&address, token)?;
 
-    // One project with one settled two-message session, saved the way the
-    // desktop saves.
-    let mut seeded = fixture::build(
-        project_dir.clone(),
-        &["rpc".to_owned()],
-        ProviderKind::Codex,
-        0,
-        0,
-    );
-    seeded.project.id = RPC_PROJECT_ID;
-    for session in &mut seeded.sessions {
-        session.project_id = RPC_PROJECT_ID;
-    }
-    let session_id = seeded.sessions[0].id;
-    let saved = client.request(
-        Uuid::nil(),
-        Uuid::nil(),
-        Command::SaveTaskState {
-            projects: vec![seeded.project.clone()],
-            live_session_ids: Vec::new(),
-            sessions: seeded.sessions.clone(),
+    // A project over the generated tree, and a thread in it unless one was
+    // named, created the way the desktop creates them.
+    let project_id = Uuid::new_v4();
+    dispatch(
+        &client,
+        Command::ProjectCreate {
+            project_id: ProjectId(project_id),
+            name: "rpc-latency".into(),
+            path: project_dir.clone(),
+            order_key: None,
         },
     )?;
-    if !matches!(saved, ResponsePayload::TaskStateSaved { .. }) {
-        bail!("saveTaskState returned {saved:?}");
-    }
+    let thread_id = match options.thread {
+        Some(thread_id) => thread_id,
+        None => {
+            let thread_id = Uuid::new_v4();
+            dispatch(
+                &client,
+                Command::ThreadCreate {
+                    thread_id: ThreadId(thread_id),
+                    project_id: ProjectId(project_id),
+                    title: Some("rpc-latency".into()),
+                    model_selection: ModelSelection::new("codex"),
+                    runtime_mode: RuntimeMode::FullAccess,
+                    interaction_mode: InteractionMode::Default,
+                    workspace: WorkspaceStrategy::Root { branch: None },
+                    imported_native_thread: None,
+                },
+            )?;
+            thread_id
+        }
+    };
+    let snapshot_items = client
+        .call::<method::ThreadsSnapshot>(ThreadSnapshotParams {
+            thread_id: ThreadId(thread_id),
+            compact_turn_items: true,
+        })
+        .map_err(|error| anyhow!("threads.snapshot of {thread_id} failed: {error:?}"))?
+        .projection
+        .turn_items
+        .len();
 
     let mut results = serde_json::Map::new();
     let mut run = |name: &str, samples: anyhow::Result<Samples>| -> anyhow::Result<()> {
@@ -293,77 +353,91 @@ fn main() -> anyhow::Result<()> {
         results.insert(name.to_owned(), summary);
         Ok(())
     };
+    let (warmup, count) = (options.warmup, options.count);
     run(
-        "get_settings",
-        time_requests(
-            &client,
-            options.warmup,
-            options.count,
-            || Command::GetSettings,
-            |response| matches!(response, ResponsePayload::Settings { .. }),
-        ),
+        "settings_get",
+        time_calls::<method::SettingsGet>(&client, warmup, count, || NoParams {}, |_| Ok(())),
     )?;
     run(
-        "hydrate_session",
-        time_requests(
+        "threads_snapshot",
+        time_calls::<method::ThreadsSnapshot>(
             &client,
-            options.warmup,
-            options.count,
-            || Command::HydrateSession { session_id },
-            |response| {
-                matches!(
-                    response,
-                    ResponsePayload::Session {
-                        session: Some(session)
-                    } if session.messages.len() == 2
-                )
+            warmup,
+            count,
+            || ThreadSnapshotParams {
+                thread_id: ThreadId(thread_id),
+                compact_turn_items: true,
+            },
+            |snapshot| {
+                if snapshot.projection.turn_items.len() == snapshot_items {
+                    Ok(())
+                } else {
+                    bail!("the snapshot changed while it was timed")
+                }
             },
         ),
     )?;
     let files = options.files;
     run(
-        "list_project_files",
-        time_requests(
+        "files_search_entries",
+        time_calls::<method::FilesSearchEntries>(
             &client,
-            options.warmup,
-            options.count,
-            || Command::Workspace {
-                operation: WorkspaceOperation::ListProjectFiles {
-                    root: project_dir.clone(),
-                    cap: 10_000,
-                },
+            warmup,
+            count,
+            || FilesSearchEntriesParams {
+                root: RootRef::Project { project_id },
+                query: String::new(),
+                limit: Some(10_000),
             },
-            |response| {
-                matches!(
-                    response,
-                    ResponsePayload::Workspace {
-                        result: WorkspaceResult::ProjectFiles { entries }
-                    } if entries.len() >= files
-                )
+            |entries| {
+                if entries.len() >= files {
+                    Ok(())
+                } else {
+                    bail!(
+                        "files.searchEntries found {} of {files} files",
+                        entries.len()
+                    )
+                }
             },
         ),
     )?;
     run(
-        "search_session_messages",
-        time_requests(
+        "threads_search",
+        time_calls::<method::ThreadsSearch>(
             &client,
-            options.warmup,
-            options.count,
-            || Command::SearchSessionMessages {
+            warmup,
+            count,
+            || ThreadSearchParams {
                 query: "timeline".into(),
-                limit: 50,
+                project_id: None,
+                include_archived: false,
+                limit: Some(50),
             },
-            |response| matches!(response, ResponsePayload::SessionMessageMatches { .. }),
+            |_| Ok(()),
         ),
     )?;
     if let Some(hold) = options.hold {
         let terminal = options
             .terminal
-            .then(|| open_terminal(&client, &project_dir))
+            .then(|| open_terminal(&client, RootRef::Project { project_id }))
             .transpose()?;
+        let drain = terminal.map(|(terminal_id, subscription)| {
+            let drain = std::thread::spawn(move || {
+                while let Ok(event) = subscription.events().recv() {
+                    match event {
+                        StreamEvent::Data { bytes, .. } => {
+                            subscription.consumed(bytes.len() as u32);
+                        }
+                        StreamEvent::End(_) => break,
+                        _ => {}
+                    }
+                }
+            });
+            (terminal_id, drain)
+        });
         eprintln!(
             "rpc-latency: holding the idle connection{} for {:.0}s (pid {})",
-            if terminal.is_some() {
+            if drain.is_some() {
                 " with a terminal open"
             } else {
                 ""
@@ -372,18 +446,22 @@ fn main() -> anyhow::Result<()> {
             std::process::id()
         );
         std::thread::sleep(hold);
-        if let Some(terminal_id) = terminal {
-            client.request(terminal_id, terminal_id, Command::CloseTerminal)?;
+        if let Some((terminal_id, drain)) = drain {
+            client
+                .call::<method::TerminalClose>(TerminalParams { terminal_id })
+                .map_err(|error| anyhow!("terminal.close failed: {error:?}"))?;
+            client.close();
+            let _ = drain.join();
         }
     }
-    if supervisor.is_none() {
-        client.disconnect();
-    }
+    client.close();
 
     let report = json!({
-        "schema": "waku.rpc-latency/1",
+        "schema": "waku.rpc-latency/2",
         "label": options.label,
-        "address": options.address.trim(),
+        "address": address,
+        "thread": thread_id,
+        "thread_snapshot_items": snapshot_items,
         "count": options.count,
         "warmup": options.warmup,
         "project_files": options.files,
@@ -393,6 +471,7 @@ fn main() -> anyhow::Result<()> {
         std::fs::write(out, serde_json::to_vec_pretty(&report)?)
             .with_context(|| format!("could not write {}", out.display()))?;
     }
+    drop(supervisor);
     if temporary {
         let _ = std::fs::remove_dir_all(&project_dir);
     }
