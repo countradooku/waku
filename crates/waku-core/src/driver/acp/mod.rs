@@ -295,8 +295,8 @@ impl DriverV2 for AcpDriver {
 /// The runtime ACP sessions run on until the daemon's tokio runtime (#18)
 /// hosts drivers: the one shared by every bridged driver, whose threads
 /// unblock SIGCHLD so agents can reap children.
-fn runtime() -> &'static tokio::runtime::Runtime {
-    crate::driver::bridge_runtime()
+fn runtime() -> tokio::runtime::Handle {
+    crate::driver::v2::bridge::runtime()
 }
 
 /// Starts an ACP session for the desktop: the `DriverV2` behind `V1Bridge`.
@@ -338,7 +338,7 @@ pub(crate) fn start(
         options,
         events,
         Arc::new(ProcessTransportFactory),
-        runtime().handle().clone(),
+        runtime(),
     )
 }
 

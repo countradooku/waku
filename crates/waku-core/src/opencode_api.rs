@@ -28,9 +28,8 @@
 //!   not `workspaceID`). Getting it wrong returns `$HOME`-scoped results
 //!   without an error, because the service itself `chdir`s to `$HOME`.
 
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use serde::de::DeserializeOwned;
@@ -77,6 +76,8 @@ pub(crate) enum ApiError {
 }
 
 impl ApiError {
+    // Only exercised by tests today; kept as part of the error API.
+    #[allow(dead_code)]
     pub(crate) fn status(&self) -> Option<u16> {
         match self {
             Self::Tagged { status, .. } | Self::Http { status, .. } => Some(*status),
@@ -91,16 +92,6 @@ impl ApiError {
             Self::Tagged { tag, .. } => Some(tag),
             _ => None,
         }
-    }
-
-    pub(crate) fn is_not_found(&self) -> bool {
-        self.status() == Some(404)
-    }
-
-    /// No service there to act on the call: it is down, or still stopping or
-    /// starting, which it answers with a 503 of its own.
-    pub(crate) fn is_unavailable(&self) -> bool {
-        matches!(self, Self::Transport(_)) || self.status() == Some(503)
     }
 
     /// A location-scoped route handed a directory the service cannot resolve
@@ -160,35 +151,12 @@ impl Order {
     }
 }
 
-/// How the service admits a prompt into a session that is already draining.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Delivery {
-    Steer,
-    Queue,
-}
-
 /// `GET /api/info`. The answer also lists connection URLs and the service's
 /// temporary directory, which nothing here needs.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub(crate) struct ServerInfo {
     pub version: String,
     pub pid: u32,
-}
-
-/// Progress of the one-time import of OpenCode 1 session history, which a
-/// service runs in the background after its first start. Imported sessions
-/// keep their original ids, and each one is missing until the import reaches
-/// it.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(tag = "status", rename_all = "lowercase")]
-pub(crate) enum MigrationStatus {
-    Required,
-    Running,
-    Completed,
-    Error,
-    #[serde(other)]
-    Unknown,
 }
 
 /// A model as a session refers to it.
@@ -592,56 +560,13 @@ pub(crate) struct SessionExport {
     pub messages: Vec<MessageInfo>,
 }
 
-/// The inbox entry `POST /prompt` answers with.
-///
-/// Only what the driver reads is decoded. Its timestamp moved from a flat
-/// `timeCreated` into `time.created` in the 2.0 release, and requiring members
-/// nobody reads would turn every such reshuffle into a prompt that cannot
-/// start.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub(crate) struct InboxUser {
-    pub id: String,
-    #[serde(rename = "sessionID")]
-    pub session_id: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub payload: Value,
-    pub delivery: Delivery,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub(crate) struct PermissionSource {
-    #[serde(rename = "type")]
-    pub kind: String,
-    #[serde(rename = "messageID")]
-    pub message_id: String,
-    pub id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub(crate) struct PermissionRequest {
-    pub id: String,
-    #[serde(rename = "sessionID")]
-    pub session_id: String,
-    pub action: String,
-    pub resources: Vec<String>,
-    #[serde(default)]
-    pub save: Option<Vec<String>>,
-    #[serde(default)]
-    pub metadata: Option<Value>,
-    #[serde(default)]
-    pub source: Option<PermissionSource>,
-    #[serde(default)]
-    pub message: Option<String>,
-}
-
+/// A one-shot permission reply. There is deliberately no `always`: it would
+/// write a rule into the GLOBAL `/api/permission/saved`, shared with the
+/// user's own terminal, so durable choices stay in driver state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PermissionReply {
     Once,
-    // Only built by tests: `reply_permission` refuses it, so production never sends it.
-    #[allow(dead_code)]
-    Always,
     Reject,
 }
 
@@ -857,174 +782,6 @@ pub(crate) fn server_info(endpoint: &Endpoint) -> Result<ServerInfo> {
     decode(response, "server info")
 }
 
-/// Bare payload, like server info. A build without the route answers 404.
-pub(crate) fn v1_migration_status(endpoint: &Endpoint) -> Result<MigrationStatus> {
-    let response = request(
-        endpoint,
-        "GET",
-        "/api/experimental/migration/v1",
-        None,
-        INFO_TIMEOUT,
-    )?;
-    decode(response, "migration status")
-}
-
-/// Mints a session id in OpenCode's own format: `ses_`, twelve hex digits of a
-/// descending millisecond timestamp, then fourteen base62 characters.
-///
-/// The format is load-bearing, not cosmetic. OpenCode forwards the session id
-/// to its model gateway (`x-opencode-session`), and the gateway's free tier
-/// refuses an id OpenCode could not have minted with "OpenCode's free tier can
-/// only be used from within OpenCode" — verified against 2.0.22, where every
-/// free model rejected `ses_` plus a hex UUID and accepted this format.
-pub(crate) fn new_session_id() -> String {
-    const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    // OpenCode counts ids minted within one millisecond so they still sort.
-    static LAST: Mutex<(u64, u64)> = Mutex::new((0, 0));
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as u64);
-    let counter = {
-        let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if last.0 != millis {
-            *last = (millis, 0);
-        }
-        last.1 += 1;
-        last.1
-    };
-    let time = !(millis.wrapping_mul(0x1000).wrapping_add(counter)) & 0xFFFF_FFFF_FFFF;
-    // Every byte of a v4 UUID is random except the version (6) and variant (8).
-    let random = uuid::Uuid::new_v4().into_bytes();
-    let suffix = random
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| *index != 6 && *index != 8)
-        .map(|(_, byte)| char::from(ALPHABET[usize::from(*byte) % ALPHABET.len()]));
-    format!("ses_{time:012x}").chars().chain(suffix).collect()
-}
-
-/// Creates a session with a CLIENT-MINTED id; see [`new_session_id`].
-///
-/// The id is an argument rather than a return value because the caller must
-/// already be subscribed to the shared event stream before the session exists;
-/// letting the server mint it reopens the create/first-event race.
-///
-/// `directory` must be the canonicalized workspace path with no trailing
-/// slash, and the very same string has to be used for `?directory=` when
-/// listing — the server compares those by exact string equality.
-pub(crate) fn create_session(
-    endpoint: &Endpoint,
-    id: &str,
-    agent: Option<&str>,
-    model: Option<&ModelRef>,
-    directory: &str,
-) -> Result<SessionInfo> {
-    let mut body = json!({
-        "id": id,
-        "location": { "directory": directory },
-    });
-    if let Some(agent) = agent {
-        body["agent"] = json!(agent);
-    }
-    if let Some(model) = model {
-        body["model"] = serde_json::to_value(model).map_err(|error| {
-            ApiError::Transport(anyhow!("could not encode the OpenCode model: {error}"))
-        })?;
-    }
-    let response = request(
-        endpoint,
-        "POST",
-        "/api/session",
-        Some(&body),
-        REQUEST_TIMEOUT,
-    )?;
-    decode(data(response, "session")?, "session")
-}
-
-pub(crate) fn get_session(endpoint: &Endpoint, session: &str) -> Result<SessionInfo> {
-    let path = format!("/api/session/{}", encode_path_segment(session));
-    let response = request(endpoint, "GET", &path, None, REQUEST_TIMEOUT)?;
-    decode(data(response, "session")?, "session")
-}
-
-pub(crate) fn delete_session(endpoint: &Endpoint, session: &str) -> Result<()> {
-    let path = format!("/api/session/{}", encode_path_segment(session));
-    request(endpoint, "DELETE", &path, None, REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-/// Runtime-only MCP registration, scoped to one location. This never writes
-/// the shared service's configuration files.
-pub(crate) fn add_mcp(
-    endpoint: &Endpoint,
-    directory: &str,
-    server: &str,
-    config: &Value,
-) -> Result<()> {
-    let path = format!(
-        "/api/experimental/mcp/{}{}",
-        encode_path_segment(server),
-        location_query(Some(directory))
-    );
-    request(
-        endpoint,
-        "PUT",
-        &path,
-        Some(&json!({"config": config})),
-        REQUEST_TIMEOUT,
-    )?;
-    Ok(())
-}
-
-pub(crate) fn list_mcp(endpoint: &Endpoint, directory: &str) -> Result<Vec<Value>> {
-    catalogue(endpoint, "/api/mcp", Some(directory), "MCP servers")
-}
-
-pub(crate) fn remove_mcp(endpoint: &Endpoint, directory: &str, server: &str) -> Result<()> {
-    let path = format!(
-        "/api/experimental/mcp/{}{}",
-        encode_path_segment(server),
-        location_query(Some(directory))
-    );
-    request(endpoint, "DELETE", &path, None, REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-pub(crate) fn put_instruction_entry(
-    endpoint: &Endpoint,
-    session: &str,
-    key: &str,
-    value: &str,
-) -> Result<()> {
-    let path = format!(
-        "/api/experimental/session/{}/instructions/entries/{}",
-        encode_path_segment(session),
-        encode_path_segment(key)
-    );
-    request(
-        endpoint,
-        "PUT",
-        &path,
-        Some(&json!({"value": value})),
-        REQUEST_TIMEOUT,
-    )?;
-    Ok(())
-}
-
-pub(crate) fn remove_instruction_entry(
-    endpoint: &Endpoint,
-    session: &str,
-    key: &str,
-) -> Result<()> {
-    let path = format!(
-        "/api/experimental/session/{}/instructions/entries/{}",
-        encode_path_segment(session),
-        encode_path_segment(key)
-    );
-    request(endpoint, "DELETE", &path, None, REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
 /// Lists sessions newest-first by default, returning the cursor for the next
 /// page or `None` once the listing is exhausted.
 pub(crate) fn list_sessions(
@@ -1072,89 +829,6 @@ pub(crate) fn export_session(
     decode(data(response, "session export")?, "session export")
 }
 
-/// Submits a prompt and returns the inbox entry it became.
-///
-/// Leaving `delivery` unset lets the server choose, which is what an idle
-/// session wants; a busy session needs the caller to say whether the prompt
-/// steers the running turn or queues behind it.
-pub(crate) fn prompt(
-    endpoint: &Endpoint,
-    session: &str,
-    text: &str,
-    delivery: Option<Delivery>,
-) -> Result<InboxUser> {
-    let path = format!("/api/session/{}/prompt", encode_path_segment(session));
-    let mut body = json!({ "text": text });
-    if let Some(delivery) = delivery {
-        body["delivery"] = json!(delivery);
-    }
-    let response = request(endpoint, "POST", &path, Some(&body), REQUEST_TIMEOUT)?;
-    decode(data(response, "prompt")?, "prompt")
-}
-
-/// Execute a registered command with provider-owned template expansion and
-/// agent/model selection. Unlike /prompt, this route acknowledges with 204;
-/// execution and completion arrive on the session event stream.
-pub(crate) fn command(
-    endpoint: &Endpoint,
-    session: &str,
-    name: &str,
-    arguments: &str,
-    delivery: Option<Delivery>,
-) -> Result<()> {
-    let path = format!("/api/session/{}/command", encode_path_segment(session));
-    let mut body = json!({"name": name, "text": arguments});
-    if let Some(delivery) = delivery {
-        body["delivery"] = json!(delivery);
-    }
-    request(endpoint, "POST", &path, Some(&body), REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-/// Lists undelivered inbox entries.
-///
-/// The entries are left as raw JSON because the union also carries synthetic,
-/// compaction and move payloads Waku has no use for; callers filter on `type`
-/// and decode only what they recognize.
-pub(crate) fn list_inbox(endpoint: &Endpoint, session: &str) -> Result<Vec<Value>> {
-    let path = format!("/api/session/{}/inbox", encode_path_segment(session));
-    let response = request(endpoint, "GET", &path, None, REQUEST_TIMEOUT)?;
-    decode(data(response, "inbox")?, "inbox")
-}
-
-/// Moves an undelivered entry between steering the running turn and waiting
-/// for it to finish.
-pub(crate) fn set_inbox_delivery(
-    endpoint: &Endpoint,
-    session: &str,
-    inbox_id: &str,
-    delivery: Delivery,
-) -> Result<()> {
-    let path = format!(
-        "/api/session/{}/inbox/{}",
-        encode_path_segment(session),
-        encode_path_segment(inbox_id)
-    );
-    let body = json!({ "delivery": delivery });
-    request(endpoint, "PATCH", &path, Some(&body), REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-/// Interrupts the running turn, answering whether there was one to interrupt.
-///
-/// The route takes no body and answers a BARE `{ interrupted }` — it is inside
-/// `/api/session` but outside the `{ data }` envelope.
-pub(crate) fn interrupt(endpoint: &Endpoint, session: &str) -> Result<bool> {
-    let path = format!("/api/session/{}/interrupt", encode_path_segment(session));
-    let response = request(endpoint, "POST", &path, None, REQUEST_TIMEOUT)?;
-    #[derive(Deserialize)]
-    struct Interrupted {
-        interrupted: bool,
-    }
-    let decoded: Interrupted = decode(response, "interrupt")?;
-    Ok(decoded.interrupted)
-}
-
 /// Copies the session's history into a new one. `before` names the first
 /// message left out; without it the whole history is copied.
 pub(crate) fn fork(
@@ -1169,98 +843,6 @@ pub(crate) fn fork(
     };
     let response = request(endpoint, "POST", &path, Some(&body), FORK_TIMEOUT)?;
     decode(data(response, "fork")?, "fork")
-}
-
-pub(crate) fn switch_model(endpoint: &Endpoint, session: &str, model: &ModelRef) -> Result<()> {
-    let path = format!("/api/session/{}/model", encode_path_segment(session));
-    let body = json!({ "model": model });
-    request(endpoint, "POST", &path, Some(&body), REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-pub(crate) fn switch_agent(endpoint: &Endpoint, session: &str, agent: &str) -> Result<()> {
-    let path = format!("/api/session/{}/agent", encode_path_segment(session));
-    let body = json!({ "agent": agent });
-    request(endpoint, "POST", &path, Some(&body), REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-pub(crate) fn list_permissions(
-    endpoint: &Endpoint,
-    session: &str,
-) -> Result<Vec<PermissionRequest>> {
-    let path = format!("/api/session/{}/permission", encode_path_segment(session));
-    let response = request(endpoint, "GET", &path, None, REQUEST_TIMEOUT)?;
-    decode(data(response, "permission list")?, "permission list")
-}
-
-/// Answers one permission request.
-///
-/// `always` is rejected here, not upstream: it writes a persistent allow rule
-/// into the user's own OpenCode permission config, which is a decision Waku
-/// has no mandate to make on the user's behalf from a transcript button.
-pub(crate) fn reply_permission(
-    endpoint: &Endpoint,
-    session: &str,
-    request_id: &str,
-    reply: PermissionReply,
-) -> Result<()> {
-    if matches!(reply, PermissionReply::Always) {
-        return Err(ApiError::Transport(anyhow!(
-            "OpenCode permission replies must not save a persistent rule"
-        )));
-    }
-    let path = format!(
-        "/api/session/{}/permission/{}/reply",
-        encode_path_segment(session),
-        encode_path_segment(request_id)
-    );
-    let body = json!({ "decision": reply });
-    request(endpoint, "POST", &path, Some(&body), REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-pub(crate) fn list_forms(endpoint: &Endpoint, session: &str) -> Result<Vec<FormInfo>> {
-    let path = format!("/api/session/{}/form", encode_path_segment(session));
-    let response = request(endpoint, "GET", &path, None, REQUEST_TIMEOUT)?;
-    decode(data(response, "form list")?, "form list")
-}
-
-pub(crate) fn reply_form(
-    endpoint: &Endpoint,
-    session: &str,
-    form_id: &str,
-    answer: &FormAnswer,
-) -> Result<()> {
-    let path = format!(
-        "/api/session/{}/form/{}/reply",
-        encode_path_segment(session),
-        encode_path_segment(form_id)
-    );
-    let body = json!({ "answer": answer });
-    request(endpoint, "POST", &path, Some(&body), REQUEST_TIMEOUT)?;
-    Ok(())
-}
-
-/// The ids of every session this service process is currently draining.
-///
-/// The payload is keyed BY session id, so the set is its keys; the values only
-/// say `running`, which is the same thing membership already says.
-pub(crate) fn active_sessions(endpoint: &Endpoint) -> Result<HashSet<String>> {
-    let response = request(
-        endpoint,
-        "GET",
-        "/api/session/active",
-        None,
-        REQUEST_TIMEOUT,
-    )?;
-    let active = data(response, "active sessions")?;
-    let Value::Object(active) = active else {
-        return Err(ApiError::Transport(anyhow!(
-            "OpenCode returned an unreadable active session map"
-        )));
-    };
-    Ok(active.into_iter().map(|(id, _)| id).collect())
 }
 
 pub(crate) fn list_models(endpoint: &Endpoint, directory: Option<&str>) -> Result<Vec<ModelInfo>> {
@@ -1595,19 +1177,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn native_command_accepts_an_empty_acknowledgement() {
-        let endpoint = serve_once("HTTP/1.1 204 No Content\r\n\r\n");
-        command(
-            &endpoint,
-            "ses_test",
-            "review",
-            "main",
-            Some(Delivery::Steer),
-        )
-        .unwrap();
-    }
-
     /// Records every request line and JSON body while answering each request
     /// with the next canned response, so a test can assert exactly what went
     /// on the wire.
@@ -1668,54 +1237,9 @@ mod tests {
         )
     }
 
+    /// The cold fork and export routes the daemon still calls directly.
     #[test]
-    fn computer_use_runtime_configuration_is_location_and_session_scoped() {
-        let (endpoint, received, server) = recording_server(vec![no_content(); 4]);
-        let config = json!({"type":"local","command":["/app/waku_js_repl"],"codemode":false});
-        add_mcp(
-            &endpoint,
-            "/work/project with space",
-            "waku_js_repl_test",
-            &config,
-        )
-        .unwrap();
-        put_instruction_entry(
-            &endpoint,
-            "ses_test",
-            "waku-computer-use",
-            "Use cua.list_apps() through js.",
-        )
-        .unwrap();
-        remove_instruction_entry(&endpoint, "ses_test", "waku-computer-use").unwrap();
-        remove_mcp(&endpoint, "/work/project with space", "waku_js_repl_test").unwrap();
-        server.join().unwrap();
-        let requests: Vec<_> = received.try_iter().collect();
-        assert_eq!(
-            requests[0].0,
-            "PUT /api/experimental/mcp/waku_js_repl_test?location%5Bdirectory%5D=%2Fwork%2Fproject%20with%20space HTTP/1.1\r\n"
-        );
-        assert_eq!(requests[0].1, json!({"config":config}));
-        assert_eq!(
-            requests[1].0,
-            "PUT /api/experimental/session/ses_test/instructions/entries/waku-computer-use HTTP/1.1\r\n"
-        );
-        assert_eq!(
-            requests[1].1,
-            json!({"value":"Use cua.list_apps() through js."})
-        );
-        assert_eq!(
-            requests[2].0,
-            "DELETE /api/experimental/session/ses_test/instructions/entries/waku-computer-use HTTP/1.1\r\n"
-        );
-        assert!(requests[3].0.starts_with(
-            "DELETE /api/experimental/mcp/waku_js_repl_test?location%5Bdirectory%5D="
-        ));
-    }
-
-    /// The 2.0 release renamed or reshaped every turn-control request this
-    /// module sends; each of these was a 400 or a 404 against it.
-    #[test]
-    fn turn_control_requests_use_the_released_routes_and_bodies() {
+    fn cold_fork_and_export_use_the_released_routes_and_bodies() {
         let forked = json!({"data": {
             "id": "ses_fork",
             "projectID": "prj",
@@ -1725,16 +1249,10 @@ mod tests {
             "location": {"directory": "/work"},
         }});
         let (endpoint, received, server) = recording_server(vec![
-            no_content(),
-            no_content(),
-            no_content(),
             json_response(forked.clone()),
             json_response(forked),
             no_content(),
         ]);
-        command(&endpoint, "ses_a", "review", "main", Some(Delivery::Queue)).unwrap();
-        set_inbox_delivery(&endpoint, "ses_a", "msg_1", Delivery::Steer).unwrap();
-        reply_permission(&endpoint, "ses_a", "per_1", PermissionReply::Reject).unwrap();
         assert_eq!(
             fork(&endpoint, "ses_a", Some("msg_2")).unwrap().id,
             "ses_fork"
@@ -1747,94 +1265,15 @@ mod tests {
         assert_eq!(
             requests[0],
             (
-                "POST /api/session/ses_a/command HTTP/1.1\r\n".to_owned(),
-                json!({"name": "review", "text": "main", "delivery": "queue"})
-            )
-        );
-        assert_eq!(
-            requests[1],
-            (
-                "PATCH /api/session/ses_a/inbox/msg_1 HTTP/1.1\r\n".to_owned(),
-                json!({"delivery": "steer"})
-            )
-        );
-        assert_eq!(
-            requests[2],
-            (
-                "POST /api/session/ses_a/permission/per_1/reply HTTP/1.1\r\n".to_owned(),
-                json!({"decision": "reject"})
-            )
-        );
-        assert_eq!(
-            requests[3],
-            (
                 "POST /api/session/ses_a/fork HTTP/1.1\r\n".to_owned(),
                 json!({"before": "msg_2"})
             )
         );
-        assert_eq!(requests[4].1, json!({}), "no boundary copies everything");
+        assert_eq!(requests[1].1, json!({}), "no boundary copies everything");
         assert_eq!(
-            requests[5].0,
+            requests[2].0,
             "GET /api/experimental/session/ses_a/export?sanitize=false HTTP/1.1\r\n"
         );
-    }
-
-    /// The shape OpenCode's model gateway accepts, and ordering that matches
-    /// OpenCode's own: a later id sorts before an earlier one.
-    #[test]
-    fn minted_session_ids_follow_opencodes_own_format() {
-        let ids = (0..64).map(|_| new_session_id()).collect::<Vec<_>>();
-        for id in &ids {
-            let body = id.strip_prefix("ses_").expect("a session prefix");
-            assert_eq!(body.len(), 26, "{id}");
-            assert!(
-                body[..12]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
-                "{id}"
-            );
-            assert!(
-                body[12..].bytes().all(|byte| byte.is_ascii_alphanumeric()),
-                "{id}"
-            );
-        }
-        assert!(
-            ids.windows(2).all(|pair| pair[0][..16] > pair[1][..16]),
-            "{ids:?}"
-        );
-        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len());
-        // The live service minted `ses_f04139daeffeTzlMaa5sNV1PXd` at this
-        // millisecond (9 ms before it stamped the session's `time.created`),
-        // as the first id of that millisecond.
-        assert_eq!(
-            format!(
-                "{:012x}",
-                !(1_790_932_968_017_u64 * 0x1000 + 1) & 0xFFFF_FFFF_FFFF
-            ),
-            "f04139daeffe"
-        );
-    }
-
-    #[test]
-    fn migration_status_reads_every_state() {
-        for (body, status) in [
-            (json!({"status": "required"}), MigrationStatus::Required),
-            (
-                json!({"status": "running", "progress": {"label": "Migrating sessions", "numerator": 3, "denominator": 9}}),
-                MigrationStatus::Running,
-            ),
-            (json!({"status": "completed"}), MigrationStatus::Completed),
-            (
-                json!({"status": "error", "error": "disk full"}),
-                MigrationStatus::Error,
-            ),
-            (json!({"status": "paused"}), MigrationStatus::Unknown),
-        ] {
-            assert_eq!(
-                serde_json::from_value::<MigrationStatus>(body).unwrap(),
-                status
-            );
-        }
     }
 
     #[test]
@@ -2064,23 +1503,6 @@ mod tests {
         assert!(session.parent_id.is_none());
     }
 
-    /// The exact entry the released service answers a prompt with. Its
-    /// timestamp moved into `time.created`, which must not fail a prompt.
-    #[test]
-    fn inbox_user_reads_the_released_prompt_answer() {
-        let entry: InboxUser = serde_json::from_value(json!({
-            "id": "msg_1",
-            "sessionID": "ses_1",
-            "time": { "created": 1.0 },
-            "type": "user",
-            "payload": { "text": "hi" },
-            "delivery": "steer",
-        }))
-        .unwrap();
-        assert_eq!(entry.delivery, Delivery::Steer);
-        assert_eq!(entry.payload["text"], json!("hi"));
-    }
-
     #[test]
     fn form_fields_decode_every_kind() {
         let form: FormInfo = serde_json::from_value(json!({
@@ -2118,24 +1540,6 @@ mod tests {
         );
     }
 
-    /// `always` writes a rule into the user's own permission config, so it is
-    /// refused before any request goes out.
-    #[test]
-    fn saving_a_permission_rule_is_refused_without_a_request() {
-        let error = reply_permission(
-            &Endpoint::local(1),
-            "ses_1",
-            "per_1",
-            PermissionReply::Always,
-        )
-        .unwrap_err();
-        assert!(matches!(error, ApiError::Transport(_)));
-        assert_eq!(
-            serde_json::to_value(PermissionReply::Once).unwrap(),
-            json!("once")
-        );
-    }
-
     #[test]
     fn a_structured_error_body_keeps_its_tag_and_status() {
         let body = r#"{"_tag":"SessionNotFoundError","sessionID":"ses_x","message":"Session not found: ses_x"}"#;
@@ -2146,10 +1550,9 @@ mod tests {
             )
             .into_boxed_str(),
         ));
-        let error = get_session(&endpoint, "ses_x").unwrap_err();
+        let error = list_models(&endpoint, None).unwrap_err();
         assert_eq!(error.tag(), Some("SessionNotFoundError"));
         assert_eq!(error.status(), Some(404));
-        assert!(error.is_not_found());
         assert!(!error.is_unresolvable_location());
     }
 
@@ -2164,15 +1567,6 @@ mod tests {
         assert_eq!(error.status(), Some(500));
     }
 
-    #[test]
-    fn active_sessions_are_the_keys_of_the_payload() {
-        let endpoint = serve_once(
-            "HTTP/1.1 200 OK\r\nContent-Length: 41\r\n\r\n{\"data\":{\"ses_a\":{\"type\":\"running\"}}}\r\n\r\n",
-        );
-        let active = active_sessions(&endpoint).unwrap();
-        assert_eq!(active, HashSet::from(["ses_a".to_owned()]));
-    }
-
     /// Reads the user's own running service. Kept out of the default run
     /// because it depends on a daemon this test must never start.
     #[test]
@@ -2185,7 +1579,6 @@ mod tests {
 
         let info = server_info(&endpoint).unwrap();
         assert_eq!(info.pid, registration.pid);
-        assert!(v1_migration_status(&endpoint).is_ok());
 
         let directory = std::env::current_dir().unwrap();
         let directory = std::fs::canonicalize(directory).unwrap();
@@ -2196,12 +1589,10 @@ mod tests {
         let _ = list_models(&endpoint, Some(directory)).unwrap();
         assert!(!list_agents(&endpoint, Some(directory)).unwrap().is_empty());
         let _ = list_commands(&endpoint, Some(directory)).unwrap();
-        let _ = active_sessions(&endpoint).unwrap();
 
         let (sessions, _) =
             list_sessions(&endpoint, Some(directory), None, Order::Desc, 5, None).unwrap();
         if let Some(session) = sessions.first() {
-            assert_eq!(get_session(&endpoint, &session.id).unwrap().id, session.id);
             let (messages, _) =
                 list_messages(&endpoint, &session.id, Order::Asc, Some(5), None).unwrap();
             assert!(
@@ -2209,9 +1600,6 @@ mod tests {
                     .iter()
                     .all(|message| *message != MessageInfo::Unknown)
             );
-            assert!(list_permissions(&endpoint, &session.id).is_ok());
-            assert!(list_forms(&endpoint, &session.id).is_ok());
-            assert!(list_inbox(&endpoint, &session.id).is_ok());
         }
     }
 }

@@ -4,6 +4,7 @@
 //! cargo run -p waku-core --bin waku-replay-record -- \
 //!   --provider fake --scenario simple [--fixtures DIR] [--out PATH] [--renumber-ids]
 //!   [--binary PATH] [--script TRANSCRIPT] [--source TEXT] [--synthetic]
+//!   [--cli-version V] [--service-url URL]
 //! ```
 //!
 //! Runs `<fixtures>/<scenario>/input.<provider>.json` (or the shared
@@ -14,7 +15,11 @@
 //! `codex` (#46) and `claude` (#47, against the real CLI: `--binary`, default
 //! `claude` on the search path). `--script` plays a transcript's inbound
 //! frames to the driver instead of the live CLI (Codex only; see
-//! `driver::codex::script`).
+//! `driver::codex::script`). The HTTP drivers `opencode` (#49) and `deepseek`
+//! (#52) record against a running service given by `--service-url`
+//! (OpenCode: `http://opencode:<password>@127.0.0.1:<port>`; DeepSeek: a
+//! `dsh web` URL), so neither the recording nor its replay check discovers
+//! or starts one.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -26,6 +31,8 @@ use waku_core::driver::codex::script::ScriptedAppServer;
 use waku_core::driver::codex::{
     CODEX_FIXTURE_VERSION, CODEX_PROTOCOL, CODEX_PROVIDER, CodexDriver, codex_instance,
 };
+use waku_core::driver::deepseek::{DEEPSEEK_PROTOCOL, DEEPSEEK_PROVIDER, DeepSeekDriver};
+use waku_core::driver::opencode::{OPENCODE_PROTOCOL, OPENCODE_PROVIDER, OpenCodeDriver};
 use waku_core::driver::v2::fake::{
     FAKE_PROTOCOL, FAKE_PROVIDER, FakeDriver, FakeProfile, fake_instance,
 };
@@ -33,6 +40,7 @@ use waku_core::driver::v2::fake_agent::FakeAgentFactory;
 use waku_core::driver::v2::replay::record::{RecordRequest, record_scenario};
 use waku_core::driver::v2::replay::{ScenarioInput, TranscriptHeader, read_transcript};
 use waku_core::driver::v2::{DriverV2, InstanceConfig, ProcessTransportFactory, TransportFactory};
+use waku_protocol::orchestration::DriverKind;
 
 struct Args {
     provider: String,
@@ -44,6 +52,11 @@ struct Args {
     script: Option<PathBuf>,
     source: Option<String>,
     synthetic: bool,
+    /// HTTP drivers: the running service to record against
+    /// (`http://user:password@127.0.0.1:port`). Replay re-runs the same
+    /// instance, so the driver never discovers or starts a service itself.
+    service_url: Option<String>,
+    cli_version: Option<String>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -53,6 +66,7 @@ fn parse() -> Result<Args, String> {
     let mut out = None;
     let mut renumber_ids = false;
     let (mut binary, mut script, mut source, mut synthetic) = (None, None, None, false);
+    let (mut service_url, mut cli_version) = (None, None);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -66,6 +80,8 @@ fn parse() -> Result<Args, String> {
             "--script" => script = Some(PathBuf::from(value("--script")?)),
             "--source" => source = Some(value("--source")?),
             "--synthetic" => synthetic = true,
+            "--service-url" => service_url = Some(value("--service-url")?),
+            "--cli-version" => cli_version = Some(value("--cli-version")?),
             // Accepted for parity with RFC 0002; no recorded scenario is
             // timing-sensitive yet.
             "--keep-timing" => {}
@@ -85,6 +101,8 @@ fn parse() -> Result<Args, String> {
         script,
         source,
         synthetic,
+        service_url,
+        cli_version,
     })
 }
 
@@ -172,9 +190,49 @@ fn main() -> ExitCode {
                 CLAUDE_PROTOCOL,
             )
         }
+        OPENCODE_PROVIDER | DEEPSEEK_PROVIDER => {
+            let Some(service_url) = args.service_url.clone() else {
+                eprintln!(
+                    "waku-replay-record: {} records against a running service; pass --service-url",
+                    args.provider
+                );
+                return ExitCode::from(2);
+            };
+            let opencode = args.provider == OPENCODE_PROVIDER;
+            let mut instance = if opencode {
+                InstanceConfig::new(OPENCODE_PROVIDER, DriverKind::OpenCode)
+            } else {
+                InstanceConfig::new(DEEPSEEK_PROVIDER, DriverKind::DeepSeek)
+            };
+            instance.binary = args
+                .binary
+                .clone()
+                .unwrap_or_else(|| if opencode { "opencode" } else { "dsh" }.into());
+            instance.cli_version = args.cli_version.clone();
+            instance.extra = if opencode {
+                serde_json::json!({ "serviceUrl": service_url })
+            } else {
+                serde_json::json!({ "baseUrl": service_url })
+            };
+            metadata.insert(
+                "minCliVersion".to_owned(),
+                Value::from(args.cli_version.clone().unwrap_or_default()),
+            );
+            let (driver, protocol): (Arc<dyn DriverV2>, &str) = if opencode {
+                (Arc::new(OpenCodeDriver), OPENCODE_PROTOCOL)
+            } else {
+                (Arc::new(DeepSeekDriver), DEEPSEEK_PROTOCOL)
+            };
+            (
+                driver,
+                instance,
+                Arc::new(ProcessTransportFactory),
+                protocol,
+            )
+        }
         other => {
             eprintln!(
-                "waku-replay-record: {other} has no DriverV2 port yet; recording arrives with its port (#48-#52)"
+                "waku-replay-record: {other} has no DriverV2 port yet; recording arrives with its port (#50-#51)"
             );
             return ExitCode::from(2);
         }

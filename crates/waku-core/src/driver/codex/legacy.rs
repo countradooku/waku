@@ -146,8 +146,8 @@ impl Drop for ComputerUse {
 
 /// The bridge's runtime: drivers are async (RFC 0002 D-2) and the daemon
 /// that calls `start_local` is not. Shared with every bridged driver.
-fn runtime() -> &'static tokio::runtime::Runtime {
-    crate::driver::bridge_runtime()
+fn runtime() -> tokio::runtime::Handle {
+    crate::driver::v2::bridge::runtime()
 }
 
 /// What the raw-frame observer and the `DriverControl` wrapper share.
@@ -334,7 +334,7 @@ pub(crate) fn start_local(
     });
     let mut instance = InstanceConfig::new(super::CODEX_PROVIDER, orch::DriverKind::Codex);
     instance.extra = Value::Null;
-    let runtime = runtime().handle().clone();
+    let runtime = runtime();
     // `V1Bridge::start` blocks on the runtime; the caller may itself run on
     // another runtime's blocking pool.
     let bridge = {

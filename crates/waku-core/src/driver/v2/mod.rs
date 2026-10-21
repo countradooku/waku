@@ -28,6 +28,7 @@ pub mod bridge;
 pub mod coalescer;
 pub mod fake;
 pub mod fake_agent;
+pub mod http;
 pub mod ids;
 pub mod manager;
 pub mod replay;
@@ -57,8 +58,8 @@ pub use waku_orchestrator::{Clock, TransitionPlan};
 
 pub use self::ids::{EntityKind, IdAllocator, SeqIdAllocator, UuidIdAllocator};
 pub use self::transport::{
-    HttpMethod, HttpResponse, HttpTransport, ProcessExit, ProcessSpec, ProcessTransportFactory,
-    StdioTransport, TransportFactory,
+    Downlink, HttpMethod, HttpResponse, HttpTransport, ProcessExit, ProcessSpec,
+    ProcessTransportFactory, StdioTransport, TransportFactory,
 };
 
 pub type DriverResult<T> = Result<T, DriverError>;

@@ -208,6 +208,11 @@ impl DeltaCoalescer {
     pub fn flush(&mut self) -> Vec<AdapterEvent> {
         self.0.flush()
     }
+
+    /// Whether a snapshot waits for its interval (drivers arm a 16 ms tick).
+    pub fn has_pending(&self) -> bool {
+        self.0.has_pending()
+    }
 }
 
 #[cfg(test)]

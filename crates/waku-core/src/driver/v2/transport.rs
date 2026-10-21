@@ -89,8 +89,19 @@ pub struct HttpResponse {
     pub body: serde_json::Value,
 }
 
+/// A downlink: one JSON value per server-sent event or WebSocket message.
+/// The stream ends when the connection closes; an `Err` item ends it too
+/// (a timeout, a server-reported stream failure). Dropping it closes the
+/// connection.
+pub type Downlink = BoxStream<'static, io::Result<serde_json::Value>>;
+
 /// An HTTP client plus streaming downlinks (OpenCode service, DeepSeek
 /// `dsh web`).
+///
+/// `path` is relative to the base URL the transport was opened with and may
+/// carry a query. A non-2xx answer is an `Ok` response with its status: the
+/// driver reads the server's own error body. `Err` means no HTTP answer at
+/// all (connect failure, timeout, a malformed response).
 #[async_trait]
 pub trait HttpTransport: Send + Sync {
     async fn request(
@@ -99,10 +110,16 @@ pub trait HttpTransport: Send + Sync {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> io::Result<HttpResponse>;
-    async fn stream(
-        &self,
-        path: &str,
-    ) -> io::Result<BoxStream<'static, io::Result<serde_json::Value>>>;
+    /// A server-sent-event downlink (`GET` with `Accept: text/event-stream`).
+    async fn stream(&self, path: &str) -> io::Result<Downlink>;
+    /// A WebSocket downlink whose text messages are JSON values (DeepSeek
+    /// Harness `/api/events.*`).
+    async fn websocket(&self, _path: &str) -> io::Result<Downlink> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this transport has no WebSocket downlink",
+        ))
+    }
 }
 
 #[async_trait]
@@ -149,13 +166,13 @@ impl TransportFactory for ProcessTransportFactory {
         })
     }
 
-    async fn http(&self, _channel: &str, _base: Url) -> io::Result<Arc<dyn HttpTransport>> {
-        // The HTTP transport lands with the first HTTP driver port (OpenCode
-        // #49, DeepSeek #52); replay already implements the trait.
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the HTTP transport arrives with the OpenCode and DeepSeek ports",
-        ))
+    async fn http(&self, _channel: &str, base: Url) -> io::Result<Arc<dyn HttpTransport>> {
+        // One client per origin and credential, shared by every session that
+        // talks to it, so keep-alive connections are leased across sessions.
+        Ok(super::http::HttpClient::shared(
+            base,
+            super::http::HttpOptions::default(),
+        )?)
     }
 
     fn provider_home(&self, cfg: &InstanceConfig) -> PathBuf {

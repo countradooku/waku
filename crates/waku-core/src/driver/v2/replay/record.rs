@@ -14,15 +14,19 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
+use futures_util::StreamExt as _;
 use parking_lot::Mutex;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use url::Url;
 
 use super::transport::{process_start_frame, spawn_channel};
 use super::{ExitStatusKind, ReplayEntry};
 use crate::driver::v2::InstanceConfig;
-use crate::driver::v2::transport::{HttpTransport, ProcessSpec, StdioTransport, TransportFactory};
+use crate::driver::v2::transport::{
+    Downlink, HttpMethod, HttpResponse, HttpTransport, ProcessSpec, StdioTransport,
+    TransportFactory,
+};
 
 type Entries = Arc<Mutex<Vec<ReplayEntry>>>;
 
@@ -206,12 +210,118 @@ impl TransportFactory for RecordingTransportFactory {
     }
 
     async fn http(&self, channel: &str, base: Url) -> io::Result<Arc<dyn HttpTransport>> {
-        // HTTP drivers record when their ports land (#49, #52).
-        self.inner.http(channel, base).await
+        let channel = spawn_channel(&mut self.spawns.lock(), channel);
+        let inner = self.inner.http(&channel, base).await?;
+        Ok(Arc::new(TeeHttp {
+            inner,
+            channel,
+            entries: self.entries.clone(),
+        }))
     }
 
     fn provider_home(&self, cfg: &InstanceConfig) -> PathBuf {
         self.inner.provider_home(cfg)
+    }
+}
+
+/// Records an HTTP channel: each request as an `http.request` followed by its
+/// `http.response`, each downlink as a `stream.open` / `websocket.open`, the
+/// `stream.event`s read from it, and a `stream.closed` when it ends. A request
+/// that got no HTTP answer at all records nothing past its request.
+struct TeeHttp {
+    inner: Arc<dyn HttpTransport>,
+    channel: String,
+    entries: Entries,
+}
+
+impl TeeHttp {
+    fn outbound(&self, label: String, frame: Value) {
+        self.entries.lock().push(ReplayEntry::ExpectOutbound {
+            label: Some(label),
+            channel: channel_field(&self.channel),
+            frame,
+        });
+    }
+
+    fn tee(&self, path: &str, downlink: Downlink) -> Downlink {
+        let entries = self.entries.clone();
+        let channel = channel_field(&self.channel);
+        let path = path.to_owned();
+        Box::pin(futures_util::stream::unfold(
+            Some(downlink),
+            move |downlink| {
+                let entries = entries.clone();
+                let channel = channel.clone();
+                let path = path.clone();
+                async move {
+                    let mut downlink = downlink?;
+                    let item = downlink.next().await;
+                    let frame = match &item {
+                        Some(Ok(data)) => {
+                            json!({ "type": "stream.event", "path": path, "data": data })
+                        }
+                        _ => json!({ "type": "stream.closed", "path": path }),
+                    };
+                    let label = match &item {
+                        Some(Ok(data)) => label_of(data),
+                        _ => Some("stream.closed".to_owned()),
+                    };
+                    entries.lock().push(ReplayEntry::EmitInbound {
+                        label,
+                        channel,
+                        frame,
+                        after_ms: None,
+                    });
+                    match item {
+                        Some(Ok(data)) => Some((Ok(data), Some(downlink))),
+                        Some(Err(error)) => Some((Err(error), None)),
+                        None => None,
+                    }
+                }
+            },
+        ))
+    }
+}
+
+#[async_trait]
+impl HttpTransport for TeeHttp {
+    async fn request(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        body: Option<Value>,
+    ) -> io::Result<HttpResponse> {
+        let mut frame = json!({ "type": "http.request", "method": method.as_str(), "path": path });
+        if let Some(body) = &body {
+            frame["body"] = body.clone();
+        }
+        self.outbound(format!("{} {path}", method.as_str()), frame);
+        let response = self.inner.request(method, path, body).await?;
+        self.entries.lock().push(ReplayEntry::EmitInbound {
+            label: Some("http.response".to_owned()),
+            channel: channel_field(&self.channel),
+            frame: json!({ "type": "http.response", "status": response.status, "body": response.body }),
+            after_ms: None,
+        });
+        Ok(response)
+    }
+
+    async fn stream(&self, path: &str) -> io::Result<Downlink> {
+        self.outbound(
+            "stream.open".to_owned(),
+            json!({ "type": "stream.open", "path": path }),
+        );
+        let downlink = self.inner.stream(path).await?;
+        Ok(self.tee(path, downlink))
+    }
+
+    async fn websocket(&self, path: &str) -> io::Result<Downlink> {
+        self.outbound(
+            "websocket.open".to_owned(),
+            json!({ "type": "websocket.open", "path": path }),
+        );
+        let downlink = self.inner.websocket(path).await?;
+        Ok(self.tee(path, downlink))
     }
 }
 

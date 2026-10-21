@@ -6,12 +6,12 @@ mod amp;
 pub mod claude;
 pub mod codex;
 mod computer_use;
-mod deepseek;
-mod opencode;
-mod opencode_computer_use;
+pub mod deepseek;
+pub mod opencode;
 mod pi;
 mod support;
 mod title_refresh;
+mod tool_items;
 pub mod v2;
 
 /// One-shot title generation for the orchestrator's `TitlePort` (RFC 0001).
@@ -210,25 +210,6 @@ pub struct SessionOptions {
     pub context_window: Option<String>,
 }
 
-/// The one runtime every `V1Bridge`-served `DriverV2` session (Codex, the
-/// ACP family, Claude) runs on until the daemon moves onto one tokio runtime
-/// (RFC 0002 "Interim before #18"). Its threads unblock SIGCHLD: agents
-/// spawned from them inherit the mask and must be able to reap children.
-pub(crate) fn bridge_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .thread_name("waku-driver-v2")
-            .on_thread_start(|| {
-                let _ = crate::command_env::unblock_sigchld_for_current_thread();
-            })
-            .enable_all()
-            .build()
-            .expect("the driver runtime starts")
-    })
-}
-
 pub(crate) fn start_local(
     provider: ProviderKind,
     mut options: DriverStartOptions,
@@ -253,11 +234,32 @@ pub(crate) fn start_local(
         ProviderKind::Cursor | ProviderKind::Fx | ProviderKind::Grok | ProviderKind::Kimi => {
             Arc::new(acp::start(provider, options, events)?)
         }
-        ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),
+        // Ported to `DriverV2` (#52); one pooled `dsh web` per binary.
+        ProviderKind::DeepSeek => Arc::new(v2::bridge::V1Bridge::start(
+            Arc::new(deepseek::DeepSeekDriver),
+            v2::InstanceConfig::new(
+                "deepseek",
+                waku_protocol::orchestration::DriverKind::DeepSeek,
+            ),
+            options,
+            events,
+            Arc::new(v2::ProcessTransportFactory),
+            v2::bridge::runtime(),
+        )?),
         // OpenCode is not a per-workspace server: one adopted background
-        // service carries every workspace, and every Waku task rides its one
-        // event stream.
-        ProviderKind::OpenCode => Arc::new(opencode::OpenCodeDriver::start(options, events)?),
+        // service carries every workspace. Ported to `DriverV2` (#49) and
+        // served through the bridge until the orchestrator cutover.
+        ProviderKind::OpenCode => Arc::new(v2::bridge::V1Bridge::start(
+            Arc::new(opencode::OpenCodeDriver),
+            v2::InstanceConfig::new(
+                "opencode",
+                waku_protocol::orchestration::DriverKind::OpenCode,
+            ),
+            options,
+            events,
+            Arc::new(v2::ProcessTransportFactory),
+            v2::bridge::runtime(),
+        )?),
         // Claude serves a realtime stream of user messages on stdin — the same
         // transport the Agent SDK drives — which is what lets its Supervised
         // mode ask rather than decide alone.
@@ -274,7 +276,7 @@ pub(crate) fn start_local(
                 options,
                 events,
                 Arc::new(v2::ProcessTransportFactory),
-                bridge_runtime().handle().clone(),
+                v2::bridge::runtime(),
             )?)
         }
         // Amp reads newline-delimited user messages on stdin and stays alive

@@ -302,24 +302,6 @@ pub fn fork_session_at_turn(
     fork_at_boundary(&endpoint, session_id, &message_ids, retained_turns)
 }
 
-/// Branches a session by dropping its last `turns_to_remove` native turns.
-///
-/// Deliberately NOT built on `POST …/revert/stage|commit|clear`: revert
-/// mutates the same session, writes files, and answers 409 `SessionBusyError`
-/// while a turn is running, whereas Waku's contract here is "drop the last N
-/// turns and hand back a cursor for the continuing conversation". Revert is
-/// real headroom — it survives reconnect via `Session.Info.revert` and carries
-/// per-file patches — and wants its own affordance rather than this one.
-pub(crate) fn fork_session_removing_turns(
-    endpoint: &Endpoint,
-    session_id: &str,
-    turns_to_remove: usize,
-) -> anyhow::Result<ProviderResumeCursor> {
-    let message_ids = native_turn_message_ids(endpoint, session_id)?;
-    let retained_turns = retained_turn_count(message_ids.len(), turns_to_remove)?;
-    fork_at_boundary(endpoint, session_id, &message_ids, retained_turns)
-}
-
 /// The id of the user message that opens each native turn, oldest first.
 fn native_turn_message_ids(endpoint: &Endpoint, session_id: &str) -> anyhow::Result<Vec<String>> {
     let mut boundaries = TurnBoundaries::default();
@@ -367,7 +349,7 @@ fn native_turn_message_ids(endpoint: &Endpoint, session_id: &str) -> anyhow::Res
 /// provider stream ends, so the fallback cannot split a native turn steered
 /// before its first marker.
 #[derive(Debug, Default)]
-struct TurnBoundaries {
+pub(crate) struct TurnBoundaries {
     /// A user message opened a turn no marker has closed yet.
     open: bool,
     /// A marker was seen, so everything after it is native history.
@@ -385,7 +367,7 @@ struct MigratedStep {
 
 impl TurnBoundaries {
     /// Feeds the next message, returning its id when it opens a turn.
-    fn observe<'a>(&mut self, message: &'a MessageInfo) -> Option<&'a str> {
+    pub(crate) fn observe<'a>(&mut self, message: &'a MessageInfo) -> Option<&'a str> {
         match message {
             MessageInfo::Idle { .. } => {
                 self.open = false;
@@ -450,14 +432,6 @@ fn fork_boundary(message_ids: &[String], retained_turns: usize) -> anyhow::Resul
         );
     }
     Ok(message_ids.get(retained_turns).map(String::as_str))
-}
-
-fn retained_turn_count(total_turns: usize, turns_to_remove: usize) -> anyhow::Result<usize> {
-    total_turns.checked_sub(turns_to_remove).ok_or_else(|| {
-        anyhow!(
-            "OpenCode has only {total_turns} native turns, but Waku needs to remove {turns_to_remove}"
-        )
-    })
 }
 
 /// The service's model and primary-agent catalogs.
@@ -929,13 +903,6 @@ mod tests {
         // Retaining everything has no first-excluded message at all.
         assert_eq!(fork_boundary(&ids, 3).unwrap(), None);
         assert!(fork_boundary(&ids, 4).is_err());
-    }
-
-    #[test]
-    fn rollback_count_is_converted_to_the_retained_native_prefix() {
-        assert_eq!(retained_turn_count(4, 1).unwrap(), 3);
-        assert_eq!(retained_turn_count(4, 4).unwrap(), 0);
-        assert!(retained_turn_count(4, 5).is_err());
     }
 
     #[test]

@@ -76,6 +76,30 @@ pub struct V1Bridge {
     supports_steer: bool,
 }
 
+/// The one runtime every bridged session (Codex, the ACP family, Claude,
+/// OpenCode, DeepSeek) runs on until the daemon hosts one runtime for every
+/// driver (RFC 0002 "Interim before #18 lands"). Created on first use;
+/// `V1Bridge::start` blocks on it from daemon request threads. Its threads
+/// unblock SIGCHLD: agents spawned from them inherit the signal mask and
+/// must be able to reap their children.
+pub fn runtime() -> tokio::runtime::Handle {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_name("waku-driver-v2")
+                .on_thread_start(|| {
+                    let _ = crate::command_env::unblock_sigchld_for_current_thread();
+                })
+                .enable_all()
+                .build()
+                .expect("the driver runtime starts")
+        })
+        .handle()
+        .clone()
+}
+
 /// The selection a legacy start or option change describes.
 pub fn selection_from_options(options: &SessionOptions, agent_preset: Option<String>) -> Selection {
     Selection {

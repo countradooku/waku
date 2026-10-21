@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"start the dev server in the background"},{"type":"wait","until":"turn_terminal"}]}

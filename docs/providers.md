@@ -20,14 +20,21 @@ session that spans the whole conversation**:
 
 | Codex app-server (JSON-RPC over stdio) | [driver/codex/](../crates/waku-core/src/driver/codex/) | Codex CLI |
 | Agent Client Protocol (JSON-RPC over stdio) | [driver/acp.rs](../crates/waku-core/src/driver/acp.rs) | Cursor CLI, Fx, Grok Build, Kimi Code |
-| OpenCode background service (HTTP + server-sent events) | [driver/opencode.rs](../crates/waku-core/src/driver/opencode.rs) | OpenCode |
+| OpenCode background service (HTTP + server-sent events), `DriverV2` | [driver/opencode/](../crates/waku-core/src/driver/opencode/mod.rs) | OpenCode |
 | Pi RPC mode (NDJSON request/response over stdio) | [driver/pi.rs](../crates/waku-core/src/driver/pi.rs) | Pi, Oh My Pi |
 | Claude streaming-input session (NDJSON over stdio) | [driver/claude/](../crates/waku-core/src/driver/claude/mod.rs) | Claude Code |
 | Amp streaming-JSON session (NDJSON over stdio) | [driver/amp.rs](../crates/waku-core/src/driver/amp.rs) | Amp |
-| Harness client API (typed HTTP + downlink streams) | [driver/deepseek.rs](../crates/waku-core/src/driver/deepseek.rs) | DeepSeek Harness |
+| Harness client API (typed HTTP + WebSocket downlinks), `DriverV2` | [driver/deepseek/](../crates/waku-core/src/driver/deepseek/mod.rs) | DeepSeek Harness |
 
 DeepSeek Harness has no dedicated section below yet; its driver's module
-comment is the current reference.
+comment and RFC 0002's amendments (#52) are the current reference. Since
+the `DriverV2` port each session holds a lease on the pooled `dsh web` and
+opens its own `/api/events.mux` and `/api/events.host` WebSockets through
+`driver::v2::http`; the Host process no longer runs reader threads. Approval
+outcomes are passed through as option ids (`allowed-once`, `rejected`, or
+whatever the request lists), agent presets are fixed at `session.create`
+(a change starts a new provider thread with a handoff), and capabilities are
+in [capabilities_deepseek.json](../crates/waku-core/src/driver/deepseek/capabilities_deepseek.json).
 
 ## The driver contract
 
@@ -168,7 +175,7 @@ stops a turn, and the short-lived server that backs a Grok fork.
 | Interactive approvals | yes | no | no (has them; Waku runs `--yolo`) | yes | no | yes | yes | yes | yes | yes |
 | Mid-turn steering | yes | yes | yes | yes | yes | yes | **no** | yes | yes | yes (transport) |
 | Model discovery | yes | yes | yes | no (fixed) | no (modes) | yes | yes | yes | yes | yes |
-| Computer Use | yes | yes | no (ships its own) | no | no | no | no | yes | yes | no |
+| Computer Use | yes | yes | no (ships its own) | no | no | no | no | no (dropped by the `DriverV2` port, #49) | yes | no |
 | Restricted to Full access | no | yes | yes | no | yes | no | no | no | no | no |
 | Rewind and branch at a turn | yes | yes | yes | yes | yes | yes | **no** | yes | yes | **no** |
 
@@ -560,6 +567,33 @@ OpenCode 2 is the `opencode` command. Its 2.0 release replaced the
 per-workspace `opencode serve` of OpenCode 1 with one background service per
 user that serves every workspace, and the CLI, TUI and desktop app all share
 it.
+
+**`DriverV2` port (#49).** The driver is now `driver/opencode/` (RFC 0002
+"OpenCode"), served to the app through `V1Bridge` until the orchestrator
+cutover. What changed against the description below:
+
+- One actor task per session on the driver runtime, talking through
+  `driver::v2::http` (pooled keep-alive HTTP/1.1, SSE). Each session opens its
+  own `GET /api/event` downlink and keeps only frames for its native session
+  (`tui.*` dropped, `form.created` routed by its nested session id); the
+  shared reader thread, hub and model-window cache of `opencode_service` are
+  gone. Discovery and adoption are unchanged.
+- The service mints the session id (`POST /api/session` without `id`): the
+  actor reads the stream only after the create answers, so no event can race
+  it. The OpenCode 1 import wait on resume is gone; a missing session starts a
+  fresh one for the same provider thread.
+- A stream break resubscribes (250 ms → 2 s backoff), re-lists pending
+  permissions and forms, and settles a turn whose execution ended while the
+  stream was down from `GET /api/session/active` and the session's `outcome`.
+  The "waiting for the service" row and the mid-turn gap-fill of text are not
+  ported.
+- Turn ids are weak: the inbox id the prompt answers, which is the id of the
+  user message that opens the turn. Rollback and fork are `POST …/fork
+  { before }` (rollback replaces the provider thread).
+- Capabilities: [capabilities_opencode.json](../crates/waku-core/src/driver/opencode/capabilities_opencode.json).
+  Computer Use is not ported (it needs a driver-event channel `DriverV2`
+  does not have); auto titles from `session.renamed` and slash-command
+  discovery events are not forwarded.
 
 **Launch** — usually none. Waku adopts the service the user's own `opencode`
 already started, found through its registration file
