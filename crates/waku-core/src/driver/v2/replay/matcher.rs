@@ -98,8 +98,9 @@ pub fn matches(expected: &Value, actual: &Value) -> bool {
     match (expected, actual) {
         (Value::String(pattern), _) if pattern == ANY => true,
         (Value::String(pattern), Value::String(text)) if pattern.contains(ANY) => {
-            glob(pattern, text)
+            glob(&portable(pattern), &portable(text))
         }
+        (Value::String(expected), Value::String(actual)) => portable(expected) == portable(actual),
         (Value::Object(expected), Value::Object(actual)) => {
             expected.len() == actual.len()
                 && expected
@@ -114,6 +115,16 @@ pub fn matches(expected: &Value, actual: &Value) -> bool {
                     .all(|(expected, actual)| matches(expected, actual))
         }
         _ => expected == actual,
+    }
+}
+
+/// Fixtures spell paths with `/`; on Windows the same path uses `\`, and
+/// that is the only difference a recording and a run there may have.
+fn portable(text: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) {
+        text.replace('\\', "/").into()
+    } else {
+        text.into()
     }
 }
 

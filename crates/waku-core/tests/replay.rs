@@ -886,12 +886,16 @@ fn replay_is_deterministic() {
         // Only the temporary workspace path differs between two runs.
         let normalize = |result: &ScenarioResult| -> Vec<String> {
             let workspace = result.workspace.display().to_string();
+            // Inside JSON a Windows path's backslashes are escaped.
+            let escaped = serde_json::to_string(&workspace).unwrap();
+            let escaped = &escaped[1..escaped.len() - 1];
             result
                 .events
                 .iter()
                 .map(|event| {
                     serde_json::to_string(event)
                         .unwrap()
+                        .replace(escaped, "<workspace>")
                         .replace(&workspace, "<workspace>")
                 })
                 .collect()

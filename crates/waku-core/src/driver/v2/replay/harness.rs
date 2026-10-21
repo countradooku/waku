@@ -376,8 +376,9 @@ impl ReplayHarness {
         transports: Transports,
     ) -> Result<Self, ReplayError> {
         let dir = tempfile::tempdir().map_err(harness_error)?;
-        // Canonical paths: drivers see symlink-free cwds (macOS /private/var).
-        let root = dir.path().canonicalize().map_err(harness_error)?;
+        // Canonical paths: drivers see symlink-free cwds (macOS /private/var),
+        // without Windows' `\\?\` prefix, which CLIs and Git reject.
+        let root = dunce::canonicalize(dir.path()).map_err(harness_error)?;
         let workspace = root.join("workspace");
         let home = root.join("home");
         std::fs::create_dir_all(&workspace).map_err(harness_error)?;
@@ -557,6 +558,33 @@ impl ReplayHarness {
         })
     }
 
+    /// The unsettled effects, for a failure message.
+    fn unsettled_effect_details(&self) -> String {
+        self.orchestrator.reader().with(|connection| {
+            let mut statement = match connection.prepare(
+                "SELECT effect_type, status, attempt_count, available_at, last_error
+                 FROM effect_outbox WHERE status IN ('pending', 'running') ORDER BY effect_id",
+            ) {
+                Ok(statement) => statement,
+                Err(error) => return error.to_string(),
+            };
+            let rows = statement.query_map([], |row| {
+                Ok(format!(
+                    "{} {} (attempts {}, due {}, last error {:?})",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            });
+            match rows {
+                Ok(rows) => rows.filter_map(Result::ok).collect::<Vec<_>>().join("; "),
+                Err(error) => error.to_string(),
+            }
+        })
+    }
+
     fn replay_failed(&self) -> Result<(), ReplayError> {
         match self.replay.as_ref().and_then(|replay| replay.error()) {
             Some(error) => Err(error),
@@ -591,8 +619,12 @@ impl ReplayHarness {
             last = Some(snapshot);
             if Instant::now() > deadline {
                 return Err(ReplayError::Harness(format!(
-                    "the scenario did not settle (unsettled effects: {}, manager idle: {})",
-                    snapshot.1, snapshot.2
+                    "the scenario did not settle (unsettled effects: {}, manager idle: {}, \
+                     clock: {}): {}",
+                    snapshot.1,
+                    snapshot.2,
+                    waku_orchestrator::Clock::now(&*self.clock),
+                    self.unsettled_effect_details()
                 )));
             }
             std::thread::sleep(Duration::from_millis(5));
