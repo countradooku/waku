@@ -6,13 +6,20 @@
 
 mod client;
 pub mod command_env;
+/// The orchestration commands the desktop dispatches.
+pub mod commands;
 pub mod composer_complete;
 pub mod computer_use;
-pub mod driver;
 pub mod persistence;
 mod process;
+/// Client-side reducers for the v8 shell, thread and command-output streams.
+pub mod projection;
+/// The client-side projection store the desktop renders from (#55).
+pub mod store;
 pub mod surfaces;
 pub mod terminal;
+/// Render views of the v8 projections.
+pub mod thread_view;
 /// Protocol v8 (RFC 0003); shadows the protocol crate's `v8` module and
 /// re-exports its types.
 pub mod v8;

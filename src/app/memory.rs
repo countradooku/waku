@@ -9,15 +9,12 @@
 //! - [`ImageCache`] keeps decoded images up to a decoded-byte budget and
 //!   hands evicted images back so GPUI's asset cache and sprite atlas can drop
 //!   them too;
-//! - [`dehydration_candidates`] picks idle sessions whose transcripts can be
-//!   released and reloaded later through the ordinary hydration path.
+//! - transcripts are bounded by the projection store, which keeps at most a
+//!   handful of threads open and drops the rest (#55).
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use uuid::Uuid;
 
 /// Source bytes of parsed message Markdown kept across frames and sessions.
 ///
@@ -42,15 +39,6 @@ const IMAGE_MIN_ENTRIES: usize = 4;
 /// Upper bound on entries of any kind, including failures and in-flight
 /// fetches, which cost no decoded bytes but still occupy the map.
 const IMAGE_MAX_ENTRIES: usize = 512;
-
-/// How long a session stays hydrated after it was last selected.
-pub(super) const SESSION_DEHYDRATE_AFTER: Duration = Duration::from_secs(10 * 60);
-/// Deselected sessions kept hydrated regardless of age, most recent first, so
-/// switching back and forth between a few tasks never waits on the daemon.
-pub(super) const WARM_SESSIONS: usize = 3;
-/// A session left less than this long ago is never released. It covers the
-/// save that leaving it queued, so a later hydration reads what was saved.
-pub(super) const DEHYDRATE_GRACE: Duration = Duration::from_secs(5);
 
 /// A map that evicts its least recently used entries once their combined
 /// size exceeds a budget. Sizes are measured at trim time, because a cached
@@ -132,10 +120,6 @@ impl<K: Clone + Eq + Hash, V> ByteBudgetLru<K, V> {
 
     pub(super) fn remove(&mut self, key: &K) -> Option<V> {
         self.entries.remove(key).map(|entry| entry.value)
-    }
-
-    pub(super) fn retain(&mut self, mut keep: impl FnMut(&K, &V) -> bool) {
-        self.entries.retain(|key, entry| keep(key, &entry.value));
     }
 
     /// The combined size of every entry.
@@ -336,60 +320,6 @@ pub(super) fn decode_data_url_image(url: &str) -> Option<Arc<gpui::Image>> {
     (!bytes.is_empty()).then(|| Arc::new(gpui::Image::from_bytes(format, bytes)))
 }
 
-/// The part of dehydration eligibility the session itself decides: its
-/// transcript is loaded (and therefore not a skeleton the daemon owns), it
-/// has history worth reloading (a draft has no stored row to reload from),
-/// and no turn or queued prompt will write into it.
-pub(super) fn transcript_is_releasable(session: &crate::model::AgentSession) -> bool {
-    session.detail_loaded
-        && session.has_started()
-        && !session.status.is_busy()
-        && session.active_turn_id().is_none()
-        && session.queued_messages.is_empty()
-}
-
-/// What the dehydration sweep knows about one session.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct DehydrationCandidate {
-    pub id: Uuid,
-    /// When the user last left the session; `None` if it has not been
-    /// selected in this window's lifetime (hydrated by a runtime attachment
-    /// or a remote update).
-    pub left_at: Option<Instant>,
-    /// Transcript loaded, not selected, no live or pending runtime, no turn
-    /// or queued prompt, no unsaved change, and nothing else in flight that
-    /// writes back into the transcript.
-    pub releasable: bool,
-}
-
-/// The sessions to dehydrate now: releasable sessions left at least
-/// [`DEHYDRATE_GRACE`] ago that are either idle for
-/// [`SESSION_DEHYDRATE_AFTER`] or outside the [`WARM_SESSIONS`] most recently
-/// left.
-pub(super) fn dehydration_candidates(
-    candidates: &[DehydrationCandidate],
-    now: Instant,
-) -> Vec<Uuid> {
-    let mut by_recency = candidates
-        .iter()
-        .filter(|candidate| candidate.releasable)
-        .collect::<Vec<_>>();
-    // Most recently left first; never-selected sessions are the oldest.
-    by_recency.sort_by_key(|candidate| std::cmp::Reverse(candidate.left_at));
-    by_recency
-        .into_iter()
-        .enumerate()
-        .filter(|(rank, candidate)| {
-            let idle_for = candidate.left_at.map_or(Duration::MAX, |left_at| {
-                now.saturating_duration_since(left_at)
-            });
-            idle_for >= DEHYDRATE_GRACE
-                && (idle_for >= SESSION_DEHYDRATE_AFTER || *rank >= WARM_SESSIONS)
-        })
-        .map(|(_, candidate)| candidate.id)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,107 +468,5 @@ mod tests {
         assert_eq!(decoded.bytes, image.bytes);
         assert!(decode_data_url_image("data:image/png;base64,").is_none());
         assert!(decode_data_url_image("https://example.com/a.png").is_none());
-    }
-
-    fn candidate(
-        left_secs_ago: Option<u64>,
-        releasable: bool,
-        now: Instant,
-    ) -> DehydrationCandidate {
-        DehydrationCandidate {
-            id: Uuid::new_v4(),
-            left_at: left_secs_ago.map(|seconds| now - Duration::from_secs(seconds)),
-            releasable,
-        }
-    }
-
-    #[test]
-    fn dehydration_keeps_warm_sessions_and_releases_idle_ones() {
-        let now = Instant::now() + SESSION_DEHYDRATE_AFTER * 2;
-        let recent = (0..WARM_SESSIONS as u64)
-            .map(|rank| candidate(Some(10 + rank), true, now))
-            .collect::<Vec<_>>();
-        let beyond_warm = candidate(Some(60), true, now);
-        let just_left = candidate(Some(1), true, now);
-        let stale = candidate(Some(SESSION_DEHYDRATE_AFTER.as_secs() + 1), true, now);
-        let never_selected = candidate(None, true, now);
-        let busy = candidate(Some(SESSION_DEHYDRATE_AFTER.as_secs() * 2), false, now);
-
-        let mut all = recent.clone();
-        all.extend([beyond_warm, just_left, stale, never_selected, busy]);
-        let released = dehydration_candidates(&all, now);
-
-        // `just_left` is inside the grace period, so it does not count as
-        // warm either: the three `recent` ones are ranked after it.
-        assert!(
-            !released.contains(&just_left.id),
-            "the grace period protects"
-        );
-        assert!(!released.contains(&busy.id), "unreleasable sessions stay");
-        assert!(released.contains(&stale.id), "idle past the timeout goes");
-        assert!(released.contains(&never_selected.id));
-        assert!(
-            released.contains(&beyond_warm.id),
-            "outside the warm set goes"
-        );
-        let kept_recent = recent
-            .iter()
-            .filter(|candidate| !released.contains(&candidate.id))
-            .count();
-        assert_eq!(
-            kept_recent,
-            WARM_SESSIONS - 1,
-            "just_left takes a warm slot"
-        );
-    }
-
-    #[test]
-    fn only_settled_loaded_sessions_with_history_are_releasable() {
-        use crate::model::{
-            AgentSession, MessageRole, ProviderKind, QueuedMessage, SessionStatus, TurnStatus,
-        };
-
-        let draft = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        assert!(
-            !transcript_is_releasable(&draft),
-            "a draft has nothing stored"
-        );
-
-        let mut settled = draft.clone();
-        settled.begin_turn("prompt");
-        settled.push_message(MessageRole::Assistant, "answer");
-        settled.finish_active_turn(TurnStatus::Completed);
-        assert!(transcript_is_releasable(&settled));
-
-        let mut running = draft.clone();
-        running.begin_turn("prompt");
-        assert!(!transcript_is_releasable(&running), "a running turn writes");
-
-        let mut busy = settled.clone();
-        busy.status = SessionStatus::Working;
-        assert!(!transcript_is_releasable(&busy));
-
-        let mut queued = settled.clone();
-        queued.queued_messages.push(QueuedMessage::new("next"));
-        assert!(
-            !transcript_is_releasable(&queued),
-            "a queued prompt drains into it"
-        );
-
-        let mut skeleton = settled.clone();
-        skeleton.release_transcript();
-        assert!(
-            !transcript_is_releasable(&skeleton),
-            "a skeleton has nothing left to release"
-        );
-    }
-
-    #[test]
-    fn a_few_recent_sessions_are_never_dehydrated_before_the_timeout() {
-        let now = Instant::now() + SESSION_DEHYDRATE_AFTER * 2;
-        let recent = (0..WARM_SESSIONS as u64)
-            .map(|rank| candidate(Some(30 + rank), true, now))
-            .collect::<Vec<_>>();
-        assert!(dehydration_candidates(&recent, now).is_empty());
     }
 }

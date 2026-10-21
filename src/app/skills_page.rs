@@ -131,8 +131,7 @@ impl Waku {
     /// Projectless workspaces are generated directories that never hold
     /// curated skills.
     fn skill_scan_projects(&self) -> Vec<PathBuf> {
-        self.state
-            .projects
+        self.projects()
             .iter()
             .filter(|project| !project.is_projectless())
             .map(|project| project.path.clone())

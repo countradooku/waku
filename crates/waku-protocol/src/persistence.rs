@@ -94,6 +94,16 @@ pub struct ComposerDraftChange {
 }
 
 impl ComposerDraftKey {
+    /// The key of a task: its own id once it has started, else its
+    /// project's new-task draft.
+    pub fn for_task(started: bool, id: Uuid, project_id: Uuid) -> Self {
+        if started {
+            Self::Session(id)
+        } else {
+            Self::NewSession(project_id)
+        }
+    }
+
     pub fn for_session(session: &AgentSession) -> Self {
         if session.has_started() {
             Self::Session(session.id)

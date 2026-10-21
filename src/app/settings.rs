@@ -1304,9 +1304,8 @@ impl Waku {
             return;
         }
         if self
-            .state
-            .sessions
-            .iter()
+            .threads
+            .listed()
             .any(|session| !matches!(session.status, SessionStatus::Idle | SessionStatus::Failed))
         {
             self.show_toast(tr!("daemon.stop_active_tasks"));
@@ -1334,7 +1333,6 @@ impl Waku {
                 match result {
                     Ok(()) => {
                         this.state.daemon_exposure = applied.clone();
-                        this.runtimes.clear();
                         this.daemon_port_input.update(cx, |input, cx| {
                             input.set_content(applied.port.to_string(), cx)
                         });
@@ -2116,16 +2114,15 @@ impl Waku {
                 self.state.last_service_tier = None;
                 self.state.last_context_window = None;
             }
-            let draft_ids = self
-                .state
-                .sessions
-                .iter()
+            for session in self
+                .threads
+                .drafts
+                .values_mut()
                 .filter(|session| session.provider == provider && !session.has_started())
-                .map(|session| session.id)
-                .collect::<Vec<_>>();
-            for id in draft_ids {
-                if let Some(session) = self.state.session_mut(id) {
+            {
+                {
                     session.provider = fallback;
+                    session.instance = waku_client::thread_view::instance_of(fallback);
                     session.model = None;
                     session.reasoning_effort = None;
                     session.service_tier = None;

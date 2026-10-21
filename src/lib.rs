@@ -67,7 +67,6 @@ mod browser;
 mod computer_use;
 pub mod daemon;
 mod daemon_v8;
-mod driver;
 mod input;
 mod md;
 #[cfg(feature = "perf-counters")]

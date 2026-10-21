@@ -104,7 +104,7 @@ impl Waku {
         let projectless_selected = self.selected_project().is_some_and(Project::is_projectless);
         let projects = Rc::new(if handle.is_open() {
             visible_project_entries(
-                &self.state.projects,
+                self.projects(),
                 selected_project,
                 self.project_search.read(cx).content(),
                 &mut self.project_picker_matcher.borrow_mut(),

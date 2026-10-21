@@ -321,6 +321,19 @@ impl V8Client {
         self.wait_call::<M>(id, reply, timeout)
     }
 
+    /// Send a call `M` without waiting: the reply arrives on
+    /// [`PendingCall::receiver`], so one thread can select over many calls
+    /// and streams at once. A connection that closes first answers
+    /// [`CallError::Disconnected`].
+    pub fn start<M: MethodDef>(&self, params: M::Params) -> Result<PendingCall<M>, CallError> {
+        let (id, reply) = self.start_call::<M>(params)?;
+        Ok(PendingCall {
+            id,
+            reply,
+            _method: std::marker::PhantomData,
+        })
+    }
+
     fn start_call<M: MethodDef>(
         &self,
         params: M::Params,
@@ -503,6 +516,48 @@ impl V8Client {
             message: "client closed".into(),
         });
         let _ = self.inner.outgoing.send(Outgoing::Close);
+    }
+}
+
+/// A call sent with [`V8Client::start`] whose reply has not been taken.
+pub struct PendingCall<M: MethodDef> {
+    id: u32,
+    reply: Receiver<Result<MethodResult, CallError>>,
+    _method: std::marker::PhantomData<fn() -> M>,
+}
+
+impl<M: MethodDef> PendingCall<M> {
+    /// The call id on its connection.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// Ready once the reply (or the disconnect) arrived; pass what it
+    /// yields to [`Self::decode`]. For `crossbeam_channel::Select`.
+    pub fn receiver(&self) -> &Receiver<Result<MethodResult, CallError>> {
+        &self.reply
+    }
+
+    /// The typed result of a raw reply from [`Self::receiver`].
+    pub fn decode(
+        raw: Result<Result<MethodResult, CallError>, crossbeam_channel::RecvError>,
+    ) -> Result<M::Result, CallError> {
+        match raw {
+            Ok(Ok(result)) => M::unwrap(result).ok_or(CallError::Disconnected),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(CallError::Disconnected),
+        }
+    }
+
+    /// The reply, if it has arrived.
+    pub fn try_take(&self) -> Option<Result<M::Result, CallError>> {
+        match self.reply.try_recv() {
+            Ok(raw) => Some(Self::decode(Ok(raw))),
+            Err(crossbeam_channel::TryRecvError::Empty) => None,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Some(Err(CallError::Disconnected))
+            }
+        }
     }
 }
 

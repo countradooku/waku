@@ -96,8 +96,7 @@ impl Waku {
         let generation = self.usage_history_generation;
         let daemon_v8 = self.daemon_v8.clone();
         let project_roots: Vec<PathBuf> = self
-            .state
-            .projects
+            .projects()
             .iter()
             .map(|project| project.path.clone())
             .collect();
@@ -1425,8 +1424,7 @@ impl Waku {
         }
         let path = Path::new(&project.path);
         let name = self
-            .state
-            .projects
+            .projects()
             .iter()
             .find(|known| known.path.as_path() == path)
             .map(|known| known.name.clone())

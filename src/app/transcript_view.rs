@@ -186,7 +186,7 @@ impl Waku {
         chat_viewport_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.prefetch_checkpoint_refs(cx);
+        self.page_older_history();
         self.sync_transcript_rows();
         self.sync_transcript_layout_width(window);
         // Every row this frame builds paints with the same palette.
@@ -1036,93 +1036,15 @@ impl Waku {
         if !message_opens_turn(&session.messages, message_index) {
             return None;
         }
-        let retained_turn_count = turn.turn_count.saturating_sub(1);
-        // Cache only — the ref lives in git, and this runs for every visible
-        // user message on every frame. `prefetch_checkpoint_refs` fills the
-        // cache off-thread and notifies.
-        if !self
-            .checkpoint_ref_cache
-            .borrow()
-            .get(&(session.id, retained_turn_count))
-            .copied()
-            .unwrap_or(false)
-        {
-            return None;
-        }
-        let rollback_turns = session.provider_turns_after(retained_turn_count);
-        if rollback_turns > 0 && session.provider_cursor.is_none() {
-            return None;
-        }
+        // A rewind rolls back to the checkpoint the previous turn ended
+        // with; the view carries the checkpoints, so this reads memory only.
+        let ordinal = u32::try_from(turn.turn_count).ok()?;
+        session.rewind_point(ordinal)?;
         Some(UserMessageAction {
             session_id: session.id,
             message_id: message.id,
             turn_count: turn.turn_count,
         })
-    }
-
-    /// Forget cached checkpoint-ref existence after refs changed. The next
-    /// transcript frame schedules a fresh background prefetch.
-    pub(super) fn invalidate_checkpoint_refs(&self) {
-        self.checkpoint_ref_cache.borrow_mut().clear();
-        self.checkpoint_ref_generation
-            .set(self.checkpoint_ref_generation.get().wrapping_add(1));
-    }
-
-    /// Resolve the selected session's checkpoint refs on the background
-    /// executor — one `git for-each-ref` per session per invalidation — and
-    /// cache which retained turn counts have one. The rewind affordance
-    /// appears once the result lands and notifies.
-    fn prefetch_checkpoint_refs(&self, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session() else {
-            return;
-        };
-        let generation = self.checkpoint_ref_generation.get();
-        if self.checkpoint_ref_prefetch.get() == Some((session.id, generation)) {
-            return;
-        }
-        let Some(project_path) = self
-            .workspace_path_for_session(session)
-            .map(std::path::Path::to_path_buf)
-        else {
-            return;
-        };
-        let session_id = session.id;
-        let retained_turn_counts = session
-            .turns
-            .iter()
-            .map(|turn| turn.turn_count.saturating_sub(1))
-            .collect::<Vec<_>>();
-        self.checkpoint_ref_prefetch
-            .set(Some((session_id, generation)));
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
-        cx.spawn(async move |this, cx| {
-            let existing = cx
-                .background_executor()
-                .spawn(async move {
-                    match workspace.request(waku_client::WorkspaceOperation::SessionTurnRefs {
-                        cwd: project_path,
-                        session_id,
-                    }) {
-                        Ok(waku_client::WorkspaceResult::TurnRefs { turn_counts }) => {
-                            turn_counts.into_iter().collect::<HashSet<_>>()
-                        }
-                        Ok(_) | Err(_) => HashSet::new(),
-                    }
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.checkpoint_ref_generation.get() != generation {
-                    return;
-                }
-                let mut cache = this.checkpoint_ref_cache.borrow_mut();
-                for turn_count in retained_turn_counts {
-                    cache.insert((session_id, turn_count), existing.contains(&turn_count));
-                }
-                drop(cache);
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     pub(super) fn assistant_message_action_for_message(
@@ -1135,10 +1057,6 @@ impl Waku {
             || assistant_response_footer_index(session, message_index) != Some(message_index)
             || !matches!(session.status, SessionStatus::Idle | SessionStatus::Failed)
             || !session.provider.supports_conversation_fork()
-            || session
-                .provider_cursor
-                .as_ref()
-                .is_none_or(|cursor| cursor.provider() != session.provider)
         {
             return None;
         }
@@ -1147,12 +1065,12 @@ impl Waku {
             .turns
             .iter()
             .find(|turn| turn.id == turn_id && turn.provider_turn_started)?;
-        let pending_turn = self.response_fork_preparations.get(&session.id).copied();
+        // A fork is one dispatch; nothing is prepared client-side.
         Some(AssistantMessageAction {
             session_id: session.id,
             turn_count: turn.turn_count,
-            enabled: pending_turn.is_none(),
-            preparing: pending_turn == Some(turn.turn_count),
+            enabled: true,
+            preparing: false,
         })
     }
 
@@ -1941,13 +1859,15 @@ impl Waku {
             .get(&block_index)
             .copied()
             .unwrap_or(live_group);
+        // Live reasoning: the working turn's newest activity is a thought
+        // still streaming.
         let live_reasoning_id = (self
-            .selected_runtime()
-            .is_some_and(|runtime| runtime.stream_phase == Some(StreamPhase::Reasoning))
-            && self
-                .selected_session()
-                .is_some_and(|session| session.status == SessionStatus::Working)
-            && block_index + 1 == self.selected_transcript_blocks().len())
+            .selected_session()
+            .is_some_and(|session| session.status == SessionStatus::Working)
+            && block_index + 1 == self.selected_transcript_blocks().len()
+            && activities
+                .last()
+                .is_some_and(|activity| activity.reasoning.is_some() && !activity.complete))
         .then(|| {
             activities
                 .iter()
