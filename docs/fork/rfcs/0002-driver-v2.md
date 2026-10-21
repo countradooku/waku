@@ -759,7 +759,7 @@ Driver columns: Codex (`codex.rs`), Claude (`claude.rs`), ACP (`acp.rs`, flavors
 | emits_turn_completed | Y | Y | Y | Y | Y | Y | Y |
 | interrupt | Y | Y | Y | Y | Y | Y³ | Y |
 | active_steering | Y | Y | N | Y | Y | Y | Y |
-| active_steering_interrupts_tools | N | Y⁴ | N | N | N | N | N |
+| active_steering_interrupts_tools | N | N⁴ | N | N | N | N | N |
 | steering_by_interrupt_restart | Y | Y | Y | Y | Y | Y | Y |
 | queued_messages | Y | Y | Y | Y | Y | Y | Y |
 | terminal_status_quality | Strong | Strong | Strong | Strong | Weak | Weak | Strong |
@@ -784,7 +784,7 @@ Driver columns: Codex (`codex.rs`), Claude (`claude.rs`), ACP (`acp.rs`, flavors
 | from_subagents | N →#71 | N | N | N →#71 | N | N | N |
 | **planning** | | | | | | | |
 | emits_plan_updated / emits_todo_list | Y | Y | Y | N | N | N | Y |
-| emits_proposed_plan | N →#68 | N →#68 | N | N | N | N | N |
+| emits_proposed_plan | N →#68 | Y (#47) | N | N | N | N | N |
 | structured_questions | Y | Y | Cursor, Grok | Y | N →#50 | N | Y |
 | plan_deltas_have_item_ids | N | N | N | N | N | N | N |
 | **subagents** | | | | | | | |
@@ -829,7 +829,7 @@ Notes:
 1. True when the agent advertises a `model` config option or `session/set_model`.
 2. True when `initialize` returns `agentCapabilities.loadSession`. The snapshot is the `session/load` replay.
 3. Amp has no stream interrupt. The driver sends SIGINT to the process (see its section).
-4. Taken from T3's Claude adapter. `message_steering` and `turn_interrupt_mid_tool` fixtures must confirm it; if they do not, declare N.
+4. Taken from T3's Claude adapter, where a steer is sent with `priority: "now"`. Waku writes a plain user message, which the CLI folds in at the next model call without cancelling tools (v1 live probe, 2.1.223; `message_steering` fixture), so #47 declares N.
 5. Via `--append-system-prompt` at launch. Only blocks present at `open_session` can use it; later blocks go in the synthetic user envelope.
 6. The assistant message uuid that ends the turn (today's `resume_at`). Valid for rollback inside one session file.
 7. The id of the user message that opens the turn (`opencode_session::native_turn_message_ids`).
@@ -1364,3 +1364,23 @@ The sketches above are kept as written; where the code differs, this list is the
 - **Determinism without a paused clock.** The harness uses a multi-thread runtime with real time: effect workers are OS threads, and tokio's paused clock auto-advances whenever the runtime idles while they work. What could vary is pinned instead: the `ManualClock` (2026-01-01T00:00:00Z) moves only with steps and `afterMs`, app ids come from counters (`SequentialIds`, `SeqIdAllocator`), native ids bind through UUIDv5, and every step waits until nothing moves. The coalescers read that clock, so their intervals never fire on their own during replay. `replay_is_deterministic` replays every fixture twice and compares the event logs.
 - **Steps.** Added `release_idle`, `unload`, `compact`; `select` takes `{model, reasoningEffort}`; `rollback` takes `restoreFiles`. `restart_daemon` waits for #59. `ScenarioResult` also carries every thread by name, fork results, the checkpoint port's calls and released threads; `checkpoints` are the entities.
 - **Fixtures in CI.** The fake provider records 19 scenarios (the orchestrator suite through the trait). "At least one fixture per driver" is met per port: each of #46–#52 records its R and S rows with `waku-replay-record --provider <id>`, which refuses providers without a `DriverV2` port.
+
+### Claude (#47)
+
+- **Layout.** `driver/claude/{mod,protocol,normalize}.rs`; `start_local` serves it through `V1Bridge::start` on a process-wide driver runtime. The old `DriverControl` impl is deleted.
+- **No live recording.** The 16 `claude.ndjson` fixtures are hand-authored from the protocol (sources per scenario in `fixtures/replay/README.md`, headers `synthetic: true`). The recorder accepts `--provider claude` for a later live run.
+- **Process lifetime.** `ensure_thread` / `resume_thread` do no I/O; the process starts at the first turn (`--session-id` for a conversation without history, `--resume` otherwise) and is respawned when the turn's provider thread names another conversation (after a rollback or fork). `ContextKind::System` blocks of the spawning turn go to `--append-system-prompt`; later ones and every other kind travel in `WAKU_CONTEXT_V1`.
+- **Turn ids** bind by ordinal (`bind_ordinal`) and carry the turn-ending root assistant uuid as a weak native ref; the cursor's `resume_at` is that uuid.
+- **Fork and rollback** keep the transcript copy (`claude_session::fork_session_with`, `replaced: true`), with the copy's session id from `ctx.ids.fresh` and message uuids derived by UUIDv5, so replay is deterministic. Probe (strings of the CLI 2.1.304 binary, no prompt sent): `--resume-session-at <message id>` exists (hidden, "requires --resume", print mode), as does `--resume-drops-turn`, and `--session-id` may join `--resume` only with `--fork-session`. Not proven by a run, so unused.
+- **`set_permission_mode`** is in the CLI's control schema (`{subtype, mode}` → `{mode}`) but unproven: `runtime_mode_switch_in_session` stays N and a mode change restarts the session.
+- **Steering** declares `active_steering_interrupts_tools = N` (note 4). A steer resolves once written; the echo of an absorbed steer does not open a turn.
+- **Interrupt** sends the `interrupt` control request; the next `result` settles the turn as `Interrupted`. If none arrives within 10 s the driver retires the process and settles the turn itself; the next turn resumes the conversation.
+- **Usage limits.** A `rate_limit_event` with `status: "rejected"` (and no overage) records the reset (`resetsAt` × 1000); a failed `result` with that evidence, an assistant `error: "rate_limit"` or `api_error_status: 429` is `UsageLimit`.
+- **Subagents.** An `Agent`/`Task` tool call opens a subagent keyed by its tool id, with its own provider thread (weak native ref) and one child turn; `task_started` links the native task id, `task_notification` (or the foreground tool result) settles it with a child `TurnTerminal`. Workflows (`local_workflow`) are subagents with their latest phase as progress. Subagent frames (`parent_tool_use_id` set) never reach the parent transcript.
+- **Background work.** `background_tasks_changed` (level) and the `task_*` bookends drive `BackgroundWorkUpdated`; a `result` while detached work is live parks the turn (`background_pending`). A wake (model output with no open turn) is reported as a new provider turn on the last run; the orchestrator drops its rows until #59 decides who owns it.
+- **Plans.** `TodoWrite` → todo list, `ExitPlanMode` → proposed plan (so `emits_proposed_plan = Y`); interaction-mode changes are still rejected (#68).
+- **Partial thread snapshots.** The driver reports its thread's cursor (at spawn and at each turn end) and native title as a `ProviderThreadUpdated` that carries only those fields. The session manager merges a snapshot of the session's bound thread onto the stored row (title, resume cursor, conversation head), so lineage and ordinals survive; `V1Bridge` reports the cursor as `Connected` and only reports a title that is set.
+- **`V1Bridge` additions.** Tool rows become `RichActivity` through the v1 `tool_activity` normalization (file-change hunks from Claude's `structuredPatch`, tool-result images); `BackgroundWorkUpdated` and `SubagentUpdated` become `BackgroundWork` upserts; `stop_background_work` calls `stop_background_work` / `stop_subagent`.
+- **Replay harness.** New step `runtime_mode` (threads start in Full Access); `tests/replay.rs` reads `input.<provider>.json` when present and replays every `<scenario>/<provider>.ndjson`.
+- **Not moved yet.** The daemon's Claude rewind/branch arms (`fork_provider_session`) stay: they return the legacy message-id map the app remaps its transcript with, which the `DriverControl` bridge cannot carry. They go with the cutover (#165).
+
