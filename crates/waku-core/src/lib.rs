@@ -78,9 +78,6 @@ mod protocol;
 mod server;
 mod v8;
 
-#[cfg(test)]
-mod legacy_import_tests;
-
 pub use local_socket::LocalListener;
 pub use protocol::{
     APP_EXECUTABLE_ENV, ClientMessage, Command, DAEMON_ADDRESS_ENV, DAEMON_SOCKET_ENV,

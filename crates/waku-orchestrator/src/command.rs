@@ -48,34 +48,8 @@ pub enum BackgroundOutcome {
     Cancelled,
 }
 
-/// The shell of a thread read from a legacy `app.db` (#63).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LegacyThreadShell {
-    pub thread: AppThread,
-    pub provider_thread: Option<ProviderThread>,
-}
-
-/// The transcript of a legacy thread (#63), converted by `import::legacy`
-/// outside `decide`: every entity is complete and every turn item already
-/// has its R15 position (run ordinal block, then order of appearance).
-/// `decide` checks it belongs to the thread and commits it as one decision.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LegacyTranscript {
-    /// The thread's provider thread with its run coverage, or a closed
-    /// placeholder when the session had no resume cursor.
-    pub provider_thread: Option<ProviderThread>,
-    pub runs: Vec<Run>,
-    pub attempts: Vec<RunAttempt>,
-    pub nodes: Vec<ExecutionNode>,
-    pub provider_turns: Vec<ProviderTurn>,
-    pub checkpoint_scopes: Vec<CheckpointScope>,
-    pub checkpoints: Vec<Checkpoint>,
-    pub messages: Vec<Message>,
-    pub items: Vec<TurnItem>,
-}
-
-/// Commands built only inside the daemon: effect results, lifecycle signals,
-/// recovery and import.
+/// Commands built only inside the daemon: effect results, lifecycle signals
+/// and recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InternalCommand {
     // Effect results (R21)
@@ -160,18 +134,6 @@ pub enum InternalCommand {
         message_id: MessageId,
         text: String,
     },
-    // Import (#63)
-    /// A project row of a legacy `app.db`, with its id and timestamps.
-    ImportLegacyProject {
-        project: Project,
-    },
-    ImportLegacyThread {
-        shell: LegacyThreadShell,
-    },
-    ImportLegacyTranscript {
-        thread_id: ThreadId,
-        transcript: LegacyTranscript,
-    },
 }
 
 impl InternalCommand {
@@ -193,34 +155,17 @@ impl InternalCommand {
             Self::AutoSettle { .. } => "thread.auto_settle",
             Self::RecoverThread { .. } => "thread.recover",
             Self::ContinueRun { .. } => "run.continue",
-            Self::ImportLegacyProject { .. } => "import.project",
-            Self::ImportLegacyThread { .. } => "import.thread",
-            Self::ImportLegacyTranscript { .. } => "import.transcript",
         }
     }
 
     /// The key the command locks and records its events under.
     pub fn key(&self) -> LockKey {
+        LockKey::Thread(self.thread_id())
+    }
+
+    /// The command's thread.
+    pub fn thread_id(&self) -> ThreadId {
         match self {
-            Self::ImportLegacyProject { project } => LockKey::Project(project.id),
-            _ => LockKey::Thread(self.thread_id().expect("thread commands name a thread")),
-        }
-    }
-
-    /// Whether this imports legacy data (and so must not trigger a lazy
-    /// transcript import itself).
-    pub const fn is_import(&self) -> bool {
-        matches!(
-            self,
-            Self::ImportLegacyProject { .. }
-                | Self::ImportLegacyThread { .. }
-                | Self::ImportLegacyTranscript { .. }
-        )
-    }
-
-    /// The command's thread; `None` only for a project import.
-    pub fn thread_id(&self) -> Option<ThreadId> {
-        Some(match self {
             Self::PreparedRunProgress { thread_id, .. }
             | Self::PreparedRunRelease { thread_id, .. }
             | Self::PreparedRunFail { thread_id, .. }
@@ -235,11 +180,8 @@ impl InternalCommand {
             | Self::SnoozeWake { thread_id, .. }
             | Self::AutoSettle { thread_id, .. }
             | Self::RecoverThread { thread_id, .. }
-            | Self::ContinueRun { thread_id, .. }
-            | Self::ImportLegacyTranscript { thread_id, .. } => *thread_id,
-            Self::ImportLegacyThread { shell } => shell.thread.id,
-            Self::ImportLegacyProject { .. } => return None,
-        })
+            | Self::ContinueRun { thread_id, .. } => *thread_id,
+        }
     }
 }
 
