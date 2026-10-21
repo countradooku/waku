@@ -90,20 +90,13 @@ impl Waku {
         self.skills_scan_generation += 1;
         let generation = self.skills_scan_generation;
         let projects = self.skill_scan_projects();
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |this, cx| {
             let catalog = cx
                 .background_executor()
-                .spawn(async move {
-                    match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::LoadSkills { projects },
-                    )? {
-                        waku_client::ResponsePayload::SkillsCatalog { catalog } => Ok(catalog),
-                        _ => anyhow::bail!("the daemon returned an invalid skills response"),
-                    }
-                })
+                .spawn(
+                    async move { waku_client::surfaces::composer::skills(&daemon_v8, &projects) },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.skills_scan_generation != generation {
@@ -134,14 +127,15 @@ impl Waku {
         self.ensure_skills_catalog(true, cx);
     }
 
-    /// `(display name, path)` per scannable project. Projectless workspaces
-    /// are generated directories that never hold curated skills.
-    fn skill_scan_projects(&self) -> Vec<(String, PathBuf)> {
+    /// The path of every scannable project; the daemon names them.
+    /// Projectless workspaces are generated directories that never hold
+    /// curated skills.
+    fn skill_scan_projects(&self) -> Vec<PathBuf> {
         self.state
             .projects
             .iter()
             .filter(|project| !project.is_projectless())
-            .map(|project| (project.display_name(), project.path.clone()))
+            .map(|project| project.path.clone())
             .collect()
     }
 
@@ -193,16 +187,12 @@ impl Waku {
         }
         self.skills_scan_generation += 1;
         self.skills_scan_pending = false;
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::SetSkillsEnabled { dirs, enabled },
-                    )
+                    waku_client::surfaces::composer::set_skills_enabled(&daemon_v8, &dirs, enabled)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -257,17 +247,13 @@ impl Waku {
         self.skills_delete_arming = None;
         self.skills_scan_generation += 1;
         self.skills_scan_pending = false;
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::TrashSkills { dirs },
-                    )
-                })
+                .spawn(
+                    async move { waku_client::surfaces::composer::trash_skills(&daemon_v8, &dirs) },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match result {

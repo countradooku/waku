@@ -55,27 +55,15 @@ impl Waku {
             Query::Pending => fallback,
             Query::Missing(token) => {
                 let fetch_path = workspace_path.clone();
-                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+                let daemon_v8 = self.daemon_v8.clone();
                 cx.spawn(async move |waku, cx| {
                     let result = cx
                         .background_executor()
                         .spawn({
                             let fetch_path = fetch_path.clone();
                             async move {
-                                match workspace.request(
-                                    waku_client::WorkspaceOperation::InspectBranches {
-                                        cwd: fetch_path.clone(),
-                                    },
-                                ) {
-                                    Ok(waku_client::WorkspaceResult::Branches { snapshot }) => {
-                                        Ok(snapshot)
-                                    }
-                                    Ok(_) => {
-                                        Err("the daemon returned an invalid branch response"
-                                            .to_owned())
-                                    }
-                                    Err(error) => Err(error.to_string()),
-                                }
+                                waku_client::surfaces::vcs::refs(&daemon_v8, &fetch_path)
+                                    .map_err(|error| error.to_string())
                             }
                         })
                         .await;
@@ -317,7 +305,7 @@ impl Waku {
         }
         self.branch_operation_pending = true;
         cx.notify();
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
@@ -328,18 +316,7 @@ impl Waku {
                             BranchOperation::Checkout(branch) => (branch, false),
                             BranchOperation::Create(branch) => (branch, true),
                         };
-                        match workspace.request(
-                            waku_client::WorkspaceOperation::CheckoutBranch {
-                                cwd: path,
-                                branch,
-                                create,
-                            },
-                        )? {
-                            waku_client::WorkspaceResult::BranchChanged { snapshot } => {
-                                Ok(snapshot)
-                            }
-                            _ => anyhow::bail!("the daemon returned an invalid branch response"),
-                        }
+                        waku_client::surfaces::vcs::switch_ref(&daemon_v8, &path, branch, create)
                     }
                 })
                 .await;

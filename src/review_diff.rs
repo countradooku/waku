@@ -330,22 +330,69 @@ pub fn from_file_changes(changes: &[crate::model::ActivityFileChange]) -> Snapsh
     parse(Source::default(), &numstat, &patch, false)
 }
 
-pub fn wire_source(source: Source) -> waku_client::workspace::ReviewDiffSource {
-    match source {
-        Source::LastTurn {
-            session_id,
-            turn_id,
-            turn_count,
-        } => waku_client::workspace::ReviewDiffSource::LastTurn {
+/// The `review.diff` source for a desktop source; `None` for a turn, which
+/// is not a working-tree comparison.
+pub fn v8_source(source: Source) -> Option<waku_client::v8::ReviewDiffSource> {
+    use waku_client::v8::ReviewDiffSource as Wire;
+    Some(match source {
+        Source::LastTurn { .. } => return None,
+        Source::Uncommitted => Wire::Uncommitted,
+        Source::Unstaged => Wire::Unstaged,
+        Source::Staged => Wire::Staged,
+        Source::Committed => Wire::Committed,
+        Source::Branch => Wire::Branch,
+    })
+}
+
+/// Collect and parse the diff `source` names in `root`. Blocks: run it on
+/// the background executor.
+///
+/// Working-tree sources are `review.diff` over protocol v8. A turn's diff
+/// still reads the checkpoint refs the v7 session layer captures, through
+/// `legacy` (that layer's connection); it moves to `threads.turnDiff` when
+/// the session layer does (#55).
+pub fn collect(
+    daemon_v8: &waku_client::surfaces::DaemonV8,
+    legacy: Option<&waku_client::WorkspaceClient>,
+    root: &Path,
+    source: Source,
+    ignore_whitespace: bool,
+) -> anyhow::Result<Snapshot> {
+    if let Some(wire) = v8_source(source) {
+        let diff =
+            waku_client::surfaces::vcs::review_diff(daemon_v8, root, wire, ignore_whitespace)?;
+        return Ok(parse_collected(
+            source,
+            &diff.numstat,
+            &diff.patch,
+            diff.complete_context,
+        ));
+    }
+    let Source::LastTurn {
+        session_id,
+        turn_id,
+        turn_count,
+    } = source
+    else {
+        unreachable!("every other source is a working-tree comparison");
+    };
+    let legacy = legacy.ok_or_else(|| anyhow::anyhow!("turn diffs need the session connection"))?;
+    match legacy.request(waku_client::WorkspaceOperation::CollectReviewDiff {
+        cwd: root.to_path_buf(),
+        source: waku_client::workspace::ReviewDiffSource::LastTurn {
             session_id,
             turn_id,
             turn_count,
         },
-        Source::Uncommitted => waku_client::workspace::ReviewDiffSource::Uncommitted,
-        Source::Unstaged => waku_client::workspace::ReviewDiffSource::Unstaged,
-        Source::Staged => waku_client::workspace::ReviewDiffSource::Staged,
-        Source::Committed => waku_client::workspace::ReviewDiffSource::Committed,
-        Source::Branch => waku_client::workspace::ReviewDiffSource::Branch,
+        ignore_whitespace,
+    })? {
+        waku_client::WorkspaceResult::ReviewDiff { data } => Ok(parse_collected(
+            source,
+            &data.numstat,
+            &data.patch,
+            data.complete_context,
+        )),
+        _ => anyhow::bail!("the daemon returned an invalid diff response"),
     }
 }
 

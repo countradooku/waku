@@ -1333,24 +1333,17 @@ impl Waku {
         self.provider_model_discoveries_pending.insert(provider);
         let provider_probe_tx = self.provider_probe_tx.clone();
         let event_wake = self.event_wake_tx.clone();
-        let daemon = self.daemon.client();
-        let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
+        let daemon_v8 = self.daemon_v8.clone();
+        let settings_sync = self.settings_sync.clone();
         if std::thread::Builder::new()
             .name(format!("waku-{}-model-discovery", provider.id()))
             .spawn(move || {
-                let discovered = match daemon.request(
-                    Uuid::nil(),
-                    Uuid::nil(),
-                    waku_client::Command::ProbeProvider {
-                        provider,
-                        binary_override,
-                        discover_models: true,
-                        probe_version: false,
-                    },
-                ) {
-                    Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => probe,
-                    _ => probe,
-                };
+                // The daemon probes the binary its settings name; let a
+                // just-edited override land first.
+                settings_sync.wait_settled(PROVIDER_SETTINGS_SETTLE);
+                let discovered =
+                    waku_client::surfaces::providers::discover_models(&daemon_v8, probe.clone())
+                        .unwrap_or(probe);
                 if provider_probe_tx.send(discovered).is_ok() {
                     signal_event_pump(&event_wake);
                 }
@@ -1391,24 +1384,16 @@ impl Waku {
             }
             let provider_version_tx = self.provider_version_tx.clone();
             let event_wake = self.event_wake_tx.clone();
-            let daemon = self.daemon.client();
-            let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
+            let daemon_v8 = self.daemon_v8.clone();
+            let settings_sync = self.settings_sync.clone();
             if std::thread::Builder::new()
                 .name(format!("waku-{}-version-probe", provider.id()))
                 .spawn(move || {
-                    let version = match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::ProbeProvider {
-                            provider,
-                            binary_override,
-                            discover_models: false,
-                            probe_version: true,
-                        },
-                    ) {
-                        Ok(waku_client::ResponsePayload::ProviderProbe { version, .. }) => version,
-                        _ => None,
-                    };
+                    settings_sync.wait_settled(PROVIDER_SETTINGS_SETTLE);
+                    let version =
+                        waku_client::surfaces::providers::probe(&daemon_v8, provider, true)
+                            .ok()
+                            .and_then(|(_, version)| version);
                     if provider_version_tx.send((provider, version)).is_ok() {
                         signal_event_pump(&event_wake);
                     }
@@ -1443,28 +1428,23 @@ impl Waku {
             None => ProviderKind::ALL.to_vec(),
         };
         self.provider_detection_remaining = providers.len();
-        let overrides = self.state.provider_binary_overrides.clone();
         let provider_detection_tx = self.provider_detection_tx.clone();
         let event_wake = self.event_wake_tx.clone();
         let detect_providers = providers.clone();
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
+        let settings_sync = self.settings_sync.clone();
         if std::thread::Builder::new()
             .name("waku-provider-detection".into())
             .spawn(move || {
+                // Detection follows a binary override edit: probe what the
+                // daemon will run, not what it ran before the edit.
+                settings_sync.wait_settled(PROVIDER_SETTINGS_SETTLE);
                 for provider in detect_providers {
-                    let response = daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::ProbeProvider {
-                            provider,
-                            binary_override: overrides.get(&provider).cloned(),
-                            discover_models: false,
-                            probe_version: false,
-                        },
-                    );
-                    let probe = match response {
-                        Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => probe,
-                        _ => ProviderProbe {
+                    let probe = match waku_client::surfaces::providers::probe(
+                        &daemon_v8, provider, false,
+                    ) {
+                        Ok((probe, _)) => probe,
+                        Err(_) => ProviderProbe {
                             provider,
                             installed: false,
                             path: None,
@@ -1604,17 +1584,14 @@ impl Waku {
         profile_span!(DEBUG, "Waku::save");
         perf_scope!(save_scope);
         self.last_stream_save = Instant::now();
-        let daemon_error = self
-            .daemon
-            .update_settings(self.state.daemon_settings())
-            .err()
-            .map(|error| error.to_string());
+        // Queued for the settings writer's thread; never waits on the daemon.
+        self.settings_sync.update(self.state.daemon_settings());
         let app_error = self
             .store
             .save(&mut self.state)
             .err()
             .map(|error| error.to_string());
-        if let Some(error) = daemon_error.or(app_error) {
+        if let Some(error) = app_error {
             self.show_toast(tr!("errors.save_local_state", error = error));
         } else {
             self.stream_state_dirty = false;

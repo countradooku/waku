@@ -68,7 +68,9 @@ fn commit_pending_status_label(pending: CommitPending) -> String {
 pub(super) struct CommitDialogState {
     id: Uuid,
     workspace: PathBuf,
-    invocation: Option<crate::git_commit::AgentInvocation>,
+    /// The provider and model that write a missing message; `None` when the
+    /// session's CLI is not installed.
+    invocation: Option<waku_protocol::orchestration::ModelSelection>,
     message: Entity<TextInput>,
     include_unstaged: bool,
     snapshot: crate::git_commit::Snapshot,
@@ -83,7 +85,7 @@ pub(super) struct CommitDialogState {
     previous_focus: FocusHandle,
     next_focus: FocusHandle,
     file_page: usize,
-    git_status: Option<waku_protocol::git::GitStatus>,
+    git_status: Option<waku_client::v8::GitStatus>,
     staging: bool,
 }
 
@@ -135,14 +137,17 @@ impl Waku {
             return;
         };
 
+        // The daemon runs the binary its settings name; an installed CLI is
+        // all the desktop checks.
         let invocation = self
             .provider_probe(provider)
-            .and_then(|probe| probe.path.clone())
-            .map(|binary| crate::git_commit::AgentInvocation {
-                provider,
-                binary,
-                model,
-                reasoning_effort,
+            .is_some_and(|probe| probe.path.is_some())
+            .then(|| {
+                waku_client::surfaces::vcs::commit_message_selection(
+                    provider,
+                    model,
+                    reasoning_effort,
+                )
             });
         let cached_branch = self
             .visible_branch_snapshot
@@ -194,31 +199,17 @@ impl Waku {
         });
         cx.notify();
 
-        let workspace_client = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    match workspace_client.request(waku_client::WorkspaceOperation::InspectCommit {
-                        cwd: workspace.clone(),
-                    }) {
-                        Ok(waku_client::WorkspaceResult::CommitSnapshot { snapshot }) => {
-                            match workspace_client.request(
-                                waku_client::WorkspaceOperation::GitStatus { cwd: workspace },
-                            ) {
-                                Ok(waku_client::WorkspaceResult::GitStatus { status }) => {
-                                    Ok((snapshot, status))
-                                }
-                                Ok(_) => {
-                                    Err("the daemon returned an invalid Git status response"
-                                        .to_owned())
-                                }
-                                Err(error) => Err(error.to_string()),
-                            }
-                        }
-                        Ok(_) => Err("the daemon returned an invalid Git response".to_owned()),
-                        Err(error) => Err(error.to_string()),
-                    }
+                    let snapshot =
+                        waku_client::surfaces::vcs::commit_preview(&daemon_v8, &workspace)
+                            .map_err(|error| error.to_string())?;
+                    let status = waku_client::surfaces::vcs::status(&daemon_v8, &workspace)
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>((snapshot, status))
                 })
                 .await;
             let _ = waku.update(cx, |waku, cx| {
@@ -369,29 +360,23 @@ impl Waku {
         action: CommitAction,
         workspace: PathBuf,
         include_unstaged: bool,
-        invocation: crate::git_commit::AgentInvocation,
+        invocation: waku_protocol::orchestration::ModelSelection,
         window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let workspace_client = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let generation_workspace = workspace.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    match workspace_client.request(
-                        waku_client::WorkspaceOperation::GenerateCommitMessage {
-                            cwd: generation_workspace,
-                            include_unstaged,
-                            invocation,
-                        },
-                    ) {
-                        Ok(waku_client::WorkspaceResult::CommitMessage { message }) => Ok(message),
-                        Ok(_) => {
-                            Err("the daemon returned an invalid commit message response".into())
-                        }
-                        Err(error) => Err(error.to_string()),
-                    }
+                    waku_client::surfaces::vcs::generate_commit_message(
+                        &daemon_v8,
+                        &generation_workspace,
+                        include_unstaged,
+                        invocation,
+                    )
+                    .map_err(|error| error.to_string())
                 })
                 .await;
             let _ = waku.update(cx, |waku, cx| {
@@ -455,51 +440,30 @@ impl Waku {
         window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let workspace_client = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let operation_workspace = workspace.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let operation = match action {
-                        CommitAction::Commit => waku_client::WorkspaceOperation::Commit {
-                            cwd: operation_workspace.clone(),
-                            message,
-                            include_unstaged,
-                            push: false,
-                        },
-                        CommitAction::CommitAndPush => waku_client::WorkspaceOperation::Commit {
-                            cwd: operation_workspace.clone(),
-                            message,
-                            include_unstaged,
-                            push: true,
-                        },
-                        CommitAction::Push => waku_client::WorkspaceOperation::Push {
-                            cwd: operation_workspace.clone(),
-                        },
-                        CommitAction::Pull => waku_client::WorkspaceOperation::Pull {
-                            cwd: operation_workspace.clone(),
-                        },
-                    };
-                    let result = match workspace_client.request(operation) {
-                        Ok(waku_client::WorkspaceResult::Ack) => Ok(()),
-                        Ok(_) => Err(anyhow::anyhow!(
-                            "the daemon returned an invalid Git response"
-                        )),
-                        Err(error) => Err(error),
-                    };
-                    let snapshot = result.as_ref().err().and_then(|_| {
-                        match workspace_client.request(
-                            waku_client::WorkspaceOperation::InspectCommit {
-                                cwd: operation_workspace.clone(),
-                            },
-                        ) {
-                            Ok(waku_client::WorkspaceResult::CommitSnapshot { snapshot }) => {
-                                Some(snapshot)
-                            }
-                            _ => None,
+                    use waku_client::surfaces::vcs;
+                    let root = operation_workspace.as_path();
+                    let result = match action {
+                        CommitAction::Commit => {
+                            vcs::commit(&daemon_v8, root, message, include_unstaged, false)
+                                .map(|_| ())
                         }
-                    });
+                        CommitAction::CommitAndPush => {
+                            vcs::commit(&daemon_v8, root, message, include_unstaged, true)
+                                .map(|_| ())
+                        }
+                        CommitAction::Push => vcs::push(&daemon_v8, root),
+                        CommitAction::Pull => vcs::pull(&daemon_v8, root),
+                    };
+                    let snapshot = result
+                        .as_ref()
+                        .err()
+                        .and_then(|_| vcs::commit_preview(&daemon_v8, root).ok());
                     (result.map_err(|error| error.to_string()), snapshot)
                 })
                 .await;
@@ -598,30 +562,21 @@ impl Waku {
         dialog.snapshot_loading = true;
         dialog.staging = true;
         dialog.error = None;
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let mutation =
-                        match workspace.request(waku_client::WorkspaceOperation::StageFiles {
-                            cwd: cwd.clone(),
-                            paths: vec![path],
-                            stage,
-                        }) {
-                            Ok(waku_client::WorkspaceResult::Ack) => Ok(()),
-                            Ok(_) => Err(anyhow::anyhow!("invalid Git staging response")),
-                            Err(error) => Err(error),
-                        };
+                    use waku_client::surfaces::vcs;
+                    let mutation = vcs::stage(&daemon_v8, &cwd, vec![path], stage);
                     // Refresh even on error: Git may have updated the index before
                     // a timeout or transport failure became visible to the client.
-                    let snapshot =
-                        workspace.request(waku_client::WorkspaceOperation::InspectCommit {
-                            cwd: cwd.clone(),
-                        });
-                    let status =
-                        workspace.request(waku_client::WorkspaceOperation::GitStatus { cwd });
-                    (mutation, snapshot, status)
+                    let snapshot = vcs::commit_preview(&daemon_v8, &cwd);
+                    let status = match mutation.as_ref() {
+                        Ok(status) => Ok(status.clone()),
+                        Err(_) => vcs::status(&daemon_v8, &cwd),
+                    };
+                    (mutation.map(|_| ()), snapshot, status)
                 })
                 .await;
             let _ = waku.update(cx, |waku, cx| {
@@ -633,10 +588,8 @@ impl Waku {
                 dialog.snapshot_loading = false;
                 dialog.error = result.0.err().map(|error| error.to_string());
                 match result.1 {
-                    Ok(waku_client::WorkspaceResult::CommitSnapshot { snapshot }) => {
-                        dialog.snapshot = snapshot
-                    }
-                    _ => {
+                    Ok(snapshot) => dialog.snapshot = snapshot,
+                    Err(_) => {
                         dialog.snapshot_loading = true;
                         dialog.error = Some(
                             "Could not refresh Git status. Close and reopen this dialog.".into(),
@@ -644,10 +597,8 @@ impl Waku {
                     }
                 }
                 match result.2 {
-                    Ok(waku_client::WorkspaceResult::GitStatus { status }) => {
-                        dialog.git_status = Some(status)
-                    }
-                    _ => {
+                    Ok(status) => dialog.git_status = Some(status),
+                    Err(_) => {
                         dialog.snapshot_loading = true;
                         dialog.error = Some(
                             "Could not refresh Git status. Close and reopen this dialog.".into(),

@@ -273,7 +273,7 @@ impl TerminalSession {
     /// and attach an emulator to it. The same path serves a local and a
     /// remote daemon.
     fn new(
-        daemon: &waku_client::DaemonSupervisor,
+        daemon_v8: &waku_client::surfaces::DaemonV8,
         working_directory: &Path,
         columns: usize,
         rows: usize,
@@ -322,7 +322,7 @@ impl TerminalSession {
             proxy,
         };
         let link = DaemonTerminalLink::open(
-            daemon.subscribe_clients(),
+            daemon_v8.clone(),
             working_directory.to_path_buf(),
             window_size.num_cols,
             window_size.num_lines,
@@ -1055,20 +1055,20 @@ impl TerminalView {
     /// A terminal tab: a shell the daemon runs in `working_directory`, a path
     /// on the daemon host, whether the daemon is local or remote.
     pub fn new(
-        daemon: waku_client::DaemonSupervisor,
+        daemon_v8: waku_client::surfaces::DaemonV8,
         working_directory: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let local_paths = !daemon.is_remote();
+        let local_paths = daemon_v8.is_local();
         let terminal_cwd = working_directory.clone();
         let (wakeup_tx, wakeups) = smol::channel::bounded(1);
         cx.spawn(async move |this, cx| {
-            let started = cx
-                .background_executor()
-                .spawn(
-                    async move { TerminalSession::new(&daemon, &terminal_cwd, 52, 36, wakeup_tx) },
-                )
-                .await;
+            let started =
+                cx.background_executor()
+                    .spawn(async move {
+                        TerminalSession::new(&daemon_v8, &terminal_cwd, 52, 36, wakeup_tx)
+                    })
+                    .await;
             let _ = this.update(cx, |this, cx| {
                 match started {
                     Ok(session) => this.session = Some(session),
