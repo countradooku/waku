@@ -66,6 +66,9 @@ impl Daemon {
         std::fs::write(project.join("README.md"), "surfaces\n").unwrap();
         std::fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
         git(&project, &["init", "-q", "-b", "main"]);
+        // The daemon commits through its own Git, which has no identity on CI.
+        git(&project, &["config", "user.name", "Waku"]);
+        git(&project, &["config", "user.email", "waku@example.invalid"]);
         git(&project, &["add", "."]);
         git(&project, &["commit", "-q", "-m", "init"]);
 
@@ -478,12 +481,16 @@ fn settings_write_and_follow() {
     assert_eq!(stored.disabled_providers, [ProviderKind::DeepSeek]);
     assert!(stored.storage.worktree_cleanup.merged);
 
-    // Another client's edit reaches this desktop; its own did not.
+    // Another client's edit reaches this desktop; its own did not. (Not
+    // Computer Use: the daemon turns it off where it is unavailable.)
     let mut other = edited.clone();
-    other.computer_use_enabled = !other.computer_use_enabled;
+    other.storage.worktree_cleanup.merged = !other.storage.worktree_cleanup.merged;
     settings::update(&daemon.desktop(), &other).unwrap();
     let heard = remote.recv_timeout(TIMEOUT).expect("no remote settings");
-    assert_eq!(heard.computer_use_enabled, other.computer_use_enabled);
+    assert_eq!(
+        heard.storage.worktree_cleanup.merged,
+        other.storage.worktree_cleanup.merged
+    );
     assert!(remote.try_recv().is_err());
 
     // Storage status reads through the same surface.
