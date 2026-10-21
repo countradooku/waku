@@ -8,7 +8,7 @@
 
 use gpui::{KeyBinding, actions};
 
-use crate::model::{GoalOperation, MessageRole, ThreadGoal, ThreadGoalStatus};
+use crate::model::{GoalOperation, ThreadGoal, ThreadGoalStatus};
 use crate::usage::format_tokens;
 
 use super::*;
@@ -76,9 +76,8 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         let content = request.prefill.or_else(|| {
-            self.state
-                .sessions
-                .iter()
+            self.threads
+                .listed()
                 .find(|session| session.id == request.session_id)
                 .and_then(|session| session.thread_goal.as_ref())
                 .map(|goal| goal.objective.clone())
@@ -119,150 +118,17 @@ impl Waku {
         cx.notify();
     }
 
-    /// Hand a goal operation to the session's runtime, starting one first
-    /// when none exists yet. Goals attach to the provider thread, not to any
-    /// turn — the Codex CLI opens its thread at launch, so `/goal` works
-    /// there before the first message. Waku starts providers lazily, so the
-    /// goal path starts the runtime itself and the queued operations drain
-    /// the moment it installs.
+    /// Goals belong to the provider thread the daemon owns, and protocol v8
+    /// has no command to change one yet (#55): the thread shows the goal
+    /// its provider reports, and changing it says so instead of acting.
     pub(super) fn dispatch_goal_operation(
         &mut self,
-        session_id: Uuid,
-        operation: GoalOperation,
+        _session_id: Uuid,
+        _operation: GoalOperation,
         cx: &mut Context<Self>,
     ) {
-        self.record_goal_submission(session_id, &operation, cx);
-        self.begin_goal_pursuit_turn(session_id, &operation, cx);
-        if let Some(runtime) = self.runtimes.get(&session_id) {
-            runtime.driver.goal(operation);
-            return;
-        }
-        self.pending_goal_operations
-            .entry(session_id)
-            .or_default()
-            .push(operation);
-        self.start_goal_runtime(session_id, cx);
-    }
-
-    /// A submitted objective leaves a persistent transcript record — the
-    /// centered pill a system message renders as — the way a submission
-    /// leaves its user message. Pushed before the pursuit turn exists so it
-    /// stays turn-less and survives an unwound pursuit.
-    fn record_goal_submission(
-        &mut self,
-        session_id: Uuid,
-        operation: &GoalOperation,
-        cx: &mut Context<Self>,
-    ) {
-        let GoalOperation::Set {
-            objective: Some(objective),
-            ..
-        } = operation
-        else {
-            return;
-        };
-        let Some(session) = self.state.session_mut(session_id) else {
-            return;
-        };
-        session.set_title_from_prompt(objective);
-        let notice = tr!("goal.set_notice", objective = notice_objective(objective));
-        session.push_message(MessageRole::System, notice);
-        session.updated_at = crate::model::unix_time();
-        self.state.mark_session_dirty(session_id);
+        self.show_toast(tr!("goal.unsupported"));
         cx.notify();
-    }
-
-    /// Activating a goal on an idle thread makes Codex pursue it right away
-    /// (`apply_external_goal_set` → `continue_if_idle`), so begin its turn
-    /// optimistically — exactly how a submission's turn begins at accept —
-    /// instead of leaving the empty-task page up until the provider's start
-    /// report arrives seconds later. The provider's `turn/started` confirms
-    /// the turn; errors and a watchdog unwind an unconfirmed one.
-    fn begin_goal_pursuit_turn(
-        &mut self,
-        session_id: Uuid,
-        operation: &GoalOperation,
-        cx: &mut Context<Self>,
-    ) {
-        if !matches!(
-            operation,
-            GoalOperation::Set {
-                status: Some(ThreadGoalStatus::Active),
-                ..
-            }
-        ) {
-            return;
-        }
-        let Some(session) = self
-            .state
-            .session_mut(session_id)
-            .filter(|session| session.active_turn_id().is_none() && !session.status.is_busy())
-        else {
-            return;
-        };
-        let turn_id = session.begin_provider_turn();
-        session.status = SessionStatus::Connecting;
-        self.state.mark_session_dirty(session_id);
-        cx.notify();
-        // Continuation can legitimately never come — an inherited deferral,
-        // or a goal feature disabled provider-side. Do not let the working
-        // indicator outlive that silence.
-        cx.spawn(async move |waku, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(30))
-                .await;
-            let _ = waku.update(cx, |waku, cx| {
-                let stale = waku
-                    .state
-                    .sessions
-                    .iter()
-                    .find(|session| session.id == session_id)
-                    .is_some_and(|session| {
-                        session.active_turn_id() == Some(turn_id)
-                            && session.active_turn_is_unconfirmed_pursuit()
-                    });
-                if stale {
-                    waku.unwind_unconfirmed_pursuit_turn(session_id);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Remove an optimistic pursuit turn whose provider start never came,
-    /// returning the session to rest. Confirmed turns and submissions are
-    /// never touched: only a running provider turn without a user message
-    /// and without a provider start report qualifies.
-    pub(super) fn unwind_unconfirmed_pursuit_turn(&mut self, session_id: Uuid) {
-        let Some(session) = self
-            .state
-            .session_mut(session_id)
-            .filter(|session| session.active_turn_is_unconfirmed_pursuit())
-        else {
-            return;
-        };
-        if let Some(turn_id) = session.active_turn_id() {
-            session.unwind_unstarted_turn(turn_id);
-        }
-        if session.status.is_busy() {
-            session.status = SessionStatus::Idle;
-        }
-        self.state.mark_session_dirty(session_id);
-    }
-
-    /// Flush operations accepted before the runtime existed. Called after
-    /// any runtime install so the goal lands on the thread that was started
-    /// for it — whether the goal path or a racing submission started it.
-    pub(super) fn drain_pending_goal_operations(&mut self, session_id: Uuid) {
-        let Some(operations) = self.pending_goal_operations.remove(&session_id) else {
-            return;
-        };
-        if let Some(runtime) = self.runtimes.get(&session_id) {
-            for operation in operations {
-                runtime.driver.goal(operation);
-            }
-        }
     }
 
     fn confirm_goal_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -276,9 +142,8 @@ impl Waku {
             return;
         }
         let current_status = self
-            .state
-            .sessions
-            .iter()
+            .threads
+            .listed()
             .find(|session| session.id == session_id)
             .and_then(|session| session.thread_goal.as_ref())
             .map(|goal| goal.status);
@@ -342,9 +207,8 @@ impl Waku {
         let dialog = self.goal_dialog.as_ref()?;
         let theme = Theme::current(cx);
         let current = self
-            .state
-            .sessions
-            .iter()
+            .threads
+            .listed()
             .find(|session| session.id == dialog.session_id)
             .and_then(|session| session.thread_goal.as_ref());
         let replace = dialog.replace;
@@ -707,17 +571,6 @@ fn format_goal_elapsed(seconds: i64) -> String {
     } else {
         format!("{hours}h {remaining_minutes}m")
     }
-}
-
-/// The objective as a transcript notice: whole when short, elided past 120
-/// characters — the chip tooltip and dialog carry the full text.
-fn notice_objective(objective: &str) -> String {
-    const NOTICE_OBJECTIVE_CHARS: usize = 120;
-    if objective.chars().count() <= NOTICE_OBJECTIVE_CHARS {
-        return objective.to_owned();
-    }
-    let clipped: String = objective.chars().take(NOTICE_OBJECTIVE_CHARS - 1).collect();
-    format!("{}…", clipped.trim_end())
 }
 
 /// Saving an objective keeps a resumable status but restarts a finished one,

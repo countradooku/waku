@@ -81,6 +81,10 @@ pub struct ThreadView {
     pub transcript_blocks: SharedVec<TranscriptBlock>,
     pub turns: Vec<AgentTurn>,
     pub queued_messages: Vec<QueuedMessage>,
+    /// Slash commands the live provider session reported. Protocol v8 does
+    /// not carry them yet (#55), so this stays empty and the composer falls
+    /// back to `composer.slashCommands`.
+    pub available_commands: Vec<model::ReportedCommand>,
     pub pending_permission: Option<PendingPermission>,
     pub pending_user_input: Option<PendingUserInput>,
     pub thread_goal: Option<model::ThreadGoal>,
@@ -95,6 +99,11 @@ pub struct ThreadView {
     pub rollback: Option<RollbackState>,
     /// The failure of the newest run, when it failed.
     pub last_error: Option<String>,
+    /// Subagents and detached provider work, for the background-work
+    /// surfaces. A stoppable subagent's `control_id` is `<run>/<node>`.
+    pub background_work: Vec<model::BackgroundWorkItem>,
+    /// The provider's own id of the active conversation.
+    pub provider_native_id: Option<String>,
     pub has_more_history: bool,
     pub history_loading: bool,
     /// The stream delivered its snapshot or replay and is live.
@@ -119,6 +128,63 @@ pub struct RunCheckpoint {
 }
 
 impl ThreadView {
+    /// A task the user is composing but has not sent: UI-local until its
+    /// first message dispatches `thread.create`, and replaced by the
+    /// stream's view as soon as that has started.
+    pub fn draft(
+        id: Uuid,
+        project_id: Uuid,
+        provider: ProviderKind,
+        runtime_mode: model::RuntimeMode,
+        now_seconds: u64,
+    ) -> Self {
+        Self {
+            id,
+            project_id,
+            title: String::new(),
+            title_source: TitleSource::Placeholder,
+            workspace: SessionWorkspace::Local,
+            instance: instance_of(provider),
+            provider,
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            context_window: None,
+            agent_preset: None,
+            runtime_mode,
+            interaction_mode: InteractionMode::Default,
+            status: SessionStatus::Idle,
+            created_at: now_seconds,
+            updated_at: now_seconds,
+            last_reply_at: None,
+            pinned: false,
+            archived: false,
+            unread: false,
+            pending_request_count: 0,
+            queued_run_count: 0,
+            detail_loaded: true,
+            messages: SharedVec::new(),
+            transcript_blocks: SharedVec::new(),
+            turns: Vec::new(),
+            queued_messages: Vec::new(),
+            available_commands: Vec::new(),
+            pending_permission: None,
+            pending_user_input: None,
+            thread_goal: None,
+            context_usage: None,
+            active_run_id: None,
+            can_steer: false,
+            run_checkpoints: Vec::new(),
+            rollback: None,
+            last_error: None,
+            background_work: Vec::new(),
+            provider_native_id: None,
+            has_more_history: false,
+            history_loading: false,
+            synchronized: true,
+        }
+    }
+
     /// A list row from the shell (no transcript).
     pub fn from_row(row: &ThreadRow) -> Self {
         let mut view = Self::from_thread(&row.thread);
@@ -161,6 +227,7 @@ impl ThreadView {
             transcript_blocks: SharedVec::new(),
             turns: Vec::new(),
             queued_messages: Vec::new(),
+            available_commands: Vec::new(),
             pending_permission: None,
             pending_user_input: None,
             thread_goal: None,
@@ -170,10 +237,17 @@ impl ThreadView {
             run_checkpoints: Vec::new(),
             rollback: thread.rollback.clone(),
             last_error: None,
+            background_work: Vec::new(),
+            provider_native_id: None,
             has_more_history: false,
             history_loading: false,
             synchronized: false,
         }
+    }
+
+    /// The provider's own id of the active conversation.
+    pub fn provider_native_id(&self) -> Option<&str> {
+        self.provider_native_id.as_deref()
     }
 
     pub fn display_title(&self) -> &str {
@@ -421,6 +495,30 @@ impl ViewCache {
             .and_then(|id| state.provider_threads.get(&id))
         {
             view.thread_goal = provider_thread.goal.as_ref().map(legacy_goal);
+            view.provider_native_id = provider_thread
+                .native_thread_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.clone());
+            for task in &provider_thread.pending_background_tasks {
+                if task.kind == PendingTaskKind::Subagent {
+                    // Its subagent row below says more.
+                    continue;
+                }
+                let kind = match task.kind {
+                    PendingTaskKind::Monitor => model::BackgroundWorkKind::Monitor,
+                    _ => model::BackgroundWorkKind::Process,
+                };
+                let mut item = model::BackgroundWorkItem::new(
+                    kind,
+                    task.task_id.clone(),
+                    task.description
+                        .clone()
+                        .unwrap_or_else(|| task.task_id.clone()),
+                    model::BackgroundWorkStatus::Running,
+                );
+                item.background = true;
+                view.background_work.push(item);
+            }
             view.context_usage =
                 provider_thread
                     .context_usage
@@ -429,6 +527,45 @@ impl ViewCache {
                         tokens: usage.tokens,
                         window: usage.window,
                     });
+        }
+        let mut subagents = state.subagents.values().collect::<Vec<_>>();
+        subagents.sort_by_key(|subagent| (subagent.started_at, subagent.id));
+        for subagent in subagents {
+            let status = match subagent.status {
+                SubagentStatus::Completed => model::BackgroundWorkStatus::Completed,
+                SubagentStatus::Failed => model::BackgroundWorkStatus::Failed,
+                SubagentStatus::Cancelled | SubagentStatus::Interrupted => {
+                    model::BackgroundWorkStatus::Stopped
+                }
+                SubagentStatus::Pending | SubagentStatus::Idle => {
+                    model::BackgroundWorkStatus::Starting
+                }
+                _ => model::BackgroundWorkStatus::Running,
+            };
+            let mut item = model::BackgroundWorkItem::new(
+                model::BackgroundWorkKind::Subagent,
+                subagent.id.to_string(),
+                subagent
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| first_line(&subagent.prompt)),
+                status,
+            );
+            item.detail = subagent
+                .result
+                .clone()
+                .or_else(|| subagent.progress.clone());
+            item.model = subagent.model.clone();
+            item.background = true;
+            item.started_at_ms = subagent.started_at.unwrap_or(subagent.updated_at).max(0) as u64;
+            item.updated_at_ms = subagent.updated_at.max(0) as u64;
+            if let Some(run_id) = subagent.run_id
+                && status.is_stoppable()
+            {
+                item.can_stop = true;
+                item.control_id = Some(format!("{run_id}/{}", subagent.id));
+            }
+            view.background_work.push(item);
         }
         let (permission, user_input) = pending_requests(state);
         view.pending_permission = permission;

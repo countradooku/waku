@@ -46,6 +46,9 @@ pub fn dispatch_mode(view: &ThreadView, intent: SendIntent) -> DispatchMode {
 /// shows instead of it.
 #[derive(Clone, Debug, Default)]
 pub struct Outgoing {
+    /// The user message's id; the transcript row of the message has it.
+    /// A fresh one when absent.
+    pub message_id: Option<Uuid>,
     pub text: String,
     pub display_text: Option<String>,
     pub attachments: Vec<MessageAttachment>,
@@ -60,7 +63,7 @@ pub fn send_message(
 ) -> Command {
     Command::MessageDispatch {
         thread_id: ThreadId(thread_id),
-        message_id: MessageId(Uuid::new_v4()),
+        message_id: MessageId(outgoing.message_id.unwrap_or_else(Uuid::new_v4)),
         text: outgoing.text.clone(),
         display_text: outgoing.display_text.clone(),
         attachments: outgoing.attachments.iter().map(Attachment::from).collect(),

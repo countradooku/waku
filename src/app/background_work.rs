@@ -3,10 +3,6 @@ use super::*;
 const MAX_BACKGROUND_OUTPUT_BYTES: usize = 512 * 1024;
 const MAX_SETTLED_BACKGROUND_ITEMS: usize = 24;
 const OUTPUT_CACHE_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
-/// How long a parked session keeps waiting for its provider's wake after the
-/// last detached work settled. Claude re-enters the model a few seconds after
-/// the settle; a first token that slow is a wake in progress, not a no-show.
-const BACKGROUND_RESUME_GRACE: Duration = Duration::from_secs(30);
 const BACKGROUND_SUMMARY_MENU_ID: &str = "background-work-summary";
 const OPEN_IN_MENU_ID: &str = "open-in-app";
 const TASK_ID_COPY_CONTROL_ID: &str = "background-summary-copy-task-id";
@@ -69,8 +65,8 @@ struct TaskIdentifierSection {
     agent_cli_thread_id_copied: bool,
 }
 
-impl From<&AgentSession> for TaskIdentifiers {
-    fn from(session: &AgentSession) -> Self {
+impl From<&ThreadView> for TaskIdentifiers {
+    fn from(session: &ThreadView) -> Self {
         Self {
             task_id: session.id,
             agent_cli_thread_id: session.provider_native_id().map(str::to_owned),
@@ -219,6 +215,27 @@ impl BackgroundWorkRegistry {
         }
     }
 
+    /// Mirror the work a thread's view lists: what left it settled (a
+    /// finished command, a stopped monitor) rather than got lost.
+    pub(super) fn reconcile_view(&mut self, items: Vec<BackgroundWorkItem>) {
+        let present = items
+            .iter()
+            .map(|item| item.key.clone())
+            .collect::<HashSet<_>>();
+        let now = unix_time_millis();
+        for item in self.items.values_mut() {
+            if item.status.is_live() && !present.contains(&item.key) {
+                item.status = BackgroundWorkStatus::Completed;
+                item.can_stop = false;
+                item.updated_at_ms = now;
+            }
+        }
+        for item in items {
+            self.upsert(item);
+        }
+        self.trim_settled();
+    }
+
     fn reconcile_live(&mut self, items: Vec<BackgroundWorkItem>) {
         let present = items
             .iter()
@@ -271,44 +288,8 @@ impl BackgroundWorkRegistry {
         }
     }
 
-    fn mark_live_lost(&mut self) {
-        let now = unix_time_millis();
-        for item in self.items.values_mut().filter(|item| item.status.is_live()) {
-            item.status = BackgroundWorkStatus::Lost;
-            item.can_stop = false;
-            item.updated_at_ms = now;
-        }
-    }
-
-    fn settle_foreground(&mut self, status: BackgroundWorkStatus) {
-        let keys = self
-            .items
-            .values()
-            .filter(|item| !item.background && item.status.is_live())
-            .map(|item| item.key.clone())
-            .collect::<Vec<_>>();
-        let now = unix_time_millis();
-        for key in keys {
-            if key.kind == BackgroundWorkKind::Subagent {
-                if let Some(item) = self.items.get_mut(&key) {
-                    item.status = status;
-                    item.can_stop = false;
-                    item.updated_at_ms = now;
-                }
-            } else {
-                self.remove(&key);
-            }
-        }
-    }
-
     fn has_live(&self) -> bool {
         self.items.values().any(|item| item.status.is_live())
-    }
-
-    fn has_live_detached(&self) -> bool {
-        self.items
-            .values()
-            .any(|item| item.background && item.status.is_live())
     }
 
     fn counts(&self) -> (usize, usize) {
@@ -511,47 +492,6 @@ impl Waku {
             .min()
     }
 
-    pub(super) fn observe_foreground_command_activity(
-        &mut self,
-        session_id: Uuid,
-        activity: &ActivityItem,
-    ) {
-        if activity.kind != crate::model::ActivityKind::Command
-            || self
-                .state
-                .sessions
-                .iter()
-                .find(|session| session.id == session_id)
-                .is_some_and(|session| {
-                    matches!(session.provider, ProviderKind::Codex | ProviderKind::Claude)
-                })
-        {
-            return;
-        }
-        let provider_id = activity
-            .source_id
-            .clone()
-            .unwrap_or_else(|| activity.id.to_string());
-        let status = if !activity.complete {
-            BackgroundWorkStatus::Running
-        } else if activity.failed {
-            BackgroundWorkStatus::Failed
-        } else {
-            BackgroundWorkStatus::Completed
-        };
-        let mut item = BackgroundWorkItem::new(
-            BackgroundWorkKind::Process,
-            provider_id.clone(),
-            activity.title.clone(),
-            status,
-        );
-        item.command = activity.display_target.clone();
-        item.detail = activity.detail.clone();
-        item.output = activity.output.clone();
-        item.origin_activity_id = Some(provider_id);
-        self.handle_background_work_event(session_id, BackgroundWorkEvent::Upsert(item));
-    }
-
     pub(super) fn handle_background_work_event(
         &mut self,
         session_id: Uuid,
@@ -563,32 +503,10 @@ impl Waku {
             .apply(event);
     }
 
-    pub(super) fn mark_background_work_lost(&mut self, session_id: Uuid) {
-        if let Some(registry) = self.background_work.get_mut(&session_id) {
-            registry.mark_live_lost();
-        }
-    }
-
-    pub(super) fn settle_foreground_work(
-        &mut self,
-        session_id: Uuid,
-        status: BackgroundWorkStatus,
-    ) {
-        if let Some(registry) = self.background_work.get_mut(&session_id) {
-            registry.settle_foreground(status);
-        }
-    }
-
     pub(super) fn session_has_live_background_work(&self, session_id: Uuid) -> bool {
         self.background_work
             .get(&session_id)
             .is_some_and(BackgroundWorkRegistry::has_live)
-    }
-
-    pub(super) fn session_has_live_detached_work(&self, session_id: Uuid) -> bool {
-        self.background_work
-            .get(&session_id)
-            .is_some_and(BackgroundWorkRegistry::has_live_detached)
     }
 
     pub(super) fn background_work_counts(&self, session_id: Uuid) -> (usize, usize) {
@@ -610,6 +528,9 @@ impl Waku {
             .find(|item| item.origin_activity_id.as_deref() == Some(activity_id))
     }
 
+    /// Rebuild the batched output caches and tick the elapsed counters of
+    /// live work. The work itself arrives with the thread's view: nothing
+    /// is polled.
     pub(super) fn maybe_refresh_background_work(&mut self, cx: &mut Context<Self>) {
         let mut output_changed = false;
         for registry in self.background_work.values_mut() {
@@ -619,68 +540,16 @@ impl Waku {
             cx.notify();
         }
         let selected = self.state.selected_session;
-        for (session_id, runtime) in &mut self.runtimes {
-            let should_refresh = selected == Some(*session_id)
-                || self
-                    .background_work
-                    .get(session_id)
-                    .is_some_and(BackgroundWorkRegistry::has_live);
-            if should_refresh
-                && runtime.last_background_refresh_at.elapsed() >= BACKGROUND_WORK_REFRESH_INTERVAL
-            {
-                runtime.last_background_refresh_at = Instant::now();
-                runtime.driver.refresh_background_work();
-            }
-        }
-
         if self.last_background_work_tick.elapsed() >= BACKGROUND_WORK_TICK_INTERVAL
             && selected.is_some_and(|session_id| self.session_has_live_background_work(session_id))
         {
             self.last_background_work_tick = Instant::now();
             cx.notify();
         }
-
-        // A parked turn waits for its provider to wake it, which Claude does
-        // within seconds of a settle. Past that grace with no detached work
-        // left there is nothing to wait for, so the held turn settles the way
-        // its result would have — through the ordinary finish path.
-        let unparked = self
-            .runtimes
-            .iter()
-            .filter(|(_, runtime)| runtime.last_active_at.elapsed() >= BACKGROUND_RESUME_GRACE)
-            .map(|(session_id, _)| *session_id)
-            .filter(|session_id| {
-                !self.session_has_live_detached_work(*session_id)
-                    && self
-                        .state
-                        .sessions
-                        .iter()
-                        .find(|session| session.id == *session_id)
-                        .is_some_and(|session| session.status == SessionStatus::Background)
-            })
-            .collect::<Vec<_>>();
-        for session_id in unparked {
-            let Some(mut runtime) = self.runtimes.remove(&session_id) else {
-                continue;
-            };
-            let keep_runtime = self.handle_driver_event(
-                session_id,
-                &mut runtime,
-                DriverEvent::TurnFinished {
-                    success: true,
-                    summary: None,
-                },
-                true,
-                cx,
-            );
-            if keep_runtime {
-                self.runtimes.insert(session_id, runtime);
-            }
-            self.state.mark_session_dirty(session_id);
-            cx.notify();
-        }
     }
 
+    /// `subagent.stop` of a running subagent (its `control_id` names the
+    /// run and the node).
     pub(super) fn stop_background_work(
         &mut self,
         session_id: Uuid,
@@ -693,23 +562,24 @@ impl Waku {
             .and_then(|registry| registry.items.get(&key))
             .filter(|item| item.status.is_stoppable() && item.can_stop)
             .and_then(|item| item.control_id.clone());
-        let Some(control_id) = control_id else {
-            return;
-        };
-        let Some(driver) = self
-            .runtimes
-            .get(&session_id)
-            .map(|runtime| runtime.driver.clone())
-        else {
-            self.mark_background_work_lost(session_id);
-            cx.notify();
+        let Some((run_id, node_id)) = control_id.as_deref().and_then(|control| {
+            let (run, node) = control.split_once('/')?;
+            Some((run.parse::<Uuid>().ok()?, node.parse::<Uuid>().ok()?))
+        }) else {
             return;
         };
         self.handle_background_work_event(
             session_id,
             BackgroundWorkEvent::StopRequested(key.clone()),
         );
-        driver.stop_background_work(key, control_id);
+        self.dispatch(
+            Command::SubagentStop {
+                thread_id: waku_protocol::orchestration::ThreadId(session_id),
+                run_id: waku_protocol::orchestration::RunId(run_id),
+                subagent_id: waku_protocol::orchestration::NodeId(node_id),
+            },
+            ThreadAction::Other,
+        );
         cx.notify();
     }
 
@@ -2040,11 +1910,9 @@ mod tests {
     #[test]
     fn info_popover_uses_waku_task_and_native_agent_ids() {
         let task_id = Uuid::parse_str("ed28ee51-43cf-4a83-a52f-04c509ca2c09").unwrap();
-        let mut session = AgentSession::new(Uuid::nil(), ProviderKind::Codex);
+        let mut session = super::test_support::test_session(Uuid::nil(), ProviderKind::Codex);
         session.id = task_id;
-        session.provider_cursor = Some(ProviderResumeCursor::Codex {
-            thread_id: "019cfd7a-6942-78b1-9d47-30576c562321".into(),
-        });
+        session.provider_native_id = Some("019cfd7a-6942-78b1-9d47-30576c562321".into());
 
         assert_eq!(
             TaskIdentifiers::from(&session),
@@ -2138,22 +2006,5 @@ mod tests {
 
         registry.upsert(process);
         assert_eq!(registry.output_refresh_delay(), None);
-    }
-
-    #[test]
-    fn turn_settlement_keeps_detached_work_live() {
-        let mut registry = BackgroundWorkRegistry::default();
-        registry.upsert(item("foreground", BackgroundWorkStatus::Running, false));
-        registry.upsert(item("background", BackgroundWorkStatus::Running, true));
-        registry.settle_foreground(BackgroundWorkStatus::Completed);
-        assert!(!registry.items.contains_key(&BackgroundWorkKey::new(
-            BackgroundWorkKind::Process,
-            "foreground"
-        )));
-        assert_eq!(
-            registry.items[&BackgroundWorkKey::new(BackgroundWorkKind::Process, "background")]
-                .status,
-            BackgroundWorkStatus::Running
-        );
     }
 }

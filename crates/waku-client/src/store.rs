@@ -80,8 +80,10 @@ pub struct ThreadChange {
     pub tools: bool,
     /// Runs, requests, the queue or the thread's own columns changed.
     pub state: bool,
-    /// The stream (re)started from a snapshot, or older history merged.
+    /// The stream (re)started from a snapshot: rows may have changed anywhere.
     pub snapshot: bool,
+    /// Older history merged in above the rows already shown.
+    pub history: bool,
 }
 
 impl ThreadChange {
@@ -92,6 +94,7 @@ impl ThreadChange {
             tools: self.tools || other.tools,
             state: self.state || other.state,
             snapshot: self.snapshot || other.snapshot,
+            history: self.history || other.history,
         }
     }
 
@@ -101,7 +104,7 @@ impl ThreadChange {
 
     /// Only live text moved: the cheapest redraw suffices.
     pub fn text_only(self) -> bool {
-        self.text && !self.rows && !self.tools && !self.state && !self.snapshot
+        self.text && !self.rows && !self.tools && !self.state && !self.snapshot && !self.history
     }
 }
 
@@ -1201,7 +1204,7 @@ impl Worker {
                         // window; a page for its old cursor still merges
                         // harmlessly (upserts that never replace newer rows).
                         merge_page(&mut thread.state, page);
-                        thread.change.snapshot = true;
+                        thread.change.history = true;
                         thread.change.rows = true;
                     }
                     Err(error) => {

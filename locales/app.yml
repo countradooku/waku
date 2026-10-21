@@ -1401,6 +1401,16 @@ errors.remove_task:
   en: "Could not remove the task: %{error}"
 errors.save_draft:
   en: "Could not save the draft: %{error}"
+errors.daemon_reconnecting:
+  en: Lost the connection to the Waku daemon; reconnecting…
+errors.send_message:
+  en: "Could not send the message: %{error}"
+errors.create_task:
+  en: "Could not create the task: %{error}"
+errors.daemon_command:
+  en: "The daemon refused %{command}: %{error}"
+errors.load_history:
+  en: "Could not load older messages: %{error}"
 errors.rewind_task:
   en: "Could not rewind the task: %{error}"
 errors.project_not_found:
@@ -1498,6 +1508,10 @@ session.message_unavailable:
   en: That message is no longer available
 session.select_before_rewind:
   en: Select the task before rewinding its conversation
+session.rewind_unavailable:
+  en: This message has no checkpoint to rewind to
+session.archive:
+  en: Archive
 session.stop_before_rewind:
   en: Stop the current turn before rewinding the conversation
 session.provider_cannot_rewind:

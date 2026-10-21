@@ -172,9 +172,9 @@ fn task_switcher_grid_height(count: usize, columns: usize, viewport_height: f32)
     content_height.min((viewport_height - WINDOW_MARGIN).max(CARD_HEIGHT + GRID_INSET * 2.0))
 }
 
-fn task_switcher_title(session: &AgentSession) -> String {
+fn task_switcher_title(session: &ThreadView) -> String {
     let title = session.display_title();
-    if title == AgentSession::DEFAULT_TITLE {
+    if title == waku_client::thread_view::DEFAULT_TITLE {
         tr!("session.new_task")
     } else {
         title.to_owned()
@@ -305,9 +305,8 @@ impl Waku {
 
     fn open_task_switcher(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>) {
         let started_tasks = self
-            .state
-            .sessions
-            .iter()
+            .threads
+            .listed()
             .filter(|session| session.has_started())
             .map(|session| session.id)
             .collect::<Vec<_>>();
@@ -414,9 +413,8 @@ impl Waku {
         if may_commit
             && let Some(selected) = selected
             && self
-                .state
-                .sessions
-                .iter()
+                .threads
+                .listed()
                 .any(|session| session.id == selected && session.has_started())
         {
             let was_in_settings = self.settings_page.is_some();
@@ -459,9 +457,8 @@ impl Waku {
                 self.task_switcher.ordered_session_ids[start..end]
                     .iter()
                     .filter_map(|session_id| {
-                        self.state
-                            .sessions
-                            .iter()
+                        self.threads
+                            .listed()
                             .find(|session| session.id == *session_id)
                     })
                     .map(|session| self.render_task_switcher_card(session, cx)),
@@ -471,15 +468,14 @@ impl Waku {
 
     fn render_task_switcher_card(
         &self,
-        session: &AgentSession,
+        session: &ThreadView,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::current(cx);
         let session_id = session.id;
         let highlighted = self.task_switcher.highlighted_session_id == Some(session_id);
         let project_name = self
-            .state
-            .projects
+            .projects()
             .iter()
             .find(|project| project.id == session.project_id)
             .map(Project::display_name)

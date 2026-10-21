@@ -10,7 +10,6 @@ pub mod command_env;
 pub mod commands;
 pub mod composer_complete;
 pub mod computer_use;
-pub mod driver;
 pub mod persistence;
 mod process;
 /// Client-side reducers for the v8 shell, thread and command-output streams.

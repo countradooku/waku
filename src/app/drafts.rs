@@ -62,13 +62,8 @@ impl Waku {
     ) -> Option<crate::persistence::ComposerDraftKey> {
         self.state
             .selected_session
-            .and_then(|selected| {
-                self.state
-                    .sessions
-                    .iter()
-                    .find(|session| session.id == selected)
-            })
-            .map(crate::persistence::ComposerDraftKey::for_session)
+            .and_then(|selected| self.threads.listed().find(|session| session.id == selected))
+            .map(threads::draft_key)
     }
 
     fn current_composer_draft(&self, cx: &App) -> crate::persistence::ComposerDraft {

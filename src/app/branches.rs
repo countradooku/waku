@@ -85,7 +85,7 @@ impl Waku {
                                 Ok(Some(snapshot)) => {
                                     let mut persisted_branch_changed = false;
                                     if let Some(current) = snapshot.current.as_deref()
-                                        && let Some(session) = waku.selected_session_mut()
+                                        && let Some(session) = waku.selected_draft_mut()
                                         && let SessionWorkspace::Worktree { branch, .. } =
                                             &mut session.workspace
                                         && branch != current
@@ -142,7 +142,7 @@ impl Waku {
             return false;
         }
         if matches!(session.workspace, SessionWorkspace::NewWorktree { .. }) {
-            let changed = self.selected_session_mut().is_some_and(|session| {
+            let changed = self.selected_draft_mut().is_some_and(|session| {
                 let SessionWorkspace::NewWorktree { base_branch } = &mut session.workspace else {
                     return false;
                 };
@@ -333,7 +333,7 @@ impl Waku {
                             .map(std::path::Path::to_path_buf);
                         if selected_path.as_ref() == Some(&path) {
                             if let Some(current) = current
-                                && let Some(session) = waku.selected_session_mut()
+                                && let Some(session) = waku.selected_draft_mut()
                                 && let SessionWorkspace::Worktree { branch, .. } =
                                     &mut session.workspace
                             {
