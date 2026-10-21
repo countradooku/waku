@@ -27,8 +27,9 @@ that every T3 Code feature has been implemented.
 - Shared repository locks for daemon workspace mutation requests.
 - Validated worktree base commits and nested-project checks before creation.
 - Ignore-whitespace review with consistent patch and change-count filtering.
-- Desktop, web, and mobile controls as documented in
-  [source-control.md](source-control.md); their coverage differs.
+- Desktop and web controls as documented in
+  [source-control.md](source-control.md); their coverage differs. (The Expo
+  mobile app that also had them was deleted under PLAN decision D7.)
 - Bounded Git output, inherited-pipe timeout handling, and adaptive process
   polling for short commands.
 
@@ -50,8 +51,9 @@ failure, cancellation, recovery, and concurrent clients:
    References: `apps/web/src/state/review.ts`,
    `apps/web/src/state/usePullRequestStack.ts`,
    `apps/web/src/reviewCommentContext.ts`.
-4. Complete native and mobile coverage for worktree inspection and the richer
-   review controls, with interactive keyboard and device validation.
+4. Complete native coverage for worktree inspection and the richer review
+   controls, with interactive keyboard validation; native mobile apps come
+   later (PLAN decision D7).
 
 Other T3 Code areas still need a detailed behavior-by-behavior comparison;
 they have not been implemented by this increment:
@@ -79,7 +81,7 @@ The focused Rust tests cover literal/special filenames, unborn and detached
 branches, indexed renames with later edits, nested repositories, symlink parent
 escapes, worktree locks, dirty/divergent pull, whitespace filtering, and process
 helpers that retain output pipes. Generated protocol types are checked against
-Rust. Native compilation and shared-client/web/mobile type checks complement
+Rust. Native compilation and shared-client/web type checks complement
 the automated suites; interactive app and device validation remains outstanding.
 
 Run the synthetic large-status benchmark with:

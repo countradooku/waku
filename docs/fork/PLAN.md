@@ -48,7 +48,7 @@ The full audit reports are in [`audit/`](audit/):
 | Shell | Electron 44 plus a Node server child; React 19 web bundle | GPUI (the `egoist/zed` fork, branch `waku-webview`), native |
 | Backend | Node/Effect, event-sourced v2 orchestrator, SQLite `statev2` (64 migrations) | Rust `waku-daemon` over `waku-core`; rusqlite; **client-owned projections** |
 | Wire | Effect-RPC over WebSocket, ~195 methods, protocol v2 gate, bounded snapshots and history paging, 5 s ping | JSON over WebSocket, 53 commands plus 27 workspace operations, protocol v7, 2,048-event replay journal, 25 ms polling, no ping, no TLS |
-| Clients | Web (local and hosted), desktop, a near-complete Expo mobile app (~1,400 files, 8 native modules) | GPUI desktop; web (TanStack, close to parity on the core loop); an early Expo mobile companion |
+| Clients | Web (local and hosted), desktop, a near-complete Expo mobile app (~1,400 files, 8 native modules) | GPUI desktop; web (TanStack, close to parity on the core loop); an early Expo mobile companion (deleted, D7) |
 | Providers | Codex, Claude (Agent SDK), Cursor (SDK), Grok, OpenCode 1.x/2.x, Antigravity, Pi, Muse, ACP Registry | Codex, Claude (stream-json), Cursor/Fx/Grok/Kimi (ACP), OpenCode 2, Pi, Oh My Pi, Amp, DeepSeek |
 | License | MIT | **GPL-3.0-only**, so the fork must stay GPL. MIT code from T3 may be copied in if its notices are kept. |
 
@@ -93,7 +93,7 @@ What option B costs ([t3-remote-auth-install-cli.md §0](audit/t3-remote-auth-in
 
 > **Decided (2026-10-20): native mobile apps, written later.**
 > - Mobile clients will be native iOS (Swift) and Android (Kotlin) apps built on protocol v8. Their messages and stream semantics come from the Rust schema, and a Swift/Kotlin codegen target is added when that work starts.
-> - The Expo app in `apps/mobile` is not grown toward parity. It stays as upstream left it until the native apps replace it.
+> - The Expo app in `apps/mobile` is not grown toward parity. It was deleted with the legacy protocol (D7).
 > - The mobile issues in Phase 8 are deferred. They will be rewritten for native apps when that phase starts.
 > - The generated TypeScript client still serves `apps/web`.
 
@@ -128,6 +128,18 @@ T3 Connect runs on Cloudflare Workers, Durable Objects, PlanetScale Postgres and
 > - Drivers implement `DriverV2` only. `DriverControl`, `V1Bridge` and per-driver legacy wrappers are deleted.
 > - The orchestrator database starts fresh: no import of upstream Waku or older fork `app.db` data, and no settings migrations from upstream.
 > - The desktop and web clients render from the v8 shell and thread streams. They don't keep a client-side session model.
+>
+> **Done (2026-10-21).** The cleanup has landed on `phase/2-orchestrator`:
+> - the v7 protocol, its `/v1` endpoint, `WireDriverEvent` and the ts-rs bindings are gone; the daemon accepts only `/v8` and the `WAKU` preface (RFC 0003 amendments);
+> - `DriverControl`, `V1Bridge`, Codex's `legacy.rs` and ACP's legacy start are gone (RFC 0002 amendments);
+> - the legacy task store (`app.db`, the drizzle schema in `db/`) and the settings imports from the older combined `settings.json` are gone;
+> - `DaemonClient`, `WorkspaceClient` and the v7 TypeScript client are gone; the desktop's supervisor watches its daemon over a v8 connection.
+
+### D7: the Expo app
+
+> **Decided (2026-10-21): delete it.** `apps/mobile` spoke only the legacy protocol, so it went with v7 (D6).
+> - The directory, its workspace scripts, its CI steps and its patched dependencies are deleted.
+> - Native iOS and Android apps are written later against protocol v8 (D2).
 
 ---
 
@@ -136,7 +148,7 @@ T3 Connect runs on Cloudflare Workers, Durable Objects, PlanetScale Postgres and
 ```
 GPUI desktop ─┐    typed binary frames (local UDS / named pipe), wss:// remote
 web (TS)  ────┼──► waku-daemon ── session gateway (auth scopes, pairing, ping, cursors)
-mobile (RN) ──┘         │
+mobile (later)┘         │
                         ├─ Orchestrator (pure decide: Command → Events + Effects)
                         ├─ EventSink: ONE sqlite txn = events + projections + receipt + outbox
                         ├─ EffectWorker pool (lease, per-thread FIFO, process-loss reconcile)

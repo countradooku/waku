@@ -323,15 +323,15 @@ An idle app with its daemon must stay below 5 wakeups/s in total
 (`harness.py measure --pid <app>,<daemon>`), so nothing on either side may
 poll while nothing happens:
 
-- The daemon connection (`crates/waku-client/src/client.rs`) and the
+- The daemon connection (`crates/waku-client/src/v8.rs`) and the
   daemon's sockets are evented (#18); an idle connection costs one
   keepalive ping every few seconds.
 - The desktop's daemon supervisor (`monitor_daemon`,
   `crates/waku-client/src/process.rs`) sleeps on a channel (#178). It is
   woken by the managed child's exit (a thread blocked in
   `waitid(WNOWAIT)`, which leaves reaping to the owner of the `Child`), by
-  the connection closing (`DaemonClient::on_disconnect`, which also drives
-  the remote reconnect-with-resume), and by a failed `reconfigure`. Timers
+  the connection closing (`V8Client::on_disconnect`, which also drives
+  the remote reconnect), and by a failed `reconfigure`. Timers
   run only while the daemon is unreachable (restart and reconnect retry
   with a 100 ms to 2 s backoff) and in debug builds of the app, which pass
   `watch_for_rebuilds` and keep the 500 ms poll of the daemon binary that
@@ -341,18 +341,18 @@ poll while nothing happens:
 - A daemon terminal's output thread (`crates/waku-core/src/terminal.rs`)
   blocks on the PTY's readiness (`polling`: kqueue on macOS, epoll on Linux)
   instead of sleeping 4 ms between non-blocking reads (#178). Each wake reads
-  everything already buffered, up to 64 KiB, into one ephemeral
-  `TerminalOutput` event; closing the terminal wakes it through the poller.
+  everything already buffered, up to 64 KiB, into one live
+  `TerminalEvent::Output`; closing the terminal wakes it through the poller.
 
 ### Tracing spans and Tracy (`profiling` feature)
 
-The app, `waku-core` and `waku-daemon` carry `tracing` spans on the paths a
-streaming frame or a save reaches:
+The app carries `tracing` spans on the paths a streaming frame or a save
+reaches. The daemon's spans sat on the legacy protocol's paths and went with
+it (D6); `waku-daemon --features profiling` still installs the subscriber.
 
 | Process | Spans |
 | --- | --- |
 | App | `drain_event_pump`, `Waku::render`, `sidebar_pane`, `transcript_pane`, `right_panel_pane`, `ComposerInput::render`, `transcript_row`, `MarkdownView::set_text`, `IncrementalParser::set_text`, `md::flatten`, `Waku::save` |
-| Daemon (`waku-core`) | `Hub::emit`, `dispatch`, `handle_request`, `save_task_state`, `StateStore::save` |
 
 Spans are written with the crate-local `profile_span!` macro. Without the
 `profiling` feature it expands to nothing, so default and release builds carry
@@ -436,9 +436,9 @@ rounds of release-profile Criterion benches, plus daemon replays through
   feature, off by default until its RSS has been measured in the GUI
   harness's memory scenarios; with `perf-counters` the counting allocator
   forwards to it.
-- **ts-rs is behind `waku-protocol`'s `ts` feature**, which only
-  `export_types` needs (`bun run protocol:generate` / `protocol:check` pass
-  it). Without it `#[derive(TS)]` is a no-op stub (`crates/waku-ts-stub`).
+- **No ts-rs.** The TypeScript types come from the v8 JSON Schema through
+  `waku-codegen`; the schema derives sit behind `waku-protocol`'s `schema`
+  feature, which only the generator builds.
 - **PGO** is a script, not the default build: `scripts/bench/pgo.sh` builds
   instrumented binaries, trains them on the benches, headless timeline
   replays and `rpc-latency` (and on the GUI harness with `PGO_GUI=1`),

@@ -68,7 +68,7 @@ tampered download cannot install anything. The preference itself lives in
 
 | What | Path |
 | --- | --- |
-| Tasks, sessions, transcripts | `%LOCALAPPDATA%\Waku\app.db` |
+| Projects, threads, transcripts | `%LOCALAPPDATA%\Waku\state.sqlite` |
 | Attachments and blobs | `%LOCALAPPDATA%\Waku\blobs` |
 | Settings | `%USERPROFILE%\.waku\app.json` |
 
@@ -94,9 +94,9 @@ The built-in terminal opens PowerShell 7 (`pwsh.exe`) when it is installed,
 then Windows PowerShell, then whatever `COMSPEC` names. Ctrl+Shift+C and
 Ctrl+Shift+V copy and paste so Ctrl+C stays available to the shell.
 
-The shell runs in the daemon on a ConPTY, the same terminal the desktop, a
-browser or the mobile app attach to, so it also works against a Windows daemon
-from another machine.
+The shell runs in the daemon on a ConPTY, the same terminal the desktop or a
+browser attaches to, so it also works against a Windows daemon from another
+machine.
 
 ## Browser
 

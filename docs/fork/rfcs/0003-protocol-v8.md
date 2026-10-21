@@ -1132,10 +1132,11 @@ commands! { "messageDispatch" => MessageDispatch(MessageDispatchCommand), scope 
 3. **Desktop.** `waku-client` gets the v8 transport (blocking reader and writer threads, keepalive, resume). The desktop switches behind a setting, then by default.
 4. **Web** (#144). The generated TS client replaces `packages/waku-client/src/client.ts`, and `apps/web` moves to it.
 5. **Removal.** Remove the legacy endpoint, the `legacy` module, `SaveTaskState`, the duplicate `event_to_wire` in `daemon.rs`, and the ts-rs export.
+   - Done under D6 (see Amendments): v7 and `/v1` are gone and v8 is the only protocol.
 
 **Existing data and other clients:**
 - **Persisted state.** No persisted state uses the wire format. `waku-blob:` and `waku-attachment:` references stay valid. Composer drafts are not migrated (D6): their keys are orchestration project and thread ids, and drafts under any other id are pruned (§5.2 notes).
-- **Expo app.** `apps/mobile` stays on legacy and stops working against the fork's daemon at step 5. That is accepted under D2. Native apps arrive later via codegen.
+- **Expo app.** Deleted with the legacy protocol (PLAN decision D7). Native apps arrive later via codegen.
 - **Version skew.** A local daemon and the desktop ship together. A remote daemon with a different major answers `rejected{versionUnsupported}`, and the client asks the user to update one side.
 
 ## 11. Test plan
@@ -1212,3 +1213,12 @@ commands! { "messageDispatch" => MessageDispatch(MessageDispatchCommand), scope 
 | Session TTL | 30 days, sliding |
 | Failed `Hello` limit | 10 per minute per remote address |
 | Reconnect backoff | 0, then 250 ms doubling to 10 s, ±20% jitter |
+
+## Amendments
+
+- **v7 and `/v1` are removed (D6, step 5 of §10).** The daemon speaks protocol v8 only. Deleted: the v7 messages and commands (`waku_protocol::protocol`: `ClientMessage`, `ServerMessage`, `Command`, `Request`, `ResponsePayload`, `SequencedEvent`, `ReplayCursor`), `WireDriverEvent` and its `driver_wire` codec (`event_to_wire`, `event_from_wire`), the v7 binary frames, `PROTOCOL_VERSION` and `LEGACY_PROTOCOL_VERSION`, the ts-rs bindings with their `export_types` binary and `waku-ts-stub`, the legacy hub with its replay journal and per-session mailboxes, and `DaemonClient` and `WorkspaceClient` in `waku-client`.
+  - The TCP listener accepts only the `/v8` upgrade with the `waku.v8` subprotocol (anything else is `404`, a missing subprotocol `426`); the local socket accepts only the `WAKU` preface and closes any other connection. The socket keeps its name.
+  - `DaemonReady.protocolVersion` now carries `PROTOCOL_MAJOR`. The remaining process contract (the environment variables, the readiness line, the terminal retention bounds) lives in `waku_protocol::daemon`.
+  - The non-orchestration catalog's adapter layer is a typed `waku_core::Backend` trait (one method per backend operation) instead of the v7 `Command`/`ResponsePayload` pair, and the PTY host reports to a `TerminalEvents` callback with raw bytes instead of base64 `WireDriverEvent`s.
+  - The legacy task store (`app.db`, its `sessions` and `messages` tables, the drizzle schema in `db/`) is gone; the daemon's data directory holds the orchestrator's `state.sqlite`, `blobs/`, `attachments/`, the composer drafts and the cleanup state. Blob sweeps keep what the orchestrator and the drafts reference.
+  - `bun run protocol:generate` and `protocol:check` run `waku-codegen` only. `packages/waku-client` keeps the v8 client (`src/v8`) and `fuzzy-search`; the v7 client, its generated types and the helpers only the Expo app used are deleted.
