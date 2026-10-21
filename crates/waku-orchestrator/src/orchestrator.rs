@@ -233,7 +233,7 @@ pub struct Orchestrator {
     ids: Arc<Mutex<Box<dyn IdSource>>>,
     clock: Arc<dyn Clock>,
     capabilities: Arc<dyn CapabilitySource>,
-    settings: OrchestratorSettings,
+    settings: RwLock<OrchestratorSettings>,
     workers: WorkerConfig,
     locks: KeyedLocks,
     cache: ThreadCache,
@@ -312,7 +312,7 @@ impl Orchestrator {
             ids,
             clock: deps.clock,
             capabilities: deps.capabilities,
-            settings: config.settings,
+            settings: RwLock::new(config.settings),
             workers: config.workers,
             locks: KeyedLocks::default(),
             cache: ThreadCache::new(config.cache_threads),
@@ -366,13 +366,14 @@ impl Orchestrator {
         };
         let project = project_id.and_then(|id| self.projects.read().get(&id).cloned());
         let now = self.clock.now();
+        let settings = self.settings.read().clone();
         let decided = {
             let mut ids = self.ids.lock();
             let mut cx = DecideContext {
                 now,
                 ids: &mut **ids,
                 capabilities: &*self.capabilities,
-                settings: &self.settings,
+                settings: &settings,
                 thread: thread.as_deref(),
                 related: None,
                 project: project.as_ref(),
@@ -511,13 +512,14 @@ impl Orchestrator {
             .get(&projection.thread.project_id)
             .cloned();
         let now = self.clock.now();
+        let settings = self.settings.read().clone();
         let decided = {
             let mut ids = self.ids.lock();
             let mut cx = DecideContext {
                 now,
                 ids: &mut **ids,
                 capabilities: &*self.capabilities,
-                settings: &self.settings,
+                settings: &settings,
                 thread: Some(projection),
                 related: None,
                 project: project.as_ref(),
@@ -677,8 +679,14 @@ impl Orchestrator {
         &self.workers
     }
 
-    pub fn settings(&self) -> &OrchestratorSettings {
-        &self.settings
+    pub fn settings(&self) -> OrchestratorSettings {
+        self.settings.read().clone()
+    }
+
+    /// Whether threads interrupted by a restart are continued (#59); the
+    /// daemon follows its settings document.
+    pub fn set_continue_after_restart(&self, enabled: bool) {
+        self.settings.write().continue_after_restart = enabled;
     }
 
     /// Called after every commit that enqueued or cancelled effects.

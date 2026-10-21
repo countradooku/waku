@@ -20,6 +20,10 @@ name = "fake-claude"
 path = "src/bin/fake-claude.rs"
 
 [[bin]]
+name = "orchestrated-daemon"
+path = "src/bin/orchestrated-daemon.rs"
+
+[[bin]]
 name = "rpc-latency"
 path = "src/bin/rpc-latency.rs"
 
@@ -49,6 +53,10 @@ waku-client = { path = "../waku-client" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# The restart e2e (#59) checks the recovery's notices and failure code.
+waku-orchestrator = { path = "../waku-orchestrator" }
 
 [lints]
 workspace = true

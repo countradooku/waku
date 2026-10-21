@@ -8934,6 +8934,7 @@ dependencies = [
  "uuid",
  "waku-client",
  "waku-core",
+ "waku-orchestrator",
  "waku-protocol",
 ]
 

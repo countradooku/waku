@@ -22,6 +22,7 @@ fn decide_reaches_no_io() {
         ("draft.rs", include_str!("draft.rs")),
         ("internal.rs", include_str!("internal.rs")),
         ("project.rs", include_str!("project.rs")),
+        ("recovery.rs", include_str!("recovery.rs")),
         ("request.rs", include_str!("request.rs")),
         ("run.rs", include_str!("run.rs")),
         ("thread.rs", include_str!("thread.rs")),
@@ -500,3 +501,5 @@ fn lifecycle_commands_are_idempotent_in_effect() {
     assert_eq!(update.thread.title, "Mine");
     assert_eq!(update.thread.title_source, TitleSource::User);
 }
+
+mod recovery;

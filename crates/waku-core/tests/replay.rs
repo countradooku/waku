@@ -686,6 +686,118 @@ fn compaction_reaches_the_live_session() {
 
 // -- the harness itself ----------------------------------------------------------
 
+/// `daemon_restart` (#59): the daemon is killed mid-turn; the restarted
+/// daemon interrupts the run (process loss), continues it once with a new
+/// run that resumes the same native thread, and shows both lifecycle rows.
+fn assert_restart_continued_once(result: &ScenarioResult, answer: &str) {
+    use waku_orchestrator::recovery::{CONTINUE_TEXT, PROCESS_LOSS, RESUMED_NOTICE};
+
+    let main = &result.projection;
+    assert_eq!(
+        statuses(main),
+        [RunStatus::Interrupted, RunStatus::Completed],
+        "{:#?}",
+        main.runs
+    );
+    let all = runs(main);
+    let (interrupted, continued) = (all[0], all[1]);
+    assert_eq!(
+        interrupted
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.code.as_deref()),
+        Some(PROCESS_LOSS)
+    );
+    assert_eq!(
+        continued.continuation,
+        Some(RunContinuation {
+            kind: ContinuationKind::Restart,
+            of_run_id: interrupted.id,
+        })
+    );
+    assert_eq!(
+        interrupted.provider_thread_id, continued.provider_thread_id,
+        "the native thread is resumed, not replaced"
+    );
+    // One recovery, one continuation.
+    assert_eq!(result.recoveries.len(), 1);
+    assert_eq!(result.recoveries[0].continuations, 1);
+    assert!(
+        main.runs
+            .values()
+            .filter(|run| run.continuation.is_some())
+            .count()
+            == 1
+    );
+    // The first daemon's session stopped with the process.
+    let mut sessions = main.provider_sessions.values().collect::<Vec<_>>();
+    // Session ids count up (`SeqIdAllocator`); the clock may not have moved.
+    sessions.sort_by_key(|session| session.id);
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].detach_reason.as_deref(), Some(PROCESS_LOSS));
+    // The rows: the interrupted notice ends run 1's block; run 2's block
+    // opens with the resumed row, then the system's message, then the
+    // answer.
+    let rows = items(result, main_id(result));
+    let interrupted_row = rows
+        .iter()
+        .find(|item| {
+            matches!(
+                item.kind,
+                TurnItemKind::SystemNotice {
+                    lifecycle: Some(LifecycleNotice::RestartInterrupted),
+                    ..
+                }
+            )
+        })
+        .expect("the restart_interrupted row");
+    assert_eq!(interrupted_row.run_id, Some(interrupted.id));
+    let block = |ordinal: u32| {
+        rows.iter()
+            .filter(|item| item.block() == ordinal)
+            .collect::<Vec<_>>()
+    };
+    let second = block(2);
+    assert!(
+        matches!(
+            &second[0].kind,
+            TurnItemKind::SystemNotice {
+                message,
+                lifecycle: Some(LifecycleNotice::RestartResumed),
+            } if message == RESUMED_NOTICE
+        ),
+        "{second:#?}"
+    );
+    assert!(
+        matches!(
+            &second[1].kind,
+            TurnItemKind::UserMessage { text, created_by: Actor::System, .. } if text == CONTINUE_TEXT
+        ),
+        "{second:#?}"
+    );
+    assert!(
+        second.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == answer
+        )),
+        "{second:#?}"
+    );
+    assert!(
+        block(1).iter().all(|item| item.status.is_terminal()),
+        "run 1's rows all ended"
+    );
+}
+
+#[test]
+fn a_daemon_restart_mid_turn_continues_once() {
+    let result = replay("daemon_restart");
+    assert_restart_continued_once(&result, "Echo: Continue where you left off.");
+    // The continuation resumed native thread t-1.
+    let main = &result.projection;
+    let continued = runs(main)[1];
+    assert_eq!(native_thread(main, continued).as_deref(), Some("t-1"));
+}
+
 #[test]
 fn every_fixture_has_assertions() {
     let fake = [
@@ -708,6 +820,7 @@ fn every_fixture_has_assertions() {
         "idle_release_pinned",
         "model_switch",
         "compact",
+        "daemon_restart",
     ];
     let covered = |provider: &str| -> &[&str] {
         match provider {
@@ -910,7 +1023,7 @@ fn native_thread(projection: &ThreadProjection, run: &Run) -> Option<String> {
 mod codex {
     use super::*;
 
-    pub const COVERED: [&str; 16] = [
+    pub const COVERED: [&str; 17] = [
         "simple",
         "multi_turn",
         "tool_call_read_only",
@@ -927,10 +1040,26 @@ mod codex {
         "usage_limit",
         "runtime_exit_unexpected",
         "background_work",
+        "daemon_restart",
     ];
 
     fn replay(scenario: &str) -> ScenarioResult {
         replay_as(scenario, CODEX_PROVIDER)
+    }
+
+    #[test]
+    fn daemon_restart_resumes_the_thread_and_continues_once() {
+        let result = replay("daemon_restart");
+        assert_restart_continued_once(
+            &result,
+            "provider thread resume fixture first turn complete",
+        );
+        let main = &result.projection;
+        let all = runs(main);
+        assert_eq!(
+            native_thread(main, all[1]).as_deref(),
+            Some("00000000-0000-4000-8000-000000000001")
+        );
     }
 
     fn native_id(reference: Option<&ProviderRef>) -> Option<(&str, RefStrength)> {
@@ -1338,7 +1467,7 @@ mod codex {
 mod claude {
     use super::*;
 
-    pub const COVERED: [&str; 16] = [
+    pub const COVERED: [&str; 17] = [
         "simple",
         "multi_turn",
         "tool_call_read_only",
@@ -1355,10 +1484,17 @@ mod claude {
         "background_work",
         "subagent",
         "model_switch",
+        "daemon_restart",
     ];
 
     fn claude(scenario: &str) -> ScenarioResult {
         replay_as(scenario, CLAUDE_PROVIDER)
+    }
+
+    #[test]
+    fn claude_daemon_restart_resumes_and_continues_once() {
+        let result = claude("daemon_restart");
+        assert_restart_continued_once(&result, "Echo: Continue where you left off.");
     }
 
     #[test]

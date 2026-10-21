@@ -231,7 +231,7 @@ pub(super) fn decide(
             }
         }
         InternalCommand::RecoverThread { .. } | InternalCommand::ContinueRun { .. } => {
-            unreachable!("routed by decide_internal")
+            unreachable!("routed to decide::recovery")
         }
     }
     Ok(())

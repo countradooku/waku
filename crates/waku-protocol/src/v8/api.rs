@@ -388,7 +388,7 @@ pub struct SettingsSnapshot {
 }
 
 /// The daemon's settings as clients see them.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -400,6 +400,22 @@ pub struct Settings {
     pub provider_binary_overrides: BTreeMap<String, String>,
     /// The managed worktree folder and its cleanup rules.
     pub storage: StorageSettings,
+    /// Continue threads whose turn a daemon restart interrupted (#59). On
+    /// by default.
+    pub continue_threads_after_restart: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            computer_use_enabled: false,
+            computer_use_allowed_apps: Vec::new(),
+            disabled_providers: Vec::new(),
+            provider_binary_overrides: BTreeMap::new(),
+            storage: StorageSettings::default(),
+            continue_threads_after_restart: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

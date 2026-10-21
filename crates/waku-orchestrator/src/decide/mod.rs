@@ -10,6 +10,7 @@ mod ingest;
 mod internal;
 pub mod policy;
 mod project;
+pub mod recovery;
 mod request;
 mod run;
 mod thread;
@@ -174,22 +175,32 @@ fn decide_internal(
     command_id: &CommandId,
     command: &InternalCommand,
 ) -> Result<Decision, CommandError> {
+    let thread_id = command.thread_id();
+    let projection = match cx.thread {
+        Some(projection) if projection.id() == thread_id => projection,
+        _ => return Err(CommandError::not_found("thread", thread_id)),
+    };
+    let project_path = cx.project.map(|project| project.path.clone());
+    let mut draft = Draft::new(projection, cx.now, cx.ids, project_path);
     match command {
-        InternalCommand::RecoverThread { .. } | InternalCommand::ContinueRun { .. } => Err(
-            CommandError::unsupported(format!("{} (#59)", command.command_type())),
-        ),
-        _ => {
-            let thread_id = command.thread_id();
-            let projection = match cx.thread {
-                Some(projection) if projection.id() == thread_id => projection,
-                _ => return Err(CommandError::not_found("thread", thread_id)),
-            };
-            let project_path = cx.project.map(|project| project.path.clone());
-            let mut draft = Draft::new(projection, cx.now, cx.ids, project_path);
-            internal::decide(&mut draft, command_id, command)?;
-            Ok(draft.finish())
-        }
+        InternalCommand::RecoverThread { .. } => recovery::recover_thread(&mut draft, cx.settings)?,
+        InternalCommand::ContinueRun {
+            of_run_id,
+            kind,
+            message_id,
+            text,
+            ..
+        } => recovery::continue_run(
+            &mut draft,
+            cx.settings,
+            *of_run_id,
+            *kind,
+            *message_id,
+            text,
+        )?,
+        _ => internal::decide(&mut draft, command_id, command)?,
     }
+    Ok(draft.finish())
 }
 
 /// Truncates to at most `max` characters on a char boundary.

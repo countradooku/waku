@@ -120,6 +120,18 @@ pub struct ToolPresentation {
 }
 
 open_enum! {
+    /// What a lifecycle `system_notice` row reports, for clients that render
+    /// it specially (#59). The message stays readable on its own.
+    pub enum LifecycleNotice {
+        /// The daemon stopped while this run was in flight; the run was
+        /// interrupted by the restart.
+        RestartInterrupted = "restart_interrupted",
+        /// This run continues one the restart interrupted.
+        RestartResumed = "restart_resumed",
+    }
+}
+
+open_enum! {
     /// Why a user message entered the transcript.
     pub enum InputIntent {
         TurnStart = "turn_start",
@@ -375,6 +387,9 @@ pub enum TurnItemKind {
     },
     SystemNotice {
         message: String,
+        /// Set on lifecycle rows (restart recovery, #59).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lifecycle: Option<LifecycleNotice>,
     },
     Error {
         failure: ProviderFailure,

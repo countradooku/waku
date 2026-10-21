@@ -122,6 +122,7 @@ impl Sanitizer {
                         *error = state.value(error, None);
                     }
                 }
+                ReplayEntry::DaemonRestart => {}
             }
         }
     }
