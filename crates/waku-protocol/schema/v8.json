@@ -897,6 +897,7 @@
             "fork": false,
             "fork_from_subagent_thread": false,
             "fork_from_turn": false,
+            "fork_in_target_session": false,
             "native_thread_id": false,
             "read_snapshot": false,
             "rollback": false
@@ -7229,6 +7230,7 @@
               "fork": false,
               "fork_from_subagent_thread": false,
               "fork_from_turn": false,
+              "fork_in_target_session": false,
               "native_thread_id": false,
               "read_snapshot": false,
               "rollback": false
@@ -10826,6 +10828,11 @@
         },
         "fork_from_turn": {
           "default": false,
+          "type": "boolean"
+        },
+        "fork_in_target_session": {
+          "default": false,
+          "description": "The fork is made by the session that will run the forked thread, so\nthe new thread is loaded where its turns run (Codex: a thread stays\nowned by the app-server that loaded it).",
           "type": "boolean"
         },
         "native_thread_id": {

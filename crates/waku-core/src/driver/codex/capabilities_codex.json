@@ -12,6 +12,7 @@
     "rollback": true,
     "fork": true,
     "fork_from_turn": true,
+    "fork_in_target_session": true,
     "fork_from_subagent_thread": false,
     "native_thread_id": true
   },

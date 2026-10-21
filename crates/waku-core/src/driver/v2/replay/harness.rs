@@ -528,7 +528,7 @@ impl ReplayHarness {
     /// Waits until nothing moves: no unsettled effect, no event in flight,
     /// no new commit and no replay progress for several polls.
     pub fn settle(&self) -> Result<(), ReplayError> {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + self.patience();
         let mut last = None;
         let mut stable = 0;
         loop {
@@ -560,6 +560,36 @@ impl ReplayHarness {
         }
     }
 
+    /// How long a wait may take: a replay answers at once, a live model
+    /// can think for minutes.
+    fn patience(&self) -> Duration {
+        if self.replay.is_some() {
+            Duration::from_secs(20)
+        } else {
+            Duration::from_secs(300)
+        }
+    }
+
+    /// Waits until the thread has no active and no queued run. `settle`
+    /// alone cannot tell a finished turn from a live model that is still
+    /// thinking, and steps such as rollback and fork need the turn over.
+    fn wait_at_rest(&self, thread_id: ThreadId) -> Result<(), ReplayError> {
+        let deadline = Instant::now() + self.patience();
+        loop {
+            self.settle()?;
+            let projection = self.projection(thread_id)?;
+            if projection.active_run().is_none() && projection.queued_runs().is_empty() {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                return Err(ReplayError::Harness(
+                    "timed out waiting for the thread to come to rest".to_owned(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn wait_until(&self, thread_id: ThreadId, until: &str) -> Result<(), ReplayError> {
         if let Some(ms) = until.strip_prefix("ms:") {
             let ms = ms
@@ -568,7 +598,7 @@ impl ReplayHarness {
             self.clock.advance(ms);
             return self.settle();
         }
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + self.patience();
         loop {
             self.replay_failed()?;
             let projection = self.projection(thread_id)?;
@@ -693,6 +723,7 @@ impl ReplayHarness {
                 thread,
             } => {
                 let thread_id = self.thread(thread)?;
+                self.wait_at_rest(thread_id)?;
                 let projection = self.projection(thread_id)?;
                 let latest = projection.latest_ordinal();
                 let target = latest.saturating_sub(*runs);
@@ -718,6 +749,7 @@ impl ReplayHarness {
                 thread,
             } => {
                 let source = self.thread(thread)?;
+                self.wait_at_rest(source)?;
                 let after_run = match at_run {
                     Some(ordinal) => Some(
                         self.projection(source)?
@@ -739,6 +771,7 @@ impl ReplayHarness {
             }
             ScenarioStep::Select { selection, thread } => {
                 let thread_id = self.thread(thread)?;
+                self.wait_at_rest(thread_id)?;
                 let mut model_selection = ModelSelection::new(self.instance.instance_id.as_str());
                 model_selection.model = selection.model.clone();
                 model_selection.reasoning_effort = selection.reasoning_effort.clone();
@@ -756,6 +789,7 @@ impl ReplayHarness {
             }
             ScenarioStep::Compact { thread } => {
                 let thread_id = self.thread(thread)?;
+                self.wait_at_rest(thread_id)?;
                 let manager = self.manager.clone();
                 self.runtime
                     .block_on(manager.compact(thread_id))
@@ -768,6 +802,7 @@ impl ReplayHarness {
             }
             ScenarioStep::Unload { thread } => {
                 let thread_id = self.thread(thread)?;
+                self.wait_at_rest(thread_id)?;
                 let manager = self.manager.clone();
                 self.runtime
                     .block_on(manager.unload_thread(thread_id))
@@ -838,6 +873,14 @@ impl ReplayHarness {
         self.settle()?;
         for step in &input.steps {
             self.step(step, &mut forks)?;
+        }
+        if self.replay.is_none() {
+            // A live recording lets the last turns finish instead of
+            // shutting them down mid-answer.
+            let threads: Vec<ThreadId> = self.threads.values().copied().collect();
+            for thread_id in threads {
+                self.wait_at_rest(thread_id)?;
+            }
         }
         let manager = self.manager.clone();
         self.runtime.block_on(manager.shutdown());

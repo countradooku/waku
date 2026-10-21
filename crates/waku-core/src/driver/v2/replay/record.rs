@@ -440,19 +440,31 @@ pub fn record_scenario(
 
     let instance = instance_for(request.instance, &request.input);
     let recorder = RecordingTransportFactory::new(request.live);
-    let (workspace, home) = {
+    let (workspace, home, live) = {
         let mut harness = ReplayHarness::new(
             request.driver.clone(),
             instance.clone(),
             Transports::Live(recorder.clone()),
         )?;
-        harness.run(&request.input)?;
-        (harness.workspace.clone(), harness.home.clone())
+        let live = harness.run(&request.input).map(|_| ());
+        (harness.workspace.clone(), harness.home.clone(), live)
     };
     let mut entries = recorder.entries();
     let mut sanitizer = super::Sanitizer::from_env(&workspace, Some(&home));
     sanitizer.renumber_ids = request.renumber_ids;
     sanitizer.sanitize(&mut entries);
+    if let Err(error) = live {
+        // Keep what the provider said up to the failure, sanitized and
+        // checked like a fixture, so the failure can be read off the wire.
+        let failed = request.out.with_extension("failed.ndjson");
+        let partial = ReplayTranscript::new(request.header, entries);
+        if super::write_transcript(&failed, &partial).is_ok()
+            && sanitizer.verify_file(&failed).is_err()
+        {
+            let _ = std::fs::remove_file(&failed);
+        }
+        return Err(error);
+    }
     let transcript = ReplayTranscript::new(request.header, entries);
     super::write_transcript(&request.out, &transcript)
         .map_err(|error| ReplayError::Io(error.to_string()))?;

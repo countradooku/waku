@@ -1732,10 +1732,21 @@ impl ProviderSessionManager {
                     .map(|project| project.path)
             })
             .unwrap_or_default();
-        let live = self
-            .ensure_live(source, &registered, cwd, &selection)
-            .await?;
-        let thread = self.bind_thread(&live, &row, &selection, None).await?;
+        // `fork_in_target_session`: the target's session makes the fork from
+        // the source's native ref, and the source session is not involved.
+        let in_target = caps.threads.fork_in_target_session;
+        let (live, thread) = if in_target {
+            let live = self
+                .ensure_live(target, &registered, cwd, &selection)
+                .await?;
+            (live, ProviderThreadRef::from_row(&row))
+        } else {
+            let live = self
+                .ensure_live(source, &registered, cwd, &selection)
+                .await?;
+            let thread = self.bind_thread(&live, &row, &selection, None).await?;
+            (live, thread)
+        };
         let mut turns = projection
             .provider_turns
             .values()
@@ -1805,6 +1816,12 @@ impl ProviderSessionManager {
             updated_at: now,
         };
         forked.apply_to(&mut new_row);
+        if in_target {
+            // Loaded in the session that runs its turns: no resume needed.
+            new_row.provider_session_id = Some(live.provider_session_id);
+            new_row.status = ProviderThreadStatus::Idle;
+            *live.bound.lock() = Some(forked.clone());
+        }
         self.ingest(IngestEnvelope::for_thread(
             target,
             live.provider_session_id,

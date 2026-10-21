@@ -69,6 +69,7 @@ pub fn codex_capabilities(cfg: &InstanceConfig) -> Capabilities {
     caps.threads.rollback = true;
     caps.threads.fork = true;
     caps.threads.fork_from_turn = true;
+    caps.threads.fork_in_target_session = true;
     caps.threads.native_thread_id = true;
     caps.turns.native_turn_id = true;
     caps.turns.emits_turn_started = true;
@@ -862,25 +863,32 @@ impl DriverSession for CodexSession {
         }
         let result = self.shared.conn.request("thread/fork", params).await?;
         let native = thread_native_id(&result)?;
-        // The fork's turns run in another session: this app-server lets go
-        // of the new thread so that session can load it.
-        if let Err(error) = self
+        let provider_thread_id = self.shared.bind(
+            req.source.provider_thread_id.0,
+            EntityKind::ProviderThread,
+            &native,
+        );
+        if self.shared.state.lock().root.is_none() {
+            // The session of the forked thread made the fork
+            // (`fork_in_target_session`): the new thread is its own.
+            self.shared
+                .bind_root(provider_thread_id, &native, thread_name(&result))
+                .await;
+        } else if let Err(error) = self
             .shared
             .conn
             .request("thread/unsubscribe", json!({ "threadId": native }))
             .await
         {
+            // The fork's turns run in another session: this app-server lets
+            // go of the new thread so that session can load it.
             self.shared.conn.raw_log(
                 FrameDirection::Note,
                 &format!("thread/unsubscribe after fork failed: {error}"),
             );
         }
         Ok(ProviderThreadRef {
-            provider_thread_id: self.shared.bind(
-                req.source.provider_thread_id.0,
-                EntityKind::ProviderThread,
-                &native,
-            ),
+            provider_thread_id,
             native: NativeRef::strong(&native),
             cursor: Some(cursor_for(&native)),
         })

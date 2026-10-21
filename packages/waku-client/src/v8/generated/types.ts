@@ -2569,6 +2569,12 @@ export type ThreadCaps = {
   fork?: boolean;
   fork_from_subagent_thread?: boolean;
   fork_from_turn?: boolean;
+  /**
+   * The fork is made by the session that will run the forked thread, so
+   * the new thread is loaded where its turns run (Codex: a thread stays
+   * owned by the app-server that loaded it).
+   */
+  fork_in_target_session?: boolean;
   native_thread_id?: boolean;
   read_snapshot?: boolean;
   rollback?: boolean;

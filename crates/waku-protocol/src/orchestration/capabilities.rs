@@ -50,6 +50,10 @@ pub struct ThreadCaps {
     pub fork: bool,
     pub fork_from_turn: bool,
     pub fork_from_subagent_thread: bool,
+    /// The fork is made by the session that will run the forked thread, so
+    /// the new thread is loaded where its turns run (Codex: a thread stays
+    /// owned by the app-server that loaded it).
+    pub fork_in_target_session: bool,
     pub native_thread_id: bool,
 }
 
