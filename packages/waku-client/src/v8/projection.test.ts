@@ -89,6 +89,27 @@ describe("thread reducer", () => {
     expect(state.hasMoreHistory).toBe(false);
   });
 
+  test("history pages bring their runs' checkpoints without replacing live ones", () => {
+    const state = createThreadState();
+    const scope: T.CheckpointScope = {
+      id: "scope-old", threadId: "t", kind: "root_run", nodeId: "n", cwd: "/w", createdAt: 1, ordinalWithinParent: 0, runId: "r-old",
+    };
+    const checkpoint = (id: string, patch: Partial<T.Checkpoint> = {}): T.Checkpoint => ({
+      id, threadId: "t", scopeId: "scope-old", nodeId: "n", gitRef: `refs/${id}`, ordinalWithinScope: 0, capturedAt: 1, status: "ready", ...patch,
+    });
+    const live = checkpoint("c-live", { status: "stale" });
+    state.checkpoints.set(live.id, live);
+    mergeHistoryPage(state, {
+      items: [],
+      runs: [],
+      checkpointScopes: [scope],
+      checkpoints: [checkpoint("c-start", { runId: "r-old", appRunOrdinal: 0 }), checkpoint("c-live")],
+    });
+    expect(state.checkpointScopes.get("scope-old")).toEqual(scope);
+    expect(state.checkpoints.get("c-start")).toMatchObject({ runId: "r-old", appRunOrdinal: 0 });
+    expect(state.checkpoints.get("c-live")).toBe(live);
+  });
+
   test("unknown items and events are skipped but still advance the cursor", () => {
     const state = createThreadState();
     applyThreadItem(state, itemNormalizers.thread(structuredClone(fixture.thread.items[0])));

@@ -5,7 +5,7 @@
 // resolves.
 
 import type * as T from '@waku/client/v8'
-import { newId, type DaemonConnection, type ThreadStore } from '@waku/client/v8'
+import { newId, type DaemonConnection, type ShellStore, type ThreadStore } from '@waku/client/v8'
 import {
   createContext,
   useCallback,
@@ -27,9 +27,8 @@ import {
   type SendIntent,
 } from './commands'
 import { requireConnection, useDaemon, type DaemonStores } from './daemon-context'
-import { loadDaemonInfo, normalizeProjectPath, projectNameFromPath } from './daemon-api'
-import { PROJECTLESS_NAME } from './project-presentation'
-import type { Task } from './thread-model'
+import { normalizeProjectPath, projectNameFromPath } from './daemon-api'
+import type { BackgroundWorkItem, Task } from './thread-model'
 
 interface TaskActions {
   /** Thread ids with a fork in flight, and the run it forks from. */
@@ -56,6 +55,10 @@ interface TaskActions {
   forkFromRun: (task: Task, runId: string) => Promise<string>
   rewindToRun: (task: Task, runId: string, input: MessageInput) => Promise<void>
   stopSubagent: (threadId: string, runId: string, subagentId: string) => Promise<void>
+  /** Stops a subagent (`subagent.stop`) or a process or monitor (`background_work.stop`). */
+  stopBackgroundWork: (threadId: string, item: BackgroundWorkItem) => Promise<void>
+  /** Asks the provider to list the thread's background work again. */
+  refreshBackgroundWork: (threadId: string) => Promise<void>
 }
 
 const TaskActionsContext = createContext<TaskActions | null>(null)
@@ -81,6 +84,26 @@ export function waitForRollback(store: ThreadStore, timeoutMs = 120_000): Promis
       }
     }
     unsubscribe = store.subscribe(check)
+    check()
+  })
+}
+
+/** Waits until the shell stream holds project `projectId`. */
+export function waitForProject(shell: ShellStore, projectId: string, timeoutMs = 30_000): Promise<T.Project> {
+  return new Promise((resolve, reject) => {
+    let unsubscribe = () => {}
+    const timer = setTimeout(() => {
+      unsubscribe()
+      reject(new Error('The project did not appear in time'))
+    }, timeoutMs)
+    const check = () => {
+      const project = shell.state.projects.get(projectId)
+      if (!project) return
+      clearTimeout(timer)
+      unsubscribe()
+      resolve(project)
+    }
+    unsubscribe = shell.subscribe(check)
     check()
   })
 }
@@ -132,12 +155,14 @@ export function createTaskActions(
   return {
     addProject,
 
-    // There is no scratch-project command yet (RFC 0003 `projectCreateScratch`
-    // is not served), so "No project" is one project at the daemon's
-    // projectless folder.
+    // Every projectless task gets a scratch project of its own: the daemon
+    // makes a fresh folder under its projectless root and records the
+    // project. The command id makes a retry reuse it.
     async projectlessProject() {
-      const info = await loadDaemonInfo(connection)
-      return addProject(info.projectlessRoot ?? info.defaultCwd, PROJECTLESS_NAME)
+      const projectId = newId()
+      await dispatch({ type: 'project.create_scratch', projectId }, commandIds.createScratchProject(projectId))
+      if (!stores) throw new Error('The project list is not connected')
+      return waitForProject(stores.shell, projectId)
     },
 
     async startTask(task, input) {
@@ -262,6 +287,21 @@ export function createTaskActions(
     async stopSubagent(threadId, runId, subagentId) {
       await dispatch({ type: 'subagent.stop', threadId, runId, subagentId })
     },
+
+    async stopBackgroundWork(threadId, item) {
+      if (item.kind === 'subagent') {
+        if (!item.runId) throw new Error('This subagent cannot be stopped')
+        await dispatch({ type: 'subagent.stop', threadId, runId: item.runId, subagentId: item.id })
+        return
+      }
+      const command: T.Command = { type: 'background_work.stop', threadId, taskId: item.id }
+      if (item.providerThreadId) command.providerThreadId = item.providerThreadId
+      await dispatch(command)
+    },
+
+    async refreshBackgroundWork(threadId) {
+      await dispatch({ type: 'background_work.refresh', threadId })
+    },
   }
 }
 
@@ -303,6 +343,8 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
       setRuntimeMode: proxy('setRuntimeMode'),
       setInteractionMode: proxy('setInteractionMode'),
       stopSubagent: proxy('stopSubagent'),
+      stopBackgroundWork: proxy('stopBackgroundWork'),
+      refreshBackgroundWork: proxy('refreshBackgroundWork'),
       async forkFromRun(task, runId) {
         if (forking[task.id]) throw new Error('This task is already forking')
         withEntry(setForking, task.id, runId)

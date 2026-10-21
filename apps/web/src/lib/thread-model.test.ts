@@ -153,7 +153,7 @@ describe('a thread in progress', () => {
     expect(kinds).not.toContainEqual(['message', 'item-u2'])
     const card = task.entries.find((entry) => entry.kind === 'checkpoint')
     expect(card?.kind === 'checkpoint' && card.checkpoint).toEqual({
-      id: 'c1', scopeId: 'root', files: [{ path: 'a.rs', additions: 2, deletions: 1 }], additions: 2, deletions: 1,
+      id: 'c1', scopeId: 'root', runId: 'r1', files: [{ path: 'a.rs', additions: 2, deletions: 1 }], additions: 2, deletions: 1,
     })
     const error = task.entries.find((entry) => entry.key === 'item-err')
     expect(error?.kind === 'message' && error.message).toMatchObject({ role: 'system', text: 'Rate limited', tone: 'error' })
@@ -189,11 +189,11 @@ describe('a thread in progress', () => {
     ])
   })
 
-  test('a run can be rewound when the previous run left a ready checkpoint', () => {
+  test('a run without a turn-start checkpoint rewinds to the previous run\'s ending one', () => {
     expect(task.rewindTargets.get('r1')).toBeUndefined()
     expect(task.rewindTargets.get('r3')).toBeUndefined()
     const later = stateOf({
-      runs: [run('r1', 1, 'completed'), run('r2', 2, 'completed')],
+      runs: [run('r1', 1, 'completed', { checkpointId: 'c1' }), run('r2', 2, 'completed')],
       checkpointScopes: [{ id: 'root', threadId: THREAD, kind: 'root_run', nodeId: 'n', cwd: '/w', createdAt: 1, ordinalWithinParent: 0 }],
       checkpoints: [{ id: 'c1', threadId: THREAD, scopeId: 'root', nodeId: 'n', gitRef: 'r', ordinalWithinScope: 1, appRunOrdinal: 1, capturedAt: 1, status: 'ready' }],
     })
@@ -237,5 +237,121 @@ describe('activity details', () => {
 
   test('message-like items are not activities', () => {
     expect(activityFromItem(item('m', 1, { type: 'assistant_message', messageId: 'm', text: 'x' }))).toBeUndefined()
+  })
+})
+
+describe('turn-start checkpoints', () => {
+  const scope = (id: string, runId: string, kind: T.ScopeKind = 'root_run'): T.CheckpointScope => ({
+    id, threadId: THREAD, kind, nodeId: 'n', cwd: '/w', createdAt: 1, ordinalWithinParent: 0, runId,
+  })
+  const checkpoint = (id: string, scopeId: string, runId: string, ordinalWithinScope: number, appRunOrdinal: number, patch: Partial<T.Checkpoint> = {}): T.Checkpoint => ({
+    id, threadId: THREAD, scopeId, nodeId: 'n', gitRef: `refs/${id}`, ordinalWithinScope, appRunOrdinal, runId, capturedAt: 1, status: 'ready', ...patch,
+  })
+  // Each run's root scope holds its turn start (ordinal 0, app run ordinal
+  // = run ordinal - 1) and the checkpoint it ended with.
+  const state = stateOf({
+    runs: [
+      run('r1', 1, 'completed', { checkpointId: 'end1' }),
+      run('r2', 2, 'completed', { checkpointId: 'end2' }),
+      run('r3', 3, 'completed', { checkpointId: 'end3' }),
+      run('r4', 4, 'running'),
+    ],
+    checkpointScopes: [scope('s1', 'r1'), scope('s2', 'r2'), scope('s3', 'r3'), scope('s4', 'r4'), scope('nested', 'r2', 'subagent')],
+    checkpoints: [
+      checkpoint('start1', 's1', 'r1', 0, 0),
+      checkpoint('end1', 's1', 'r1', 1, 1, { parentCheckpointId: 'start1' }),
+      checkpoint('start2', 's2', 'r2', 0, 1),
+      checkpoint('end2', 's2', 'r2', 1, 2, { parentCheckpointId: 'start2' }),
+      checkpoint('nested0', 'nested', 'r2', 0, 1),
+      checkpoint('start3', 's3', 'r3', 0, 2, { status: 'missing' }),
+      checkpoint('end3', 's3', 'r3', 1, 3),
+      checkpoint('start4', 's4', 'r4', 0, 3),
+    ],
+  })
+  const task = taskFromThread(state)!
+
+  test('every run rewinds to its own turn start, the first message included', () => {
+    expect(task.rewindTargets.get('r1')).toEqual({ checkpointId: 'start1', scopeId: 's1' })
+    expect(task.rewindTargets.get('r2')).toEqual({ checkpointId: 'start2', scopeId: 's2' })
+    expect(task.rewindTargets.get('r4')).toEqual({ checkpointId: 'start4', scopeId: 's4' })
+  })
+
+  test('a missing turn start falls back to the previous live run\'s ending checkpoint', () => {
+    expect(task.rewindTargets.get('r3')).toEqual({ checkpointId: 'end2', scopeId: 's2' })
+    const rewound = stateOf({
+      runs: [
+        run('r1', 1, 'completed', { checkpointId: 'end1' }),
+        run('r2', 2, 'rolled_back', { checkpointId: 'end2' }),
+        run('r3', 3, 'completed', { checkpointId: 'end3' }),
+      ],
+      checkpointScopes: [scope('s1', 'r1'), scope('s2', 'r2'), scope('s3', 'r3')],
+      checkpoints: [
+        checkpoint('end1', 's1', 'r1', 1, 1),
+        checkpoint('end2', 's2', 'r2', 1, 2),
+        checkpoint('end3', 's3', 'r3', 1, 3),
+      ],
+    })
+    const targets = taskFromThread(rewound)!.rewindTargets
+    expect(targets.get('r1')).toBeUndefined()
+    expect(targets.has('r2')).toBe(false)
+    expect(targets.get('r3')).toEqual({ checkpointId: 'end1', scopeId: 's1' })
+  })
+
+  test('runs that ended with a ready checkpoint can be reviewed as turns', () => {
+    expect(task.runs.map((candidate) => [candidate.id, candidate.diffable])).toEqual([
+      ['r1', true], ['r2', true], ['r3', true], ['r4', false],
+    ])
+  })
+})
+
+describe('background processes and session commands', () => {
+  const state = stateOf({
+    providerThreads: [{
+      id: 'pt', appThreadId: THREAD, driver: 'codex', providerInstanceId: 'codex', status: 'active', createdAt: 1, updatedAt: 2,
+      pendingBackgroundTasks: [
+        { taskId: 'proc', kind: 'process', itemId: 'cmd' },
+        { taskId: 'watch', kind: 'monitor', description: 'Watch logs' },
+        { taskId: 'agent', kind: 'subagent' },
+      ],
+    }],
+    turnItems: [
+      item('cmd', 1, { type: 'command_execution', input: 'npm run dev\n--port 3000' }, { runId: 'r1', status: 'running', startedAt: 5, updatedAt: 6 }),
+    ],
+    providerSessions: [
+      {
+        id: 'old', driver: 'codex', providerInstanceId: 'codex', cwd: '/w', status: 'running', createdAt: 1, updatedAt: 1,
+        availableCommands: [{ name: 'review', description: 'Review changes' }, { name: 'compact' }],
+      },
+      {
+        id: 'new', driver: 'codex', providerInstanceId: 'codex', cwd: '/w', status: 'running', createdAt: 2, updatedAt: 3,
+        availableCommands: [{ name: '/compact', description: 'Compact the context' }, { name: 'review' }],
+      },
+      {
+        id: 'gone', driver: 'codex', providerInstanceId: 'codex', cwd: '/w', status: 'closed', createdAt: 1, updatedAt: 9, detachedAt: 9,
+        availableCommands: [{ name: 'detached' }],
+      },
+      {
+        id: 'other', driver: 'claude', providerInstanceId: 'claude', cwd: '/w', status: 'running', createdAt: 1, updatedAt: 9,
+        availableCommands: [{ name: 'other-provider' }],
+      },
+    ],
+  })
+  const task = taskFromThread(state)!
+
+  test('processes and monitors can be stopped and stream their command item', () => {
+    expect(task.backgroundWork).toEqual([
+      { id: 'watch', kind: 'monitor', title: 'Watch logs', status: 'running', providerThreadId: 'pt', canStop: true },
+      {
+        id: 'proc', kind: 'process', title: 'npm run dev', status: 'running', startedAt: 5, updatedAt: 6, runId: 'r1',
+        itemId: 'cmd', providerThreadId: 'pt', canStop: true,
+      },
+    ])
+  })
+
+  test('open sessions of the thread\'s provider contribute their slash commands once each', () => {
+    expect(task.sessionCommands).toEqual([
+      { name: 'compact', description: 'Compact the context' },
+      { name: 'review', description: 'Review changes' },
+    ])
   })
 })

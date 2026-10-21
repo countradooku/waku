@@ -7,6 +7,7 @@ import {
   expandedComposerSubmission,
   isFastModeToggleSubmission,
   isResumeSubmission,
+  mergeSessionCommands,
   parseGoalSubmission,
   replaceComposerTrigger,
   sortComposerCommands,
@@ -158,5 +159,30 @@ describe('parseGoalSubmission', () => {
       template: 'do project things',
     }
     expect(parseGoalSubmission('codex', '/goal', [projectOwned])).toBeNull()
+  })
+})
+
+describe('session slash commands', () => {
+  test('merge with the catalog once per name, preferring the catalog entry', () => {
+    const catalog: SlashCommand[] = [
+      { name: 'review', description: 'Review the diff', scope: 'builtin' },
+      { name: 'deploy', description: '', scope: 'project', template: 'Deploy $ARGUMENTS' },
+    ]
+    const merged = mergeSessionCommands(catalog, [
+      { name: 'review', description: 'Session review' },
+      { name: '/deploy', description: 'Ship it' },
+      { name: 'mcp__docs__search', description: 'Search docs' },
+      { name: 'plain' },
+      { name: '  ' },
+    ])
+    expect(merged).toEqual([
+      { name: 'review', description: 'Review the diff', scope: 'builtin' },
+      { name: 'deploy', description: 'Ship it', scope: 'project', template: 'Deploy $ARGUMENTS' },
+      { name: 'mcp__docs__search', description: 'Search docs', scope: 'session' },
+      { name: 'plain', description: '', scope: 'session' },
+    ])
+    expect(sortComposerCommands(merged).map((command) => command.name)).toEqual([
+      'review', 'deploy', 'mcp__docs__search', 'plain',
+    ])
   })
 })

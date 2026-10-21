@@ -1822,6 +1822,8 @@ diff.source_last_turn:
   en: Last Turn
 diff.source_turn:
   en: Turn %{turn}
+diff.source_all_turns:
+  en: All Turns
 diff.source_uncommitted:
   en: Uncommitted
 diff.source_unstaged:

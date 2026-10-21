@@ -14,7 +14,7 @@ import {
 import type { DaemonStores } from './daemon-context'
 import { createTaskActions, waitForRollback } from './task-actions'
 import { fakeConnection, project } from './test-fixtures'
-import type { Task } from './thread-model'
+import type { BackgroundWorkItem, Task } from './thread-model'
 
 const attachment: T.Attachment = { name: 'a.png', path: '/att/a.png', mention: 'shots/a.png', isImage: true }
 
@@ -124,19 +124,61 @@ describe('task actions', () => {
     ])
   })
 
-  test('adding a project reuses one at the same path, and "No project" lives at the projectless root', async () => {
+  test('adding a project reuses one at the same path', async () => {
     const existing = project('p1', 'waku', '/repos/waku')
     const shell = { state: { projects: new Map([[existing.id, existing]]) } }
     const { actions, commands } = actionsWith({ shell } as unknown as Partial<DaemonStores>)
     expect(await actions.addProject('/repos/waku/')).toBe(existing)
     expect(commands()).toEqual([])
-    const created = await actions.projectlessProject()
-    expect(commands()[0]!.command).toEqual({
-      type: 'project.create',
-      projectId: created.id,
-      path: '/home/me/.waku/projects',
-      name: 'No project',
+  })
+
+  test('every projectless task gets a scratch project, returned once the shell holds it', async () => {
+    const projects = new Map<string, T.Project>()
+    const listeners = new Set<() => void>()
+    const shell = {
+      state: { projects },
+      subscribe(listener: () => void) {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+    }
+    const { actions, commands } = actionsWith({ shell } as unknown as Partial<DaemonStores>)
+    const pending = actions.projectlessProject()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const [create] = commands()
+    const projectId = (create!.command as { projectId: string }).projectId
+    expect(create).toEqual({ commandId: `project.create_scratch:${projectId}`, command: { type: 'project.create_scratch', projectId } })
+    const scratch = project(projectId, 'No project', '/home/me/.waku/projects/scratch-1')
+    projects.set(projectId, scratch)
+    for (const listener of listeners) listener()
+    expect(await pending).toBe(scratch)
+    expect(listeners.size).toBe(0)
+
+    const second = actions.projectlessProject()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const secondId = (commands()[1]!.command as { projectId: string }).projectId
+    expect(secondId).not.toBe(projectId)
+    projects.set(secondId, project(secondId, 'No project', '/home/me/.waku/projects/scratch-2'))
+    for (const listener of listeners) listener()
+    expect((await second).id).toBe(secondId)
+  })
+
+  test('processes and monitors stop through background_work.stop, subagents through subagent.stop', async () => {
+    const { actions, commands } = actionsWith()
+    const work = (patch: Partial<BackgroundWorkItem>): BackgroundWorkItem => ({
+      id: 'task-1', kind: 'process', title: 'npm run dev', status: 'running', canStop: true, ...patch,
     })
+    await actions.stopBackgroundWork('t', work({ providerThreadId: 'pt' }))
+    await actions.stopBackgroundWork('t', work({ kind: 'monitor', id: 'mon' }))
+    await actions.stopBackgroundWork('t', work({ kind: 'subagent', id: 'node', runId: 'r' }))
+    await actions.refreshBackgroundWork('t')
+    expect(commands().map((params) => params.command)).toEqual([
+      { type: 'background_work.stop', threadId: 't', taskId: 'task-1', providerThreadId: 'pt' },
+      { type: 'background_work.stop', threadId: 't', taskId: 'mon' },
+      { type: 'subagent.stop', threadId: 't', runId: 'r', subagentId: 'node' },
+      { type: 'background_work.refresh', threadId: 't' },
+    ])
+    await expect(actions.stopBackgroundWork('t', work({ kind: 'subagent' }))).rejects.toThrow('cannot be stopped')
   })
 
   test('importing a provider conversation creates a thread that adopts it', async () => {

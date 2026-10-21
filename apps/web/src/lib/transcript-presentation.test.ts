@@ -294,6 +294,7 @@ function run(status: RunView['status'], startedAt: number, completedAt: number):
     startedAt: startedAt * 1_000,
     completedAt: completedAt * 1_000,
     live: false,
+    diffable: false,
   }
 }
 

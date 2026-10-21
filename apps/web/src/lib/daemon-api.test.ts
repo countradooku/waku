@@ -3,15 +3,19 @@ import type { DaemonConnection } from '@waku/client/v8'
 import {
   browseDaemonDirectory,
   collectWorkspaceDiff,
+  daemonKeys,
+  diffSourceKey,
   normalizeProjectPath,
   probeProvider,
   projectNameFromPath,
   readWorkspaceTextFile,
   rootKey,
+  sameDiffSource,
   selectableProjects,
   taskCwd,
   threadRoot,
   writeWorkspaceTextFile,
+  type DiffSource,
 } from './daemon-api'
 import { fakeConnection, project } from './test-fixtures'
 
@@ -82,6 +86,37 @@ describe('catalog calls', () => {
     expect(connection.calls[0]!.params).toEqual({ root: threadRoot('t1'), source: { type: 'branch' }, ignoreWhitespace: true })
     expect(diff.patch).toBe('patch')
     expect(diff.files).toHaveLength(1)
+  })
+
+  test('turn and thread sources read the thread\'s checkpoint diffs', async () => {
+    const reviewDiff = (source: unknown) => ({
+      source,
+      numstat: '1\t0\ta.txt',
+      files: [],
+      patch: { type: 'inline', value: 'turn patch' },
+      completeContext: true,
+    })
+    const connection = fakeConnection({
+      'threads.turnDiff': (params) => reviewDiff({ type: 'turn', runId: params.runId }),
+      'threads.fullDiff': () => reviewDiff({ type: 'thread' }),
+    })
+    const turn = await collectWorkspaceDiff(asConnection(connection), threadRoot('t1'), { type: 'turn', runId: 'r2' })
+    await collectWorkspaceDiff(asConnection(connection), threadRoot('t1'), { type: 'thread' }, true)
+    expect(turn.patch).toBe('turn patch')
+    expect(connection.calls).toEqual([
+      { method: 'threads.turnDiff', params: { threadId: 't1', runId: 'r2', ignoreWhitespace: false } },
+      { method: 'threads.fullDiff', params: { threadId: 't1', ignoreWhitespace: true } },
+    ])
+    await expect(collectWorkspaceDiff(asConnection(connection), { type: 'project', projectId: 'p' }, { type: 'thread' }))
+      .rejects.toThrow('Only a task')
+  })
+
+  test('diff sources have stable keys', () => {
+    expect(['uncommitted', { type: 'turn', runId: 'r1' }, { type: 'thread' }].map((source) =>
+      diffSourceKey(source as DiffSource))).toEqual(['uncommitted', 'turn:r1', 'thread'])
+    expect(sameDiffSource({ type: 'turn', runId: 'r1' }, { type: 'turn', runId: 'r1' })).toBe(true)
+    expect(sameDiffSource({ type: 'turn', runId: 'r1' }, { type: 'turn', runId: 'r2' })).toBe(false)
+    expect(daemonKeys.workspaceDiff('a', 'thread:t', { type: 'turn', runId: 'r1' })).toEqual(['daemon', 'a', 'workspace-diff', 'thread:t', 'turn:r1'])
   })
 })
 

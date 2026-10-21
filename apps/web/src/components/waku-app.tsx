@@ -1082,7 +1082,7 @@ function EnvironmentPopover({
   onOpenBackgroundWork: (id: string) => void
 }) {
   const { t } = useI18n()
-  const { stopSubagent } = useTaskActions()
+  const { stopBackgroundWork } = useTaskActions()
   const [open, setOpen] = useState(false)
   const popup = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -1095,8 +1095,8 @@ function EnvironmentPopover({
   const agents = items.filter((item) => item.kind === 'subagent')
   const hasBackgroundWork = processes.length > 0 || agents.length > 0
   const stop = (item: BackgroundWorkItem) => {
-    if (!item.canStop || !item.runId) return
-    void stopSubagent(task.id, item.runId, item.id).catch((error) => toast.error(errorMessage(error)))
+    if (!item.canStop) return
+    void stopBackgroundWork(task.id, item).catch((error) => toast.error(errorMessage(error)))
   }
 
   function focusMenuItem(position: 'first' | 'last') {

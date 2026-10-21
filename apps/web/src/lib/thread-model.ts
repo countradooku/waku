@@ -120,6 +120,8 @@ export interface TranscriptMessage {
 export interface CheckpointView {
   id: string
   scopeId: string
+  /** The run that ended with this checkpoint; its turn diff reviews it. */
+  runId?: string
   files: Array<{ path: string; additions: number; deletions: number }>
   additions: number
   deletions: number
@@ -139,6 +141,8 @@ export interface RunView {
   completedAt?: number
   live: boolean
   failure?: T.ProviderFailure
+  /** The run ended with a ready checkpoint, so `threads.turnDiff` can review it. */
+  diffable: boolean
 }
 
 export type BackgroundWorkKind = 'subagent' | 'process' | 'monitor'
@@ -155,8 +159,13 @@ export interface BackgroundWorkItem {
   updatedAt?: number
   model?: string
   runId?: string
-  /** The subagent's turn item, so a transcript row can link to it. */
+  /**
+   * The turn item a transcript row links to: the subagent's item, or the
+   * command item whose output a process streams (`commandOutput`).
+   */
   itemId?: string
+  /** The provider thread holding a process or monitor (`background_work.stop`). */
+  providerThreadId?: string
   canStop: boolean
 }
 
@@ -194,6 +203,8 @@ export interface Task extends TaskSummary {
   /** Per run id: the checkpoint that restores the state before that run. */
   rewindTargets: Map<string, RewindTarget>
   backgroundWork: BackgroundWorkItem[]
+  /** Slash commands the thread's open provider sessions reported. */
+  sessionCommands: T.SessionCommand[]
   hasMoreHistory: boolean
   synchronized: boolean
 }
@@ -260,7 +271,7 @@ function compareKeys(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0
 }
 
-function runView(run: T.Run): RunView {
+function runView(run: T.Run, checkpoints: ReadonlyMap<string, T.Checkpoint>): RunView {
   return {
     id: run.id,
     ordinal: run.ordinal,
@@ -270,6 +281,7 @@ function runView(run: T.Run): RunView {
     completedAt: run.completedAt,
     live: ACTIVE_RUN.has(run.status) && run.status !== 'queued',
     failure: run.failure,
+    diffable: run.status !== 'rolled_back' && readyCheckpoint(checkpoints, run.checkpointId) !== undefined,
   }
 }
 
@@ -295,13 +307,14 @@ export function taskFromThread(state: ThreadState, row?: T.ThreadRow): Task | un
   const runs = allRuns
     .filter((run) => run.ordinal !== undefined)
     .sort((left, right) => (left.ordinal ?? 0) - (right.ordinal ?? 0))
-    .map(runView)
+    .map((run) => runView(run, state.checkpoints))
   const status = statusOfRuns(allRuns)
   const activeRun = runs.find((run) => run.live)
   const providerThread = activeProviderThread(state)
-  const session = [...state.providerSessions.values()]
+  const openSessions = [...state.providerSessions.values()]
     .filter((candidate) => candidate.detachedAt === undefined)
-    .sort((left, right) => right.updatedAt - left.updatedAt)[0]
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+  const session = openSessions[0]
   const capabilities = session?.capabilities
   return {
     ...summarizeThread(thread, row),
@@ -319,6 +332,8 @@ export function taskFromThread(state: ThreadState, row?: T.ThreadRow): Task | un
     rollback: thread.rollback,
     rewindTargets: rewindTargets(state),
     backgroundWork: backgroundWork(state),
+    sessionCommands: sessionCommands(openSessions.filter((candidate) =>
+      candidate.providerInstanceId === thread.modelSelection.instance)),
     hasMoreHistory: state.hasMoreHistory,
     synchronized: state.synchronized,
   }
@@ -418,25 +433,69 @@ export function pendingUserInput(state: ThreadState): PendingUserInput | undefin
   }
 }
 
+function readyCheckpoint(
+  checkpoints: ReadonlyMap<string, T.Checkpoint>,
+  id: string | undefined,
+): T.Checkpoint | undefined {
+  const checkpoint = id === undefined ? undefined : checkpoints.get(id)
+  return checkpoint?.status === 'ready' ? checkpoint : undefined
+}
+
 /**
- * Rewinding to a run's message rolls back every later run: the checkpoint
- * captured when the previous run finished restores the state before it.
+ * Per run id, the ready checkpoints it may have started from: ordinal 0 of
+ * its root scope (the run's own ending checkpoint is excluded per run).
+ */
+function turnStartCandidates(state: ThreadState): Map<string, T.Checkpoint[]> {
+  const byRun = new Map<string, T.Checkpoint[]>()
+  for (const checkpoint of state.checkpoints.values()) {
+    if (
+      checkpoint.runId === undefined
+      || checkpoint.ordinalWithinScope !== 0
+      || checkpoint.status !== 'ready'
+      || state.checkpointScopes.get(checkpoint.scopeId)?.kind !== 'root_run'
+    ) continue
+    const candidates = byRun.get(checkpoint.runId) ?? []
+    candidates.push(checkpoint)
+    byRun.set(checkpoint.runId, candidates)
+  }
+  return byRun
+}
+
+/**
+ * Rewinding to a run's message rolls back that run and every later one, to
+ * the state just before it started: its turn-start checkpoint, else the one
+ * the previous live run ended with (waku-orchestrator `rewind_point`). The
+ * first message can be rewound through its turn-start checkpoint.
  */
 export function rewindTargets(state: ThreadState): Map<string, RewindTarget> {
-  const byOrdinal = new Map<number, T.Checkpoint>()
-  for (const checkpoint of state.checkpoints.values()) {
-    if (checkpoint.appRunOrdinal === undefined || checkpoint.status !== 'ready') continue
-    const scope = state.checkpointScopes.get(checkpoint.scopeId)
-    if (scope && scope.kind !== 'root_run') continue
-    byOrdinal.set(checkpoint.appRunOrdinal, checkpoint)
-  }
+  const live = [...state.runs.values()]
+    .filter((run) => run.ordinal !== undefined && run.status !== 'rolled_back')
+    .sort((left, right) => left.ordinal! - right.ordinal!)
+  const starts = turnStartCandidates(state)
   const targets = new Map<string, RewindTarget>()
-  for (const run of state.runs.values()) {
-    if (run.ordinal === undefined || run.status === 'rolled_back') continue
-    const previous = byOrdinal.get(run.ordinal - 1)
-    if (previous) targets.set(run.id, { checkpointId: previous.id, scopeId: previous.scopeId })
+  let previousEnd: T.Checkpoint | undefined
+  for (const run of live) {
+    const start = starts.get(run.id)?.find((checkpoint) => checkpoint.id !== run.checkpointId)
+    const target = start?.appRunOrdinal !== undefined ? start : previousEnd
+    if (target) targets.set(run.id, { checkpointId: target.id, scopeId: target.scopeId })
+    previousEnd = readyCheckpoint(state.checkpoints, run.checkpointId) ?? previousEnd
   }
   return targets
+}
+
+/** The slash commands open sessions reported, newest session first, one per name. */
+export function sessionCommands(sessions: readonly T.ProviderSession[]): T.SessionCommand[] {
+  const commands = new Map<string, T.SessionCommand>()
+  for (const session of sessions) {
+    for (const command of session.availableCommands ?? []) {
+      const name = command.name.replace(/^\//, '').trim()
+      if (!name) continue
+      const known = commands.get(name)
+      if (!known) commands.set(name, { ...command, name })
+      else if (!known.description && command.description) commands.set(name, { ...known, description: command.description })
+    }
+  }
+  return [...commands.values()]
 }
 
 function subagentStatus(status: T.SubagentStatus): BackgroundWorkStatus {
@@ -481,16 +540,27 @@ export function backgroundWork(state: ThreadState): BackgroundWorkItem[] {
   for (const providerThread of state.providerThreads.values()) {
     for (const task of providerThread.pendingBackgroundTasks ?? []) {
       if (task.kind === 'subagent' || items.some((item) => item.id === task.taskId)) continue
+      const commandItem = task.itemId ? state.turnItems.get(task.itemId) : undefined
       items.push({
         id: task.taskId,
         kind: task.kind === 'monitor' ? 'monitor' : 'process',
-        title: task.description?.trim() || task.taskId,
+        title: task.description?.trim() || commandTitle(commandItem) || task.taskId,
         status: 'running',
-        canStop: false,
+        startedAt: commandItem?.startedAt,
+        updatedAt: commandItem?.updatedAt,
+        runId: commandItem?.runId,
+        itemId: task.itemId,
+        providerThreadId: providerThread.id,
+        canStop: true,
       })
     }
   }
   return items.sort((left, right) => (left.startedAt ?? 0) - (right.startedAt ?? 0))
+}
+
+/** A command item's first input line: the title of a process without a description. */
+function commandTitle(item: T.TurnItem | undefined): string {
+  return item?.kind.type === 'command_execution' ? firstLine(item.kind.input) : ''
 }
 
 function firstLine(text: string | undefined): string {
@@ -744,6 +814,7 @@ function checkpointFromItem(state: ThreadState, item: T.TurnItem): CheckpointVie
   return {
     id: item.kind.checkpointId,
     scopeId: item.kind.scopeId,
+    runId: item.runId,
     files,
     additions: files.reduce((total, file) => total + file.additions, 0),
     deletions: files.reduce((total, file) => total + file.deletions, 0),

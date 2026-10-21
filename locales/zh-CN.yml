@@ -892,6 +892,7 @@ diff.no_changes_description: 此来源没有可审阅的文件更改
 diff.filter_files: 筛选文件…
 diff.source_last_turn: 上一轮
 diff.source_turn: 第 %{turn} 轮
+diff.source_all_turns: 所有轮次
 diff.source_uncommitted: 未提交
 diff.source_unstaged: 未暂存
 diff.source_staged: 已暂存

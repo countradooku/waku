@@ -773,7 +773,10 @@ function TranscriptItemView({
 }) {
   if (item.kind === 'tail') return <div className="h-5" />
   let content: ReactNode
-  const review = onReviewChanges ? () => onReviewChanges('uncommitted') : undefined
+  // A run's changed files review that run's turn diff.
+  const review = (checkpoint: CheckpointView) => onReviewChanges
+    ? () => onReviewChanges(checkpoint.runId ? { type: 'turn', runId: checkpoint.runId } : 'uncommitted')
+    : undefined
   if (item.kind === 'fold') {
     content = (
       <TurnFold
@@ -800,7 +803,7 @@ function TranscriptItemView({
         deletions={item.checkpoint.deletions}
         files={item.checkpoint.files}
         t={t}
-        onReview={review}
+        onReview={review(item.checkpoint)}
       />
     )
   } else if (item.kind === 'working') {
@@ -838,7 +841,7 @@ function TranscriptItemView({
               deletions={item.checkpoint.deletions}
               files={item.checkpoint.files}
               t={t}
-              onReview={review}
+              onReview={review(item.checkpoint)}
             />
           )
           : null}

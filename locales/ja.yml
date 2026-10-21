@@ -935,6 +935,7 @@ diff.no_changes_description: このソースにはレビューするファイル
 diff.filter_files: ファイルを絞り込む…
 diff.source_last_turn: 前回のターン
 diff.source_turn: ターン %{turn}
+diff.source_all_turns: すべてのターン
 diff.source_uncommitted: 未コミット
 diff.source_unstaged: 未ステージ
 diff.source_staged: ステージ済み

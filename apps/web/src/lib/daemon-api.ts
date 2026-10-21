@@ -5,7 +5,24 @@
 import type { DaemonConnection } from '@waku/client/v8'
 import type * as T from '@waku/client/v8'
 
-export type DiffSource = 'uncommitted' | 'unstaged' | 'staged' | 'committed' | 'branch'
+/** What `review.diff` compares in a working tree. */
+export type WorkingTreeDiffSource = 'uncommitted' | 'unstaged' | 'staged' | 'committed' | 'branch'
+
+/**
+ * What the review panel compares: a working-tree source, one run's changes
+ * (`threads.turnDiff`) or the whole thread's (`threads.fullDiff`).
+ */
+export type DiffSource = WorkingTreeDiffSource | { type: 'turn'; runId: string } | { type: 'thread' }
+
+/** A stable string for a diff source, for cache keys and menu ids. */
+export function diffSourceKey(source: DiffSource): string {
+  if (typeof source === 'string') return source
+  return source.type === 'turn' ? `turn:${source.runId}` : 'thread'
+}
+
+export function sameDiffSource(left: DiffSource, right: DiffSource): boolean {
+  return diffSourceKey(left) === diffSourceKey(right)
+}
 
 export const daemonKeys = {
   info: (address: string) => ['daemon', address, 'info'] as const,
@@ -33,7 +50,7 @@ export const daemonKeys = {
   workspaceFile: (address: string, root: string, path: string) =>
     ['daemon', address, 'workspace-file', root, path] as const,
   workspaceDiff: (address: string, root: string, source: DiffSource = 'uncommitted') =>
-    ['daemon', address, 'workspace-diff', root, source] as const,
+    ['daemon', address, 'workspace-diff', root, diffSourceKey(source)] as const,
   storage: (address: string) => ['daemon', address, 'storage'] as const,
 }
 
@@ -261,14 +278,26 @@ export interface WorkspaceDiff {
   completeContext: boolean
 }
 
-/** `review.diff`, with a patch over the inline limit downloaded from the blob store. */
+/**
+ * `review.diff` for a working-tree source, `threads.turnDiff` or
+ * `threads.fullDiff` for a thread's turns (the root must be the thread), with
+ * a patch over the inline limit downloaded from the blob store.
+ */
 export async function collectWorkspaceDiff(
   connection: DaemonConnection,
   root: T.RootRef,
   source: DiffSource = 'uncommitted',
   ignoreWhitespace = false,
 ): Promise<WorkspaceDiff> {
-  const diff = await connection.call('review.diff', { root, source: { type: source }, ignoreWhitespace })
+  let diff: T.ReviewDiff
+  if (typeof source === 'string') {
+    diff = await connection.call('review.diff', { root, source: { type: source }, ignoreWhitespace })
+  } else {
+    if (root.type !== 'thread') throw new Error('Only a task has turns to review')
+    diff = source.type === 'turn'
+      ? await connection.call('threads.turnDiff', { threadId: root.threadId, runId: source.runId, ignoreWhitespace })
+      : await connection.call('threads.fullDiff', { threadId: root.threadId, ignoreWhitespace })
+  }
   let patch = ''
   if (diff.patch.type === 'inline') patch = diff.patch.value
   else if (diff.patch.type === 'blob') {
