@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"Respond with exactly: steering fixture initial response"},{"type":"wait","until":"running"},{"type":"steer","text":"Actually, respond with exactly: steering fixture observed"},{"type":"wait","until":"turn_terminal"}]}

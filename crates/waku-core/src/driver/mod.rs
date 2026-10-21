@@ -4,7 +4,7 @@ pub mod acp;
 mod activity;
 mod amp;
 mod claude;
-mod codex;
+pub mod codex;
 mod computer_use;
 mod deepseek;
 mod opencode;
@@ -222,7 +222,8 @@ pub(crate) fn start_local(
     options.computer_use_enabled =
         crate::computer_use::resolve_enabled(options.computer_use_enabled);
     let inner: Arc<dyn DriverControl> = match provider {
-        ProviderKind::Codex => Arc::new(codex::CodexDriver::start(options, events)?),
+        // Codex runs as a `DriverV2` session behind `V1Bridge` (#46).
+        ProviderKind::Codex => codex::start_local(options, events)?,
         ProviderKind::Pi => Arc::new(pi::PiDriver::start(pi::PiFlavor::Pi, options, events)?),
         ProviderKind::OhMyPi => {
             Arc::new(pi::PiDriver::start(pi::PiFlavor::OhMyPi, options, events)?)
