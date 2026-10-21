@@ -1,10 +1,11 @@
-import type { AgentSession, Project } from '@waku/client'
+import type { Project } from '@waku/client/v8'
+import { isBusy, type TaskSummary } from './thread-model'
 import { projectDisplayName } from './project-presentation'
 
 export type DateGroup = 'today' | 'yesterday' | 'week' | 'month' | 'year' | 'more'
 
 export interface SessionItem {
-  session: AgentSession
+  session: TaskSummary
   projectName: string
   timestamp: number
 }
@@ -65,7 +66,7 @@ export function sidebarRows(
 
 export function groupSessions(
   projects: Project[],
-  sessions: AgentSession[],
+  sessions: TaskSummary[],
   now = new Date(),
   unknownProject = 'Unknown project',
   projectlessName = 'No project',
@@ -83,7 +84,7 @@ export function groupSessions(
     const items = grouped.get(id) ?? []
     items.push({
       session,
-      projectName: projectNames.get(session.project_id) ?? unknownProject,
+      projectName: projectNames.get(session.projectId) ?? unknownProject,
       timestamp: sessionTimestamp(session),
     })
     grouped.set(id, items)
@@ -93,50 +94,40 @@ export function groupSessions(
     .map((id) => ({ id, label: GROUP_LABELS[id], sessions: grouped.get(id)! }))
 }
 
-export function sessionHasStarted(session: AgentSession): boolean {
+/** A thread is listed once it has a reply or a title of its own. */
+export function sessionHasStarted(session: TaskSummary): boolean {
   return Boolean(
-    session.turns.length
-      || session.messages.length
-      || session.provider_cursor
-      || session.last_reply_at,
+    session.lastReplyAt
+      || isBusy(session.status)
+      || session.queuedRunCount
+      || session.thread.titleSource !== 'placeholder',
   )
 }
 
 export function sessionTimeLabel(
-  session: AgentSession,
+  session: TaskSummary,
   nowSeconds = Math.floor(Date.now() / 1_000),
   t?: Translator,
 ): string | null {
-  const turn = session.turns.at(-1)
-  if (
-    (session.status === 'connecting' || session.status === 'working' || session.status === 'waiting' || session.status === 'background')
-      && turn?.status === 'running'
-  ) {
-    const elapsed = Math.max(0, nowSeconds - turn.started_at)
+  if (session.lastReplyAt == null) return null
+  const elapsed = Math.max(0, nowSeconds - Math.floor(session.lastReplyAt / 1_000))
+  if (isBusy(session.status)) {
     return t
       ? t('sidebar.working', { elapsed: formatWorkingElapsedLocalized(elapsed, t) })
       : `Working for ${formatWorkingElapsed(elapsed)}`
   }
-  if (session.last_reply_at == null) return null
-  const elapsed = Math.max(0, nowSeconds - session.last_reply_at)
   return t ? formatTimeAgoLocalized(elapsed, t) : formatTimeAgo(elapsed)
 }
 
 export function nextSidebarUpdateDelay(
-  sessions: AgentSession[],
+  sessions: TaskSummary[],
   nowSeconds = Math.floor(Date.now() / 1_000),
 ): number {
   let next = secondsUntilLocalMidnight(nowSeconds)
   for (const session of sessions) {
-    const turn = session.turns.at(-1)
-    if (
-      (session.status === 'connecting' || session.status === 'working' || session.status === 'waiting' || session.status === 'background')
-        && turn?.status === 'running'
-    ) {
-      return 1
-    }
-    if (session.last_reply_at == null) continue
-    const elapsed = Math.max(0, nowSeconds - session.last_reply_at)
+    if (isBusy(session.status)) return 1
+    if (session.lastReplyAt == null) continue
+    const elapsed = Math.max(0, nowSeconds - Math.floor(session.lastReplyAt / 1_000))
     const step = elapsed < 3_600 ? 60 : elapsed < 86_400 ? 3_600 : 86_400
     const remaining = Math.max(1, step - elapsed % step)
     next = Math.min(next, remaining)
@@ -212,8 +203,9 @@ function formatWorkingElapsedLocalized(seconds: number, t: Translator): string {
 
 type Translator = (key: string, params?: Record<string, string | number>) => string
 
-function sessionTimestamp(session: AgentSession): number {
-  return session.last_reply_at ?? session.created_at
+/** Seconds, for date grouping. */
+function sessionTimestamp(session: TaskSummary): number {
+  return Math.floor((session.lastReplyAt ?? session.createdAt) / 1_000)
 }
 
 function localDateStart(date: Date): Date {

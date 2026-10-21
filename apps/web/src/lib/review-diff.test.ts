@@ -1,37 +1,17 @@
 import { describe, expect, test } from 'bun:test'
 import { hydratePartialDiff, parsePatchFiles } from '@pierre/diffs'
-import type { AgentSession, ReviewDiffSource } from '@waku/client'
 import {
   compactReviewPatch,
   createReviewDiffLoader,
-  latestReviewTurnSource,
   reviewDiffSourceLabel,
-  sameReviewDiffSource,
 } from './review-diff'
 
-describe('desktop review sources', () => {
-  test('uses the newest ready checkpoint as Last turn', () => {
-    const session = {
-      id: 'session-1',
-      turns: [
-        turn('turn-1', 1, 'ready'),
-        turn('turn-2', 2, 'unavailable'),
-        turn('turn-3', 3, 'ready'),
-      ],
-    } as AgentSession
-
-    expect(latestReviewTurnSource(session)).toEqual(lastTurn('session-1', 'turn-3', 3))
-  })
-
-  test('labels an older checkpoint by turn and compares structured sources by value', () => {
-    const latest = lastTurn('session-1', 'turn-3', 3)
-    const older = lastTurn('session-1', 'turn-1', 1)
-
-    expect(sameReviewDiffSource(latest, lastTurn('session-1', 'turn-3', 3))).toBe(true)
-    expect(sameReviewDiffSource(latest, older)).toBe(false)
-    expect(reviewDiffSourceLabel(latest, latest)).toBe('Last turn')
-    expect(reviewDiffSourceLabel(older, latest)).toBe('Turn 1')
-    expect(reviewDiffSourceLabel('staged', latest)).toBe('Staged')
+describe('review sources', () => {
+  test('labels every review.diff source', () => {
+    expect(reviewDiffSourceLabel('uncommitted')).toBe('Uncommitted')
+    expect(reviewDiffSourceLabel('staged')).toBe('Staged')
+    expect(reviewDiffSourceLabel('branch')).toBe('Branch')
+    expect(reviewDiffSourceLabel('committed', (key) => key)).toBe('diff.source_committed')
   })
 })
 
@@ -75,24 +55,4 @@ function hydratedFilePatch(name: string, changedLine: number): string {
     '@@ -1,40 +1,40 @@',
     ...lines,
   ].join('\n') + '\n'
-}
-
-function turn(id: string, turnCount: number, status: 'ready' | 'unavailable' | 'error') {
-  return {
-    id,
-    turn_count: turnCount,
-    checkpoint: {
-      status,
-    },
-  }
-}
-
-function lastTurn(sessionId: string, turnId: string, turnCount: number): ReviewDiffSource {
-  return {
-    lastTurn: {
-      session_id: sessionId,
-      turn_id: turnId,
-      turn_count: turnCount,
-    },
-  }
 }

@@ -35,3 +35,33 @@ export {
   type ShellState,
   type ThreadState,
 } from "./projection";
+export {
+  backoffDelay,
+  DaemonConnection,
+  idempotent,
+  newId,
+  StreamHandle,
+  type CallOptions,
+  type CallParams,
+  type ConnectionPhase,
+  type ConnectionState,
+  type DaemonConnectionOptions,
+} from "./connection";
+export {
+  applyDraftChange,
+  applyDraftsItem,
+  applyProvidersItem,
+  applySettingsItem,
+  CommandOutputStore,
+  createProvidersState,
+  DraftsStore,
+  Observable,
+  ProvidersStore,
+  SettingsStore,
+  ShellStore,
+  ThreadStore,
+  type DraftsState,
+  type ProvidersState,
+  type SettingsState,
+  type StoreStatus,
+} from "./stores";

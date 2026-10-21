@@ -1,19 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import type { ProviderModel } from '@waku/client'
+import type { ProviderModel } from '@waku/client/v8'
 import {
   nextModelPickerHighlight,
   selectedModelPickerIndex,
   type ModelPickerRow,
 } from './model-picker-presentation'
 
-const model = (id: string): ProviderModel => ({
-  id,
-  name: id,
-  is_default: false,
-  reasoning_efforts: [],
-  service_tiers: [],
-  context_windows: [],
-})
+const model = (id: string): ProviderModel => ({ id, name: id })
 
 describe('model picker presentation', () => {
   test('finds the selected model instead of treating the first row as selected', () => {

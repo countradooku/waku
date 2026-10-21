@@ -1,189 +1,137 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
-import type { ProviderKind } from '@waku/client'
+import type * as T from '@waku/client/v8'
 import { PROVIDERS } from '@/components/waku-icon'
-import { useDaemon } from '@/lib/daemon-context'
+import { useProviderStatuses, useSettingsStream } from '@/hooks/use-daemon-stores'
+import { requireConnection, useDaemon } from '@/lib/daemon-context'
 import {
   daemonKeys,
   discoverComposerCommands,
-  hydrateSession,
   inspectWorkspaceBranches,
-  listSessionTurnRefs,
   listComposerFiles,
-  loadComposerDrafts,
+  loadDaemonInfo,
   loadSkills,
-  loadDaemonSettings,
-  loadTaskState,
   loadUsageHistory,
   probeProvider,
+  rootKey,
+  type ProviderCatalog,
 } from '@/lib/daemon-api'
 import {
   browserProviderProbeStorage,
   PROVIDER_PROBE_CACHE_STALE_TIME,
   readProviderProbeCache,
   writeProviderProbeCache,
-  type ProviderProbeResult,
 } from '@/lib/provider-probe-cache'
 
-export function useTaskState() {
-  const { client, config, phase } = useDaemon()
-  return useQuery({
-    queryKey: daemonKeys.taskState(config?.address ?? 'disconnected'),
-    queryFn: () => loadTaskState(requireClient(client)),
-    enabled: phase === 'connected' && Boolean(client && config),
-  })
+function useLive() {
+  const { connection, config, phase } = useDaemon()
+  return {
+    connection,
+    address: config?.address ?? 'disconnected',
+    live: phase === 'connected' && Boolean(connection && config),
+  }
 }
 
-export function useComposerDrafts() {
-  const { client, config, phase } = useDaemon()
+export function useDaemonInfo() {
+  const { connection, address, live } = useLive()
   return useQuery({
-    queryKey: daemonKeys.composerDrafts(config?.address ?? 'disconnected'),
-    queryFn: () => loadComposerDrafts(requireClient(client)),
-    enabled: phase === 'connected' && Boolean(client && config),
+    queryKey: daemonKeys.info(address),
+    queryFn: () => loadDaemonInfo(requireConnection(connection)),
+    enabled: live,
     staleTime: Number.POSITIVE_INFINITY,
   })
 }
 
-export function useWorkspaceBranches(cwd: string | undefined) {
-  const { client, config, phase } = useDaemon()
+export function useWorkspaceBranches(root: T.RootRef | undefined) {
+  const { connection, address, live } = useLive()
   return useQuery({
-    queryKey: daemonKeys.workspace(config?.address ?? 'disconnected', cwd ?? 'none'),
-    queryFn: () => inspectWorkspaceBranches(requireClient(client), cwd!),
-    enabled: phase === 'connected' && Boolean(client && config && cwd),
+    queryKey: daemonKeys.workspace(address, root ? rootKey(root) : 'none'),
+    queryFn: () => inspectWorkspaceBranches(requireConnection(connection), root!),
+    enabled: live && Boolean(root),
     staleTime: 5_000,
   })
 }
 
-export function useSessionTurnRefs(
-  cwd: string | undefined,
-  sessionId: string | undefined,
-) {
-  const { client, config, phase } = useDaemon()
+export function useComposerFiles(root: T.RootRef | undefined) {
+  const { connection, address, live } = useLive()
   return useQuery({
-    queryKey: daemonKeys.sessionTurnRefs(
-      config?.address ?? 'disconnected',
-      cwd ?? 'none',
-      sessionId ?? 'none',
-    ),
-    queryFn: () => listSessionTurnRefs(requireClient(client), cwd!, sessionId!),
-    enabled: phase === 'connected' && Boolean(client && config && cwd && sessionId),
-    staleTime: 5_000,
-  })
-}
-
-export function useComposerFiles(cwd: string | undefined) {
-  const { client, config, phase } = useDaemon()
-  return useQuery({
-    queryKey: daemonKeys.composerFiles(config?.address ?? 'disconnected', cwd ?? 'none'),
-    queryFn: () => listComposerFiles(requireClient(client), cwd!),
-    enabled: phase === 'connected' && Boolean(client && config && cwd),
+    queryKey: daemonKeys.composerFiles(address, root ? rootKey(root) : 'none'),
+    queryFn: () => listComposerFiles(requireConnection(connection), root!),
+    enabled: live && Boolean(root),
     staleTime: Number.POSITIVE_INFINITY,
   })
 }
 
 export function useComposerCommands(
-  provider: ProviderKind | undefined,
-  cwd: string | undefined,
+  instanceId: string | undefined,
+  root: T.RootRef | undefined,
+  threadId?: string,
 ) {
-  const { client, config, phase } = useDaemon()
-  const settings = useDaemonSettings()
-  const binaryOverride = settings.data && provider
-    ? settings.data.provider_binary_overrides?.[provider] ?? null
-    : null
+  const { connection, address, live } = useLive()
   return useQuery({
-    queryKey: daemonKeys.slashCommands(
-      config?.address ?? 'disconnected',
-      provider ?? 'codex',
-      cwd ?? 'none',
-      binaryOverride,
-    ),
-    queryFn: () => discoverComposerCommands(
-      requireClient(client),
-      provider!,
-      cwd!,
-      binaryOverride,
-    ),
-    enabled: phase === 'connected' && Boolean(
-      client && config && provider && cwd && settings.data,
-    ),
+    queryKey: daemonKeys.slashCommands(address, instanceId ?? 'none', root ? rootKey(root) : 'none'),
+    queryFn: () => discoverComposerCommands(requireConnection(connection), instanceId!, root!, threadId),
+    enabled: live && Boolean(instanceId && root),
     staleTime: Number.POSITIVE_INFINITY,
   })
 }
 
-export function useSession(sessionId: string | undefined) {
-  const { client, config, phase } = useDaemon()
-  return useQuery({
-    queryKey: daemonKeys.session(config?.address ?? 'disconnected', sessionId ?? 'none'),
-    queryFn: () => hydrateSession(requireClient(client), sessionId!),
-    enabled: phase === 'connected' && Boolean(client && config && sessionId),
-    staleTime: 1_000,
-  })
-}
-
+/** Daemon settings, from the `settings` stream, shaped like a query. */
 export function useDaemonSettings() {
-  const { client, config, phase } = useDaemon()
-  return useQuery({
-    queryKey: daemonKeys.settings(config?.address ?? 'disconnected'),
-    queryFn: () => loadDaemonSettings(requireClient(client)),
-    enabled: phase === 'connected' && Boolean(client && config),
-    staleTime: 60_000,
-  })
+  const stream = useSettingsStream()
+  return {
+    data: stream.settings,
+    revision: stream.revision,
+    isPending: !stream.ready,
+    error: stream.error,
+    store: stream.store,
+  }
 }
 
-export function useProviderProbe(provider: ProviderKind | undefined) {
-  const { client, config, phase } = useDaemon()
+function binaryOverride(settings: T.Settings | undefined, instanceId: string): string | null {
+  return settings?.providerBinaryOverrides?.[instanceId] ?? null
+}
+
+/** A provider's installation and model catalog (`providers.probe`), cached in the browser. */
+export function useProviderProbe(instanceId: string | undefined) {
+  const { connection, address, live } = useLive()
   const settings = useDaemonSettings()
-  const address = config?.address ?? 'disconnected'
-  const cached = config && provider
-    ? readProviderProbeCache(browserProviderProbeStorage(), address, provider)
+  const cached = live && instanceId
+    ? readProviderProbeCache(browserProviderProbeStorage(), address, instanceId)
     : undefined
-  const binaryOverride = settings.data && provider
-    ? settings.data.provider_binary_overrides?.[provider] ?? null
+  const override = settings.data && instanceId
+    ? binaryOverride(settings.data, instanceId)
     : cached?.binaryOverride ?? null
-  const initial = cached?.binaryOverride === binaryOverride ? cached : undefined
+  const initial = cached?.binaryOverride === override ? cached : undefined
   return useQuery({
-    queryKey: daemonKeys.provider(
-      address,
-      provider ?? 'codex',
-      binaryOverride,
-    ),
+    queryKey: [...daemonKeys.provider(address, instanceId ?? 'none'), override],
     queryFn: async () => {
-      const data = await probeProvider(requireClient(client), provider!, settings.data!)
-      writeProviderProbeCache(
-        browserProviderProbeStorage(),
-        address,
-        provider!,
-        binaryOverride,
-        data,
-      )
+      const data = await probeProvider(requireConnection(connection), instanceId!)
+      writeProviderProbeCache(browserProviderProbeStorage(), address, instanceId!, override, data)
       return data
     },
-    enabled:
-      phase === 'connected' &&
-      Boolean(client && config && provider && settings.data),
+    enabled: live && Boolean(instanceId && settings.data),
     initialData: initial?.data,
     initialDataUpdatedAt: initial?.updatedAt,
     staleTime: PROVIDER_PROBE_CACHE_STALE_TIME,
   })
 }
 
+/** Every known provider's catalog, for pickers and settings. */
 export function useProviderProbes(enabled = true) {
-  const { client, config, phase } = useDaemon()
+  const { connection, address, live } = useLive()
   const settings = useDaemonSettings()
-  const address = config?.address ?? 'disconnected'
   const storage = browserProviderProbeStorage()
-  const active = enabled && phase === 'connected' && Boolean(client && config && settings.data)
+  const active = enabled && live && Boolean(settings.data)
   const queries = useQueries({
     queries: PROVIDERS.map(({ id }) => {
-      const cached = config ? readProviderProbeCache(storage, address, id) : undefined
-      const binaryOverride = settings.data
-        ? settings.data.provider_binary_overrides?.[id] ?? null
-        : cached?.binaryOverride ?? null
-      const initial = cached?.binaryOverride === binaryOverride ? cached : undefined
+      const cached = live ? readProviderProbeCache(storage, address, id) : undefined
+      const override = settings.data ? binaryOverride(settings.data, id) : cached?.binaryOverride ?? null
+      const initial = cached?.binaryOverride === override ? cached : undefined
       return {
-        queryKey: daemonKeys.provider(address, id, binaryOverride),
+        queryKey: [...daemonKeys.provider(address, id), override],
         queryFn: async () => {
-          const data = await probeProvider(requireClient(client), id, settings.data!)
-          writeProviderProbeCache(storage, address, id, binaryOverride, data)
+          const data = await probeProvider(requireConnection(connection), id)
+          writeProviderProbeCache(storage, address, id, override, data)
           return data
         },
         enabled: active,
@@ -193,77 +141,12 @@ export function useProviderProbes(enabled = true) {
       }
     }),
   })
-  return collectProviderQueries(queries)
-}
-
-export function useProviderDetections(enabled = true) {
-  const { client, config, phase } = useDaemon()
-  const settings = useDaemonSettings()
-  const active = enabled && phase === 'connected' && Boolean(client && config && settings.data)
-  const queries = useQueries({
-    queries: PROVIDERS.map(({ id }) => ({
-      queryKey: daemonKeys.providerDetection(config?.address ?? 'disconnected', id),
-      queryFn: () => probeProvider(requireClient(client), id, settings.data!, {
-        discoverModels: false,
-        probeVersion: false,
-      }),
-      enabled: active,
-      staleTime: 60_000,
-    })),
-  })
-  return collectProviderQueries(queries)
-}
-
-export function useSkills(projects: Parameters<typeof loadSkills>[1]) {
-  const { client, config, phase } = useDaemon()
-  return useQuery({
-    queryKey: daemonKeys.skills(config?.address ?? 'disconnected'),
-    queryFn: () => loadSkills(requireClient(client), projects),
-    enabled: phase === 'connected' && Boolean(client && config),
-  })
-}
-
-export function useUsageHistory(
-  window: Parameters<typeof loadUsageHistory>[1],
-  projects: Parameters<typeof loadUsageHistory>[2],
-) {
-  const { client, config, phase } = useDaemon()
-  return useQuery({
-    queryKey: daemonKeys.usage(config?.address ?? 'disconnected', window),
-    queryFn: () => loadUsageHistory(requireClient(client), window, projects),
-    enabled: phase === 'connected' && Boolean(client && config),
-    placeholderData: (previous) => previous,
-  })
-}
-
-function requireClient<T>(client: T | null): T {
-  if (!client) throw new Error('Waku daemon is disconnected')
-  return client
-}
-
-function collectProviderQueries(
-  queries: Array<{
-    data?: ProviderProbeResult
-    dataUpdatedAt: number
-    error: unknown
-    isFetching: boolean
-    isPending: boolean
-  }>,
-) {
-  const data: Partial<Record<ProviderKind, ProviderProbeResult>> = {}
-  const states = {} as Record<ProviderKind, {
-    dataUpdatedAt: number
-    error: unknown
-    isPending: boolean
-  }>
+  const data: Partial<Record<string, ProviderCatalog>> = {}
+  const states: Record<string, { dataUpdatedAt: number; error: unknown; isPending: boolean }> = {}
   PROVIDERS.forEach(({ id }, index) => {
     const query = queries[index]!
     if (query.data) data[id] = query.data
-    states[id] = {
-      dataUpdatedAt: query.dataUpdatedAt,
-      error: query.error,
-      isPending: query.isPending,
-    }
+    states[id] = { dataUpdatedAt: query.dataUpdatedAt, error: query.error, isPending: query.isPending }
   })
   return {
     data,
@@ -271,4 +154,42 @@ function collectProviderQueries(
     isFetching: queries.some((query) => query.isFetching),
     isPending: queries.some((query) => query.isPending),
   }
+}
+
+/** Installation status of every provider, from the `providers` stream (no CLI is spawned). */
+export function useProviderDetections() {
+  return useProviderStatuses()
+}
+
+/**
+ * The stored turn item, for a row whose body the wire projection left out
+ * (a file change's diff, a tool's full output). Fetched once, when shown.
+ */
+export function useTurnItem(threadId: string | undefined, itemId: string | undefined, enabled: boolean) {
+  const { connection, address, live } = useLive()
+  return useQuery({
+    queryKey: ['daemon', address, 'turn-item', threadId ?? 'none', itemId ?? 'none'],
+    queryFn: () => requireConnection(connection).call('threads.turnItem', { threadId: threadId!, itemId: itemId! }),
+    enabled: live && enabled && Boolean(threadId && itemId),
+    staleTime: Number.POSITIVE_INFINITY,
+  })
+}
+
+export function useSkills(projectIds: string[]) {
+  const { connection, address, live } = useLive()
+  return useQuery({
+    queryKey: [...daemonKeys.skills(address), [...projectIds].sort().join(',')],
+    queryFn: () => loadSkills(requireConnection(connection), projectIds),
+    enabled: live,
+  })
+}
+
+export function useUsageHistory(window: T.UsageWindow, projectIds: string[]) {
+  const { connection, address, live } = useLive()
+  return useQuery({
+    queryKey: daemonKeys.usage(address, window),
+    queryFn: () => loadUsageHistory(requireConnection(connection), window, projectIds),
+    enabled: live,
+    placeholderData: (previous) => previous,
+  })
 }

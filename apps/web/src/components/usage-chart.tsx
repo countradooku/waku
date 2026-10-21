@@ -3,7 +3,7 @@ import { decorative } from '@tanstack/charts/mark/decorative'
 import { Chart } from '@tanstack/charts/react'
 import { scaleLinear } from '@tanstack/charts/scales/linear'
 import { tooltip } from '@tanstack/charts/tooltip'
-import type { UsageHistory } from '@waku/client'
+import type { UsageHistory, UsageProviderPart } from '@waku/client/v8'
 import { scaleUtc } from 'd3-scale'
 import { useI18n, type AppLocale } from '@/lib/i18n'
 
@@ -31,13 +31,13 @@ export function UsageTrendChart({
         id: `claude-${day.day}`,
         date,
         provider: 'Claude Code',
-        value: metric === 'cost' ? day.byProvider[0].costUsd : day.byProvider[0].totalTokens,
+        value: partValue(day.byProvider, 'claude', metric),
       },
       {
         id: `codex-${day.day}`,
         date,
         provider: 'Codex',
-        value: metric === 'cost' ? day.byProvider[1].costUsd : day.byProvider[1].totalTokens,
+        value: partValue(day.byProvider, 'codex', metric),
       },
     ]
   })
@@ -149,4 +149,10 @@ function formatCompactMoney(value: number, locale: AppLocale) {
 function formatCompactNumber(value: number, locale: AppLocale) {
   if (!value) return '0'
   return new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }).format(value)
+}
+
+function partValue(parts: UsageProviderPart[], provider: string, metric: UsageMetric): number {
+  const part = parts.find((candidate) => candidate.provider === provider)
+  if (!part) return 0
+  return metric === 'cost' ? part.costUsd : part.totalTokens
 }

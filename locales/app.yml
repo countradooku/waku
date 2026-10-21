@@ -258,6 +258,18 @@ daemon.phase_connected:
   en: Connected
 daemon.phase_error:
   en: Error
+daemon.phase_reconnecting:
+  en: Reconnecting
+transcript.loading_earlier:
+  en: Loading earlier messages
+common.archive:
+  en: Archive
+goal.unsupported:
+  en: Goals are not supported by this daemon yet
+errors.archive_task:
+  en: "Could not archive the task: %{error}"
+files.changed_on_disk:
+  en: The file changed on disk. Reopen it to see the latest version.
 daemon.invalid_port:
   en: Enter a port from 1 to 65535
 daemon.invalid_settings:

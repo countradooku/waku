@@ -1,4 +1,3 @@
-import type { ProviderKind } from '@waku/client'
 
 export const WAKU_ICONS = {
   alert: 'i-waku-alert',
@@ -324,17 +323,20 @@ function fileTypeIconName(path: string): FileTypeIconName {
   return 'file'
 }
 
-const PROVIDER_ICONS: Record<ProviderKind, string> = {
+/** A v8 provider instance id (`codex`, `claude`, `opencode`, …). */
+export type ProviderKind = string
+
+const PROVIDER_ICONS: Record<string, string> = {
   amp: 'i-waku-provider-amp',
   claude: 'i-waku-provider-claude',
   codex: 'i-waku-provider-openai',
   cursor: 'i-waku-provider-cursor',
-  deepSeek: 'i-waku-provider-deepseek',
+  deepseek: 'i-waku-provider-deepseek',
   fx: 'i-waku-provider-fx',
-  openCode: 'i-waku-provider-opencode',
+  opencode: 'i-waku-provider-opencode',
   grok: 'i-waku-provider-grok',
   kimi: 'i-waku-provider-kimi',
-  ohMyPi: 'i-waku-provider-ohmypi',
+  ohmypi: 'i-waku-provider-ohmypi',
   pi: 'i-waku-provider-pi',
 }
 
@@ -348,12 +350,12 @@ export const PROVIDERS: Array<{
   { id: 'claude', name: 'Claude Code', shortName: 'Claude', command: 'claude' },
   { id: 'codex', name: 'Codex CLI', shortName: 'Codex', command: 'codex' },
   { id: 'cursor', name: 'Cursor CLI', shortName: 'Cursor', command: 'cursor-agent' },
-  { id: 'deepSeek', name: 'DeepSeek Harness', shortName: 'DeepSeek', command: 'dsh' },
+  { id: 'deepseek', name: 'DeepSeek Harness', shortName: 'DeepSeek', command: 'dsh' },
   { id: 'fx', name: 'Fx', shortName: 'Fx', command: 'fx' },
-  { id: 'openCode', name: 'OpenCode', shortName: 'OpenCode', command: 'opencode' },
+  { id: 'opencode', name: 'OpenCode', shortName: 'OpenCode', command: 'opencode' },
   { id: 'grok', name: 'Grok Build', shortName: 'Grok', command: 'grok' },
   { id: 'kimi', name: 'Kimi Code', shortName: 'Kimi', command: 'kimi' },
-  { id: 'ohMyPi', name: 'Oh My Pi', shortName: 'Oh My Pi', command: 'omp' },
+  { id: 'ohmypi', name: 'Oh My Pi', shortName: 'Oh My Pi', command: 'omp' },
   { id: 'pi', name: 'Pi', shortName: 'Pi', command: 'pi' },
 ]
 
@@ -379,7 +381,7 @@ export function ProviderIcon({
     >
       <span
         aria-hidden="true"
-        className={PROVIDER_ICONS[provider]}
+        className={PROVIDER_ICONS[provider] ?? 'i-waku-provider-openai'}
         style={{ width: '100%', height: '100%' }}
       />
     </span>
@@ -389,6 +391,6 @@ export function ProviderIcon({
 function providerColor(provider: ProviderKind) {
   if (provider === 'amp') return 'text-[#f34e3f]'
   if (provider === 'claude') return 'text-[#d97757]'
-  if (provider === 'deepSeek') return 'text-[#4d6bfe]'
+  if (provider === 'deepseek') return 'text-[#4d6bfe]'
   return 'text-[#34363b] dark:text-[#f3f3f3]'
 }

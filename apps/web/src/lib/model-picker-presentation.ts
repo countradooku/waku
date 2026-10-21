@@ -1,4 +1,6 @@
-import type { ProviderKind, ProviderModel } from '@waku/client'
+import type { ProviderModel } from '@waku/client/v8'
+
+type ProviderKind = string
 
 export interface ModelPickerRow {
   provider: ProviderKind

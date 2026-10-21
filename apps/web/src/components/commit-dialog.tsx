@@ -1,6 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import type { AgentSession, Project } from '@waku/client'
-import { inspectGitStatus, isGitFileStaged, stageGitFiles, pullGitBranch, listGitWorktrees } from '@waku/client'
+import type * as T from '@waku/client/v8'
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import { toast } from 'sonner'
@@ -8,15 +7,16 @@ import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { WakuIcon, type WakuIconName } from '@/components/waku-icon'
 import {
   commitWorkspace,
-  daemonKeys,
   generateWorkspaceCommitMessage,
+  inspectGitStatus,
   inspectWorkspaceCommit,
-  loadDaemonSettings,
-  probeProvider,
+  listGitWorktrees,
+  pullGitBranch,
   pushWorkspace,
-  sessionCwd,
+  rootKey,
+  stageGitFiles,
 } from '@/lib/daemon-api'
-import { useDaemon } from '@/lib/daemon-context'
+import { requireConnection, useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
 import { usePrimaryShortcut } from '@/lib/platform'
 import { cn } from '@/lib/utils'
@@ -25,19 +25,20 @@ type CommitAction = 'commit' | 'commitAndPush' | 'push' | 'pull' | 'stage'
 
 export function CommitDialog({
   open,
-  session,
-  project,
+  root,
+  selection,
   returnFocus,
   onOpenChange,
 }: {
   open: boolean
-  session: AgentSession | null
-  project?: Project
+  root?: T.RootRef
+  /** The task's provider and model, which write a missing commit message. */
+  selection?: T.ModelSelection
   returnFocus?: RefObject<HTMLElement | null>
   onOpenChange: (open: boolean) => void
 }) {
   const { t } = useI18n()
-  const { client, config, phase } = useDaemon()
+  const { connection, config, phase } = useDaemon()
   const queryClient = useQueryClient()
   const [message, setMessage] = useState('')
   const [includeUnstaged, setIncludeUnstaged] = useState(true)
@@ -50,22 +51,22 @@ export function CommitDialog({
     return () => { mounted.current = false }
   }, [])
   const commitShortcut = usePrimaryShortcut('⌘↩', 'Ctrl+Enter')
-  const cwd = session && project ? sessionCwd(session, project) : undefined
+  const key = root ? rootKey(root) : 'none'
 
   const snapshot = useQuery({
-    queryKey: ['daemon', config?.address ?? 'disconnected', 'commit', cwd ?? 'none'],
-    queryFn: () => inspectWorkspaceCommit(requireClient(client), cwd!),
-    enabled: open && phase === 'connected' && Boolean(client && config && cwd),
+    queryKey: ['daemon', config?.address ?? 'disconnected', 'commit', key],
+    queryFn: () => inspectWorkspaceCommit(requireConnection(connection), root!),
+    enabled: open && phase === 'connected' && Boolean(connection && config && root),
   })
   const gitStatus = useQuery({
-    queryKey: ['daemon', config?.address, 'git-status', cwd],
-    queryFn: () => inspectGitStatus(requireClient(client), cwd!),
-    enabled: open && phase === 'connected' && Boolean(client && cwd),
+    queryKey: ['daemon', config?.address, 'git-status', key],
+    queryFn: () => inspectGitStatus(requireConnection(connection), root!),
+    enabled: open && phase === 'connected' && Boolean(connection && root),
   })
   const worktrees = useQuery({
-    queryKey: ['daemon', config?.address, 'git-worktrees', cwd],
-    queryFn: () => listGitWorktrees(requireClient(client), cwd!),
-    enabled: open && phase === 'connected' && Boolean(client && cwd),
+    queryKey: ['daemon', config?.address, 'git-worktrees', key],
+    queryFn: () => listGitWorktrees(requireConnection(connection), root!),
+    enabled: open && phase === 'connected' && Boolean(connection && root),
   })
 
   useEffect(() => {
@@ -73,30 +74,30 @@ export function CommitDialog({
     setMessage('')
     setIncludeUnstaged(true)
     setError(null)
-  }, [open, cwd])
+  }, [open, key])
 
   const additions = includeUnstaged
     ? snapshot.data?.additions ?? 0
-    : snapshot.data?.staged_additions ?? 0
+    : snapshot.data?.stagedAdditions ?? 0
   const deletions = includeUnstaged
     ? snapshot.data?.deletions ?? 0
-    : snapshot.data?.staged_deletions ?? 0
+    : snapshot.data?.stagedDeletions ?? 0
   const available = phase === 'connected' && !pending && !snapshot.isError && !gitStatus.isError
   const canCommit = available && !snapshot.isFetching && Boolean(
-    snapshot.data?.has_staged || (includeUnstaged && snapshot.data?.has_unstaged),
+    snapshot.data?.hasStaged || (includeUnstaged && snapshot.data?.hasUnstaged),
   )
-  const canPush = available && !snapshot.isFetching && Boolean(snapshot.data?.can_push)
+  const canPush = available && !snapshot.isFetching && Boolean(snapshot.data?.canPush)
   const canPull = available && !gitStatus.isFetching && Boolean(gitStatus.data?.upstream && gitStatus.data.branch && gitStatus.data.files.length === 0)
 
   async function stageFile(path: string, stage: boolean) {
-    if (!client || !cwd || operationPending.current) return
+    if (!connection || !root || operationPending.current) return
     operationPending.current = true
     setPending('stage')
     setError(null)
     // Explicit file selection must never be overridden by "include all".
     setIncludeUnstaged(false)
     try {
-      await stageGitFiles(client, cwd, [path], stage)
+      await stageGitFiles(connection, root, [path], stage)
     } catch (cause) {
       setError(errorMessage(cause))
     } finally {
@@ -111,38 +112,28 @@ export function CommitDialog({
   }
 
   async function run(action: CommitAction) {
-    if (!client || !config || !cwd || operationPending.current || action === 'stage') return
+    if (!connection || !config || !root || operationPending.current || action === 'stage') return
     operationPending.current = true
     setPending(action)
     setError(null)
     try {
       if (action === 'push') {
-        await pushWorkspace(client, cwd)
+        await pushWorkspace(connection, root)
       } else if (action === 'pull') {
-        await pullGitBranch(client, cwd)
+        await pullGitBranch(connection, root)
       } else {
         let commitMessage = message.trim()
         if (!commitMessage) {
-          if (!session) throw new Error(t('commit.no_task'))
-          const settings = await loadDaemonSettings(client)
-          const probe = await probeProvider(client, session.provider, settings)
-          if (!probe.installed || !probe.path) {
-            throw new Error(t('commit.agent_unavailable'))
-          }
+          if (!selection) throw new Error(t('commit.no_task'))
           commitMessage = await generateWorkspaceCommitMessage(
-            client,
-            cwd,
+            connection,
+            root,
             includeUnstaged,
-            {
-              provider: session.provider,
-              binary: probe.path,
-              model: session.model ?? null,
-              reasoning_effort: session.reasoning_effort ?? null,
-            },
+            selection,
           )
           setMessage(commitMessage)
         }
-        await commitWorkspace(client, cwd, commitMessage, includeUnstaged, action === 'commitAndPush')
+        await commitWorkspace(connection, root, commitMessage, includeUnstaged, action === 'commitAndPush')
       }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['daemon', config.address, 'workspace'] }),
@@ -234,10 +225,10 @@ export function CommitDialog({
           data={gitStatus.data.files}
           computeItemKey={(_, file) => file.path}
           itemContent={(_, file) => {
-            const staged = isGitFileStaged(file.index_status)
-            return <label className="flex h-9 items-center gap-2 px-4 text-xs" title={file.previous_path ? `${file.previous_path} → ${file.path}` : file.path}>
+            const staged = isGitFileStaged(file.indexStatus)
+            return <label className="flex h-9 items-center gap-2 px-4 text-xs" title={file.previousPath ? `${file.previousPath} → ${file.path}` : file.path}>
               <input type="checkbox" aria-label={`${staged ? t('commit.unstage') : t('commit.stage')} ${file.path}`} checked={staged} disabled={!available || gitStatus.isFetching} onChange={() => void stageFile(file.path, !staged)} />
-              <span className="min-w-0 flex-1 truncate">{file.path}</span><code>{file.index_status}{file.worktree_status}</code>
+              <span className="min-w-0 flex-1 truncate">{file.path}</span><code>{file.indexStatus}{file.worktreeStatus}</code>
             </label>
           }}
         />}
@@ -310,9 +301,9 @@ function CommitActionRow({
   )
 }
 
-function requireClient<T>(client: T | null): T {
-  if (!client) throw new Error('Waku daemon is disconnected')
-  return client
+/** A path is staged when git's index column records a change. */
+function isGitFileStaged(indexStatus: string): boolean {
+  return indexStatus !== '' && indexStatus !== ' ' && indexStatus !== '.' && indexStatus !== '?'
 }
 
 function errorMessage(error: unknown) {
