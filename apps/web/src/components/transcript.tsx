@@ -55,6 +55,10 @@ import { cn } from '@/lib/utils'
 const NAVIGATION_RAIL_MIN_WIDTH = 872
 const NAVIGATION_RAIL_PITCH = 12
 const NAVIGATION_PREVIEW_HEIGHT = 126
+/** Gestures by which the reader scrolls away from the newest output. */
+const USER_SCROLL_EVENTS = ['wheel', 'touchmove', 'keydown', 'pointerdown'] as const
+const SCROLL_UP_KEYS = new Set(['ArrowUp', 'PageUp', 'Home'])
+
 /** Virtuoso's index of the first row; it shrinks as older pages are prepended. */
 const FIRST_ITEM_INDEX = 1_000_000
 const TranscriptLinkContext = createContext<(target: string) => boolean>(() => false)
@@ -178,19 +182,38 @@ export function Transcript({
     activeTurnFrame.current = requestAnimationFrame(updateActiveTurnFromViewport)
   }, [updateActiveTurnFromViewport])
 
+  // Only the reader leaves the bottom: a streaming answer that grows past
+  // the threshold must not stop the transcript from following it.
+  const leaveBottom = useCallback((event: Event) => {
+    if (event instanceof WheelEvent && event.deltaY >= 0) return
+    if (event instanceof KeyboardEvent && !SCROLL_UP_KEYS.has(event.key)) return
+    // A press counts only on the scrollbar, past the content box.
+    if (
+      event instanceof PointerEvent
+      && event.currentTarget instanceof HTMLElement
+      && event.offsetX < event.currentTarget.clientWidth
+    ) return
+    wasNearBottom.current = false
+  }, [])
+
   const setTranscriptScroller = useCallback((next: HTMLElement | Window | null) => {
     const element = next instanceof HTMLElement ? next : null
     if (transcriptScroller.current === element) return
     transcriptScroller.current?.removeEventListener('scroll', scheduleActiveTurnUpdate)
+    for (const type of USER_SCROLL_EVENTS) transcriptScroller.current?.removeEventListener(type, leaveBottom)
     transcriptScroller.current = element
     transcriptScroller.current?.addEventListener('scroll', scheduleActiveTurnUpdate, { passive: true })
+    for (const type of USER_SCROLL_EVENTS) {
+      transcriptScroller.current?.addEventListener(type, leaveBottom, { passive: true })
+    }
     scheduleActiveTurnUpdate()
-  }, [scheduleActiveTurnUpdate])
+  }, [leaveBottom, scheduleActiveTurnUpdate])
 
   useEffect(() => () => {
     transcriptScroller.current?.removeEventListener('scroll', scheduleActiveTurnUpdate)
+    for (const type of USER_SCROLL_EVENTS) transcriptScroller.current?.removeEventListener(type, leaveBottom)
     if (activeTurnFrame.current !== null) cancelAnimationFrame(activeTurnFrame.current)
-  }, [scheduleActiveTurnUpdate])
+  }, [leaveBottom, scheduleActiveTurnUpdate])
 
   useEffect(() => {
     if (expandedTask.current === task.id) return
@@ -232,7 +255,7 @@ export function Transcript({
       ) : (
         <Virtuoso
           atBottomStateChange={(nextAtBottom) => {
-            wasNearBottom.current = nextAtBottom
+            if (nextAtBottom) wasNearBottom.current = true
             setAtBottom(nextAtBottom)
             if (nextAtBottom && navigationTurns.length) {
               setActiveTurnIndex(navigationTurns.length - 1)

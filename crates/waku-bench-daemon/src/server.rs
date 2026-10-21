@@ -78,6 +78,9 @@ pub struct BenchOptions {
     /// Desktop-owned daemons accept `daemon.shutdown`; so does the bench, so
     /// quitting the app ends the run and prints the summary.
     pub allow_shutdown: bool,
+    /// Browser origins the WebSocket listener accepts (`--allow-origin`), so
+    /// the web client can be pointed at the fixture.
+    pub allowed_origins: Vec<String>,
 }
 
 impl BenchOptions {
@@ -98,6 +101,7 @@ impl BenchOptions {
             project_dir: None,
             fakes_dir: None,
             allow_shutdown: true,
+            allowed_origins: Vec::new(),
         }
     }
 }
@@ -264,9 +268,9 @@ impl BenchServer {
             let shutdown = shutdown.clone();
             let server_options = ServerOptions {
                 allow_shutdown: options.allow_shutdown,
+                allowed_origins: options.allowed_origins.iter().cloned().collect(),
                 orchestration: Some(orchestration.clone()),
                 environment_id: Some(host.environment_id()),
-                ..ServerOptions::default()
             };
             std::thread::Builder::new()
                 .name("waku-bench-daemon-server".into())

@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! waku-bench-daemon [serve] [--timeline NAME|PATH] [--rate FACTOR|max] [--loops N]
-//!                   [--listen ADDR] [--socket PATH] [--provider codex|claude]
+//!                   [--listen ADDR] [--socket PATH] [--allow-origin ORIGIN]
+//!                   [--provider codex|claude]
 //!                   [--history-turns N] [--history-sessions N] [--autoplay[=DELAY_MS]]
 //!                   [--exit-after N] [--state-dir DIR] [--project DIR] [--fakes DIR]
 //! waku-bench-daemon generate [--out DIR] [--check]
@@ -46,6 +47,8 @@ serve options:
   --listen ADDR         TCP address to listen on (default: 127.0.0.1:0 unless
                         --socket is given)
   --socket PATH         local socket to listen on
+  --allow-origin ORIGIN browser origin the WebSocket listener accepts
+                        (repeatable; for pointing the web client at it)
   --provider NAME       provider of the fixture threads: codex or claude (default: codex)
   --history-turns N     add a settled thread with N turns of history (default: 0)
   --history-sessions N  add N such threads instead of one (default: 1)
@@ -177,6 +180,9 @@ fn serve_command(mut arguments: impl Iterator<Item = String>) -> anyhow::Result<
             }
             "--listen" => options.listen = Some(value(&mut arguments, "--listen")?),
             "--socket" => options.socket = Some(PathBuf::from(value(&mut arguments, "--socket")?)),
+            "--allow-origin" => options
+                .allowed_origins
+                .push(value(&mut arguments, "--allow-origin")?),
             "--provider" => provider = value(&mut arguments, "--provider")?,
             "--history-turns" => {
                 options.history_turns = parse_count(&mut arguments, "--history-turns")?;

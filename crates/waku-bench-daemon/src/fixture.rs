@@ -139,6 +139,29 @@ fn commit(
     }
 }
 
+/// Stamps `last_reply_at` from the thread's newest run request, as
+/// `message.dispatch` does: history committed directly would otherwise leave
+/// it unset, and clients list only threads that have one.
+fn stamp_reply(orchestrator: &Orchestrator, thread_id: Uuid) -> anyhow::Result<()> {
+    let projection = orchestrator
+        .thread(ThreadId(thread_id))
+        .map_err(|error| anyhow!("{error}"))?;
+    let Some(at) = projection.runs.values().map(|run| run.requested_at).max() else {
+        return Ok(());
+    };
+    let mut thread = projection.thread.clone();
+    thread.last_reply_at = Some(at);
+    thread.updated_at = thread.updated_at.max(at);
+    commit(
+        orchestrator,
+        thread_id,
+        vec![DomainEvent::ThreadUpdated(ThreadUpdate {
+            change: ThreadChange::Activity,
+            thread,
+        })],
+    )
+}
+
 /// Creates the project and every thread, and commits their history.
 pub fn seed(orchestrator: &Orchestrator, options: &FixtureOptions) -> anyhow::Result<Seeded> {
     let project_id = ProjectId(PROJECT_ID);
@@ -178,6 +201,7 @@ pub fn seed(orchestrator: &Orchestrator, options: &FixtureOptions) -> anyhow::Re
             id,
             intro_turn(id, timeline, options.provider, at),
         )?;
+        stamp_reply(orchestrator, id)?;
         timeline_threads.push((timeline.clone(), id));
     }
 
@@ -199,6 +223,7 @@ pub fn seed(orchestrator: &Orchestrator, options: &FixtureOptions) -> anyhow::Re
             for batch in turns.chunks(HISTORY_BATCH) {
                 commit(orchestrator, id, batch.concat())?;
             }
+            stamp_reply(orchestrator, id)?;
             history_threads.push(id);
         }
     }

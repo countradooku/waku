@@ -41,10 +41,7 @@ impl Waku {
             loop {
                 cx.background_executor().timer(interval).await;
                 let next = waku.update(cx, |waku, cx| {
-                    let next = waku
-                        .threads
-                        .shell_ids()
-                        .find(|id| !visited.contains(id));
+                    let next = waku.threads.shell_ids().find(|id| !visited.contains(id));
                     if let Some(session_id) = next {
                         waku.select_session(session_id, cx);
                         crate::perf_counters::session_visit();
