@@ -1003,8 +1003,23 @@ fn map_item(item: &TurnItem, output: Option<&CommandOutputState>) -> Row {
             ),
             false,
         ),
-        TurnItemKind::SystemNotice { message: text } => {
-            message(MessageRole::System, text.clone(), false)
+        // Lifecycle rows (restart recovery, #59) render as the same pill;
+        // their message reads on its own, with a fallback for an empty one.
+        TurnItemKind::SystemNotice {
+            message: text,
+            lifecycle,
+        } => {
+            let text = match lifecycle {
+                _ if !text.trim().is_empty() => text.clone(),
+                Some(LifecycleNotice::RestartInterrupted) => {
+                    "Interrupted when the daemon restarted".to_owned()
+                }
+                Some(LifecycleNotice::RestartResumed) => {
+                    "Resumed after the daemon restarted".to_owned()
+                }
+                _ => text.clone(),
+            };
+            message(MessageRole::System, text, false)
         }
         TurnItemKind::Compaction { summary, .. } => message(
             MessageRole::System,

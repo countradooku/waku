@@ -220,7 +220,8 @@ fn every_kind() -> Vec<TurnItem> {
             RUN_1,
             14,
             "completed",
-            json!({"type": "system_notice", "message": "Restarted"}),
+            json!({"type": "system_notice", "message": "Restarted",
+                "lifecycle": "restart_resumed"}),
         ),
         item(
             16,
@@ -284,6 +285,14 @@ fn every_kind() -> Vec<TurnItem> {
             json!({"type": "run_interrupt_result", "message": "x"}),
         ),
         item(24, RUN_1, 23, "completed", json!({"type": "hologram"})),
+        item(
+            25,
+            RUN_1,
+            24,
+            "completed",
+            json!({"type": "system_notice", "message": "",
+                "lifecycle": "restart_interrupted"}),
+        ),
     ]
 }
 
@@ -326,6 +335,7 @@ fn every_turn_item_kind_maps_onto_a_row() {
             (MessageRole::System, "Continued with codex gpt"),
             (MessageRole::System, "Token: needed"),
             (MessageRole::Assistant, "rate limited"),
+            (MessageRole::System, "Interrupted when the daemon restarted"),
         ]
     );
     let user = &view.messages[0];
