@@ -1,5 +1,6 @@
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,9 +18,25 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() -> anyhow::Result<()> {
     #[cfg(feature = "profiling")]
     init_profiling();
-    let arguments = Arguments::parse(std::env::args().skip(1))?;
-    let token =
-        std::env::var(DAEMON_TOKEN_ENV).context("Waku daemon authentication token is missing")?;
+    let raw = std::env::args().skip(1).collect::<Vec<_>>();
+    match raw.first().map(String::as_str) {
+        Some("service") => return waku_daemon::service::cli(&raw[1..]),
+        Some("doctor") => {
+            if !waku_daemon::doctor::cli(&raw[1..])? {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+    let arguments = Arguments::parse(raw)?;
+    let token = match std::env::var(DAEMON_TOKEN_ENV) {
+        Ok(token) => token,
+        Err(_) => match arguments.token_file() {
+            Some(path) => load_or_create_token(&path)?,
+            None => bail!("Waku daemon authentication token is missing"),
+        },
+    };
     // The bearer capability belongs only to this server process. Remove it
     // before any provider or workspace subprocess can inherit the daemon's
     // environment.
@@ -27,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     // Bind both listeners before printing the ready line, so a client that
     // connects right after it never finds nothing listening.
     let local = arguments
-        .socket
+        .socket()
         .as_deref()
         .map(waku_core::LocalListener::bind)
         .transpose()?;
@@ -144,6 +161,12 @@ struct Arguments {
     bind: Option<String>,
     /// `--socket`: the per-user local socket (or Windows pipe) to listen on.
     socket: Option<std::path::PathBuf>,
+    /// `--service`: run as the background service (#58): the default local
+    /// socket and the local token file, and no parent to follow.
+    service: bool,
+    /// `--token-file`: read the token from this file (created, mode 0600,
+    /// when missing) when `WAKU_DAEMON_TOKEN` is not set.
+    token_file: Option<std::path::PathBuf>,
     parent_pid: Option<u32>,
     allowed_origins: Vec<String>,
     allow_non_loopback: bool,
@@ -156,6 +179,8 @@ impl Arguments {
         let mut parent_pid = None;
         let mut allowed_origins = Vec::new();
         let mut allow_non_loopback = false;
+        let mut service = false;
+        let mut token_file = None;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -194,9 +219,19 @@ impl Arguments {
                 "--allow-non-loopback" => {
                     allow_non_loopback = true;
                 }
+                "--service" => service = true,
+                "--token-file" => {
+                    token_file = Some(
+                        arguments
+                            .next()
+                            .filter(|path| !path.is_empty())
+                            .ok_or_else(|| anyhow!("--token-file requires a path"))?
+                            .into(),
+                    );
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: {} [--socket PATH] [--bind ADDRESS] [--allow-non-loopback] [--parent-pid PID] [--allow-origin ORIGIN]...",
+                        "usage: {0} [--service] [--socket PATH] [--token-file PATH] [--bind ADDRESS] [--allow-non-loopback] [--parent-pid PID] [--allow-origin ORIGIN]...\n       {0} service <install|uninstall|status> [--dry-run]\n       {0} doctor [--json]",
                         env!("CARGO_BIN_NAME")
                     );
                     std::process::exit(0);
@@ -204,9 +239,14 @@ impl Arguments {
                 unknown => bail!("unknown argument {unknown:?}"),
             }
         }
+        if service && parent_pid.is_some() {
+            bail!("--service runs without a parent; drop --parent-pid");
+        }
         Ok(Self {
             bind,
             socket,
+            service,
+            token_file,
             parent_pid,
             allowed_origins,
             allow_non_loopback,
@@ -216,14 +256,72 @@ impl Arguments {
 
 impl Arguments {
     /// The TCP address to listen on, if any. A daemon started with only
-    /// `--socket` opens no TCP port at all.
+    /// `--socket` (or `--service`) opens no TCP port at all.
     fn tcp_bind(&self) -> Option<&str> {
-        match (&self.bind, &self.socket) {
+        match (&self.bind, self.socket()) {
             (Some(bind), _) => Some(bind),
             (None, Some(_)) => None,
             (None, None) => Some("127.0.0.1:0"),
         }
     }
+
+    /// The local socket: `--socket`, else the default one for `--service`.
+    fn socket(&self) -> Option<std::path::PathBuf> {
+        self.socket.clone().or_else(|| {
+            self.service
+                .then(waku_protocol::identity::daemon_socket_path)
+        })
+    }
+
+    /// `--token-file`, else the local token for `--service`.
+    fn token_file(&self) -> Option<std::path::PathBuf> {
+        self.token_file
+            .clone()
+            .or_else(|| self.service.then(waku_protocol::identity::local_token_path))
+    }
+}
+
+/// The daemon's local token in `path`, created when missing: random hex,
+/// mode 0600 in a private directory (RFC 0003 §6.2).
+fn load_or_create_token(path: &Path) -> anyhow::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(token) if !token.trim().is_empty() => return Ok(token.trim().to_owned()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {}", path.display()));
+        }
+    }
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory)
+            .with_context(|| format!("could not create {}", directory.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let temporary = path.with_extension("tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .with_context(|| format!("could not write {}", temporary.display()))?;
+    file.write_all(token.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)
+        .with_context(|| format!("could not write {}", path.display()))?;
+    Ok(token)
 }
 
 /// How often the portable fallback checks whether the parent is still alive.
@@ -396,6 +494,49 @@ mod tests {
         let neither = Arguments::parse(Vec::<String>::new()).unwrap();
         assert_eq!(neither.tcp_bind(), Some("127.0.0.1:0"));
         assert!(Arguments::parse(["--socket".into()]).is_err());
+    }
+
+    #[test]
+    fn service_mode_uses_the_default_socket_and_token_file() {
+        let arguments = Arguments::parse(["--service".into()]).unwrap();
+        assert_eq!(
+            arguments.socket(),
+            Some(waku_protocol::identity::daemon_socket_path())
+        );
+        assert_eq!(
+            arguments.token_file(),
+            Some(waku_protocol::identity::local_token_path())
+        );
+        assert_eq!(arguments.tcp_bind(), None, "a service opens no TCP port");
+        assert!(arguments.parent_pid.is_none());
+        assert!(Arguments::parse(["--service".into(), "--parent-pid".into(), "1".into()]).is_err());
+        let explicit = Arguments::parse([
+            "--service".into(),
+            "--socket".into(),
+            "/tmp/x.sock".into(),
+            "--token-file".into(),
+            "/tmp/x.token".into(),
+        ])
+        .unwrap();
+        assert_eq!(explicit.socket(), Some("/tmp/x.sock".into()));
+        assert_eq!(explicit.token_file(), Some("/tmp/x.token".into()));
+        let plain = Arguments::parse(Vec::<String>::new()).unwrap();
+        assert_eq!(plain.token_file(), None);
+    }
+
+    #[test]
+    fn the_local_token_is_created_once_and_private() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("run/local.token");
+        let token = load_or_create_token(&path).unwrap();
+        assert_eq!(token.len(), 64);
+        assert_eq!(load_or_create_token(&path).unwrap(), token);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]

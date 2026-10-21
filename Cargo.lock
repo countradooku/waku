@@ -9025,13 +9025,20 @@ name = "waku-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "libc",
  "mimalloc",
+ "rusqlite",
+ "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "tracing-tracy",
+ "uuid",
+ "waku-client",
  "waku-core",
+ "waku-orchestrator",
  "waku-protocol",
  "windows-sys 0.61.2",
 ]

@@ -424,3 +424,73 @@ fn a_restart_does_not_continue_an_archived_thread() {
         "archived",
     );
 }
+
+/// #58: the desktop attaches to a daemon already running on the local
+/// socket (the background service) instead of spawning one, and quitting
+/// the desktop mid-turn leaves the turn running: a later launch attaches
+/// again and finds it completed.
+#[test]
+fn the_desktop_attaches_to_a_running_service_and_a_turn_outlives_it() {
+    let scratch = Scratch::new();
+    let timeline = sample_timeline();
+    let provider = ProviderKind::Codex;
+    let fake = FakeDir::new(
+        provider.command(),
+        env!("CARGO_BIN_EXE_fake-codex"),
+        &timeline,
+        RATE,
+    );
+    let mut daemon = Daemon::start(&scratch, provider, &fake.binary, true);
+    // What `waku-daemon --service` keeps next to its socket.
+    std::fs::write(scratch.root.join("local.token"), TOKEN).unwrap();
+    // SAFETY: only this test reads the variable (through the supervisor's
+    // identity paths); the other tests pass their socket explicitly.
+    unsafe { std::env::set_var(waku_protocol::DAEMON_SOCKET_ENV, scratch.socket()) };
+    assert_eq!(
+        waku_protocol::identity::local_token_path(),
+        scratch.root.join("local.token")
+    );
+    // The executable fails to start without its arguments: attaching must
+    // not spawn it.
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_orchestrated-daemon"));
+    let desktop = waku_client::DaemonSupervisor::spawn_configured(
+        &executable,
+        false,
+        waku_client::DaemonExposureSettings::default(),
+    )
+    .unwrap();
+    assert!(desktop.is_attached_service());
+
+    let client = daemon.connect(&scratch);
+    let thread_id = create_thread(&client, &scratch.project(), provider.id());
+    send_message(&client, thread_id, "go");
+    wait_streaming(&client, thread_id);
+    // Quit the desktop mid-turn.
+    drop(client);
+    drop(desktop);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        daemon.child.try_wait().unwrap().is_none(),
+        "the service outlives the desktop"
+    );
+
+    // Reopen: attach again and find the turn completed.
+    let desktop = waku_client::DaemonSupervisor::spawn_configured(
+        &executable,
+        false,
+        waku_client::DaemonExposureSettings::default(),
+    )
+    .unwrap();
+    assert!(desktop.is_attached_service());
+    let client = daemon.connect(&scratch);
+    let settled = wait_settled(&client, thread_id, 1);
+    assert_eq!(settled.runs.len(), 1);
+    assert_eq!(settled.runs[0].status, RunStatus::Completed);
+    assert!(settled.turn_items.iter().any(|item| matches!(
+        &item.kind,
+        TurnItemKind::AssistantMessage { text, .. } if !text.is_empty()
+    )));
+    drop(client);
+    drop(desktop);
+    unsafe { std::env::remove_var(waku_protocol::DAEMON_SOCKET_ENV) };
+}

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.countradooku.waku.daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/dev/.waku-fork/bin/waku-daemon-service</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/dev</string>
+	<key>StandardOutPath</key>
+	<string>/Users/dev/.waku-fork/logs/daemon.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/dev/.waku-fork/logs/daemon.log</string>
+</dict>
+</plist>
