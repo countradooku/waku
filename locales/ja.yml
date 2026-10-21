@@ -326,6 +326,8 @@ common.send: 送信
 
 session.fork_task: タスクをフォーク
 session.fork_task_title: タスクをフォーク
+session.rewind_unavailable: このメッセージには戻せるチェックポイントがありません
+session.archive: アーカイブ
 session.forking_task: タスクをフォーク中…
 session.forking_task_title: タスクをフォーク中…
 session.revert_to_here: ここまで戻す
@@ -724,6 +726,11 @@ errors.task_already_rewinding: このタスクはすでに巻き戻し中です
 errors.no_live_runtime: このタスクには実行中のエージェントがありません
 errors.unexpected_daemon_response: "デーモンから %{expected} が返るはずでしたが、%{actual} を受信しました"
 errors.daemon_disconnected: Waku デーモンに接続されていません
+errors.daemon_reconnecting: Waku デーモンとの接続が切れました。再接続しています…
+errors.send_message: "メッセージを送信できませんでした：%{error}"
+errors.create_task: "タスクを作成できませんでした：%{error}"
+errors.daemon_command: "デーモンが %{command} を拒否しました：%{error}"
+errors.load_history: "以前のメッセージを読み込めませんでした：%{error}"
 errors.path_outside_workspace: このパスはデーモンホスト上の現在のワークスペース外にあります
 errors.rename_task: "タスクの名前を変更できませんでした：%{error}"
 errors.remove_task: "タスクを削除できませんでした：%{error}"

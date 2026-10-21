@@ -310,6 +310,8 @@ common.cancel: 取消
 common.send: 发送
 session.fork_task: 从此处派生任务
 session.fork_task_title: 从此处派生任务
+session.rewind_unavailable: 此消息没有可回退的检查点
+session.archive: 归档
 session.forking_task: 正在派生任务…
 session.forking_task_title: 正在派生任务…
 session.revert_to_here: 回退到这里
@@ -689,6 +691,11 @@ errors.task_already_rewinding: 此任务正在回退
 errors.no_live_runtime: 此任务没有正在运行的智能体
 errors.unexpected_daemon_response: "预期守护进程返回 %{expected}，实际收到 %{actual}"
 errors.daemon_disconnected: Waku 守护进程未连接
+errors.daemon_reconnecting: 与 Waku 守护进程的连接已断开，正在重新连接…
+errors.send_message: "无法发送消息：%{error}"
+errors.create_task: "无法创建任务：%{error}"
+errors.daemon_command: "守护进程拒绝了 %{command}：%{error}"
+errors.load_history: "无法加载更早的消息：%{error}"
 errors.path_outside_workspace: 此路径位于守护进程主机上的当前工作区之外
 errors.rename_task: "无法重命名任务：%{error}"
 errors.remove_task: "无法移除任务：%{error}"
