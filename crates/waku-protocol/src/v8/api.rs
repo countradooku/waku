@@ -6,10 +6,6 @@
 //! the `shell`, `thread` and `commandOutput` streams, whose envelopes live in
 //! [`super::orchestration`]. Everything else in RFC 0003 §5.2–§5.4 is added
 //! here as its backend lands.
-//!
-//! TODO(#55): `projects.list` returns the orchestration `Project` entity
-//! instead of [`ProjectInfo`] once the orchestrator is the daemon's source of
-//! truth.
 
 use std::collections::BTreeMap;
 
@@ -18,11 +14,12 @@ use uuid::Uuid;
 
 use super::orchestration::{
     ArchivedPage, ArchivedParams, CommandOutputItem, CommandOutputSpec, DispatchParams,
-    DispatchResult, HistoryPage, HistoryPageParams, ShellItem, ShellSpec, ThreadItem,
-    ThreadSnapshot, ThreadSnapshotParams, ThreadSpec, TurnItemParams,
+    DispatchResult, HistoryPage, HistoryPageParams, ShellItem, ShellSpec, ThreadFindParams,
+    ThreadFindResult, ThreadItem, ThreadSearchHit, ThreadSearchParams, ThreadSnapshot,
+    ThreadSnapshotParams, ThreadSpec, TurnItemParams,
 };
 use super::{Scope, StreamCursor};
-use crate::orchestration::TurnItem;
+use crate::orchestration::{Project, TurnItem};
 
 /// A method's static description; implemented by the marker types in
 /// [`method`].
@@ -97,8 +94,8 @@ pub struct CommandInfo {
 methods! {
     /// The daemon's settings, with secrets redacted.
     "settings.get" => SettingsGet(NoParams) -> SettingsSnapshot, scope = Read;
-    /// The project catalog.
-    "projects.list" => ProjectsList(NoParams) -> Vec<ProjectInfo>, scope = Read;
+    /// The projects in their sidebar order; removed ones are left out.
+    "projects.list" => ProjectsList(NoParams) -> Vec<Project>, scope = Read;
     /// A text file under a root. Text is inline up to
     /// [`MAX_INLINE_TEXT_BYTES`].
     "files.read" => FilesRead(FilesReadParams) -> FileContent, scope = FilesRead;
@@ -115,6 +112,11 @@ methods! {
     "threads.turnItem" => ThreadsTurnItem(TurnItemParams) -> TurnItem, scope = Read;
     /// Archived threads, paged; the active shell never carries them.
     "threads.archived" => ThreadsArchived(ArchivedParams) -> ArchivedPage, scope = Read;
+    /// Threads across projects matching a query, one best match each.
+    "threads.search" => ThreadsSearch(ThreadSearchParams) -> Vec<ThreadSearchHit>, scope = Read;
+    /// Every match inside one thread, snippets around the current one, and
+    /// optionally the turn items there.
+    "threads.find" => ThreadsFind(ThreadFindParams) -> ThreadFindResult, scope = Read;
 }
 
 streams! {
@@ -193,20 +195,6 @@ pub struct FileContent {
     pub size: u64,
     /// A content hash, the base revision for a later `files.write`.
     pub revision: String,
-}
-
-/// A project of the catalog.
-///
-/// TODO(#54): replaced by the orchestration `Project` entity.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectInfo {
-    pub id: Uuid,
-    pub name: String,
-    pub path: String,
-    /// Milliseconds since the Unix epoch.
-    pub created_at: i64,
 }
 
 /// `settings.get` result and settings snapshot.
@@ -368,6 +356,8 @@ mod tests {
                 "threads.historyPage",
                 "threads.turnItem",
                 "threads.archived",
+                "threads.search",
+                "threads.find",
             ]
         );
         let spec = <stream::Settings as StreamDef>::wrap(SettingsSpec {});

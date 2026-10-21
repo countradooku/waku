@@ -75,7 +75,11 @@ fn main() -> anyhow::Result<()> {
     let backend = Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?);
     waku_core::daemon::start_worktree_cleanup_scheduler(&backend)
         .context("could not start worktree cleanup")?;
-    waku_core::serve_listeners(
+    // The orchestrator is the source of truth (#55): opened, reconciled and
+    // running its effect workers before any connection is accepted.
+    let host = waku_core::daemon_host::DaemonHost::start(&backend, Default::default())
+        .context("could not start the orchestrator")?;
+    let result = waku_core::serve_listeners(
         waku_core::Listeners { tcp, local },
         token,
         backend,
@@ -83,8 +87,12 @@ fn main() -> anyhow::Result<()> {
         waku_core::ServerOptions {
             allowed_origins: arguments.allowed_origins.into_iter().collect(),
             allow_shutdown: arguments.parent_pid.is_some(),
+            orchestration: Some(host.orchestration()),
+            environment_id: Some(host.environment_id()),
         },
-    )
+    );
+    host.shutdown();
+    result
 }
 
 /// Record waku-core's spans in Tracy, and on stderr when `WAKU_TRACE` names

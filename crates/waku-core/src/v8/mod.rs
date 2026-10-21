@@ -8,9 +8,9 @@
 //!   client with an HTTP upgrade, so the first four bytes tell them apart.
 //!
 //! Methods start as adapters over the existing [`Backend`]; orchestration
-//! (`orchestration.dispatch`, the `threads.*` reads, the `shell`, `thread`
-//! and `commandOutput` streams) is served from an orchestrator when one is
-//! attached ([`orchestration`], #54, #56, #57).
+//! (`orchestration.dispatch`, `projects.list`, the `threads.*` reads and
+//! searches, the `shell`, `thread` and `commandOutput` streams) is served
+//! from the daemon's orchestrator ([`orchestration`], #54–#57, #55).
 
 mod connection;
 mod methods;
@@ -48,9 +48,8 @@ pub(crate) struct V8Context {
     pub(crate) budget: Budget,
     pub(crate) hello_deadline: Duration,
     pub(crate) environment: EnvironmentInfo,
-    /// The event store behind orchestration methods and streams; `None`
-    /// until #55 makes it the daemon's source of truth (or
-    /// `WAKU_V8_ORCHESTRATOR` opens one).
+    /// The event store behind orchestration methods and streams; the daemon
+    /// always attaches one (#55), test servers may not.
     pub(crate) orchestration: Option<Arc<orchestration::Orchestration>>,
 }
 
@@ -74,6 +73,15 @@ impl V8Context {
         }
     }
 
+    /// Reports `id` as this daemon's environment (persisted by the host);
+    /// `None` keeps the per-process id.
+    pub(crate) fn with_environment_id(mut self, id: Option<Uuid>) -> Self {
+        if let Some(id) = id {
+            self.environment.id = id;
+        }
+        self
+    }
+
     /// Serves orchestration from `orchestration`; stream cursors then carry
     /// its event store's identity.
     pub(crate) fn with_orchestration(
@@ -90,9 +98,9 @@ impl V8Context {
 
 fn environment() -> EnvironmentInfo {
     EnvironmentInfo {
-        // TODO(#55): the persistent environment id. The event store's id
-        // replaces `store_id` when an orchestrator is attached
-        // (`with_orchestration`).
+        // The daemon host persists the environment id
+        // (`with_environment_id`), and the event store's id replaces
+        // `store_id` when an orchestrator is attached (`with_orchestration`).
         id: process_id(),
         name: host_name(),
         host_os: std::env::consts::OS.into(),

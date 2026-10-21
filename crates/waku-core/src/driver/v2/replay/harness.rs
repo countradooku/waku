@@ -279,7 +279,7 @@ impl ReplayHarness {
             }
             Transports::Live(factory) => (factory, None),
         };
-        let mut registry = DriverRegistry::new();
+        let registry = DriverRegistry::new();
         registry.register(driver, instance.clone());
         let mut config = OrchestratorConfig::new(root.join("state.sqlite"));
         config.read_connections = 2;
@@ -301,6 +301,7 @@ impl ReplayHarness {
                 ids: Arc::new(SeqIdAllocator::new()),
                 clock: clock.clone(),
                 output: Arc::new(NullOutput),
+                deltas: None,
                 raw_log: Arc::new(NullRawLog),
                 checkpoints: Some(ports.checkpoints.clone()),
                 runtime: runtime.handle().clone(),

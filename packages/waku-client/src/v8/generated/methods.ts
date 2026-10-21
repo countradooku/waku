@@ -10,7 +10,7 @@ export interface Methods {
   };
   "projects.list": {
     params: T.NoParams;
-    result: Array<T.ProjectInfo>;
+    result: Array<T.Project>;
   };
   "files.read": {
     params: T.FilesReadParams;
@@ -36,6 +36,14 @@ export interface Methods {
     params: T.ArchivedParams;
     result: T.ArchivedPage;
   };
+  "threads.search": {
+    params: T.ThreadSearchParams;
+    result: Array<T.ThreadSearchHit>;
+  };
+  "threads.find": {
+    params: T.ThreadFindParams;
+    result: T.ThreadFindResult;
+  };
 }
 
 export type MethodName = keyof Methods;
@@ -58,4 +66,6 @@ export const METHODS: { readonly [M in MethodName]: MethodInfo } = {
   "threads.historyPage": { scope: "read", opId: false },
   "threads.turnItem": { scope: "read", opId: false },
   "threads.archived": { scope: "read", opId: false },
+  "threads.search": { scope: "read", opId: false },
+  "threads.find": { scope: "read", opId: false },
 };

@@ -51,6 +51,23 @@ fn migrations_apply_once_and_record_the_ledger() {
     assert_eq!(journal, "wal");
 }
 
+/// D6: no legacy import, so none of its bookkeeping survives (0004).
+#[test]
+fn the_legacy_import_tables_are_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.sqlite");
+    drop(Store::open(&path, 1).unwrap());
+    let connection = Connection::open(&path).unwrap();
+    let legacy: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE 'legacy_import%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(legacy, 0);
+}
+
 #[test]
 fn an_edited_migration_refuses_to_open() {
     let dir = tempfile::tempdir().unwrap();

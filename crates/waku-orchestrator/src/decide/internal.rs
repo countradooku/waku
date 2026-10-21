@@ -1,4 +1,4 @@
-//! Internal commands: effect results (R21), lifecycle signals and import.
+//! Internal commands: effect results (R21) and lifecycle signals.
 //!
 //! Effect results can arrive late (a run interrupted while its checkpoint was
 //! captured). A result that no longer applies is accepted with no events, so
@@ -9,8 +9,8 @@ use waku_protocol::orchestration::*;
 use super::run::{
     fail_prepared, finish_run, hold_queue, interrupt_run, provider_turn_failed, release_prepared,
 };
-use super::{DecideContext, Decision, Draft, truncate_chars};
-use crate::command::{CommandError, InternalCommand, LegacyThreadShell, LegacyTranscript};
+use super::{Draft, truncate_chars};
+use crate::command::{CommandError, InternalCommand};
 use crate::effects::Effect;
 
 const MAX_GENERATED_TITLE_CHARS: usize = 120;
@@ -230,11 +230,7 @@ pub(super) fn decide(
                 draft.effect(Effect::TerminalCleanup);
             }
         }
-        InternalCommand::RecoverThread { .. }
-        | InternalCommand::ContinueRun { .. }
-        | InternalCommand::ImportLegacyProject { .. }
-        | InternalCommand::ImportLegacyThread { .. }
-        | InternalCommand::ImportLegacyTranscript { .. } => {
+        InternalCommand::RecoverThread { .. } | InternalCommand::ContinueRun { .. } => {
             unreachable!("routed by decide_internal")
         }
     }
@@ -318,155 +314,4 @@ fn checkpoint_captured(
 /// `refs/waku/t/<thread>/<scope>/<ordinal>`.
 pub fn checkpoint_ref(thread_id: ThreadId, scope_id: CheckpointScopeId, ordinal: u32) -> String {
     format!("refs/waku/t/{thread_id}/{scope_id}/{ordinal}")
-}
-
-pub(super) fn import_thread(
-    cx: &mut DecideContext<'_>,
-    shell: &LegacyThreadShell,
-) -> Result<Decision, CommandError> {
-    if cx.thread.is_some() {
-        // Re-importing is a no-op; the command id normally dedupes first.
-        return Ok(Decision::default());
-    }
-    let mut events = vec![DomainEvent::ThreadUpdated(ThreadUpdate {
-        change: ThreadChange::Imported,
-        thread: shell.thread.clone(),
-    })];
-    if let Some(provider_thread) = &shell.provider_thread {
-        if provider_thread.app_thread_id != Some(shell.thread.id) {
-            return Err(CommandError::invalid(
-                "shell.provider_thread",
-                "belongs to another thread",
-            ));
-        }
-        events.push(DomainEvent::ProviderThreadUpdated(provider_thread.clone()));
-    }
-    Ok(Decision {
-        events,
-        ..Decision::default()
-    })
-}
-
-pub(super) fn import_project(
-    cx: &mut DecideContext<'_>,
-    project: &Project,
-) -> Result<Decision, CommandError> {
-    if cx.project.is_some_and(|existing| existing.id == project.id) {
-        // Re-importing is a no-op; the command id normally dedupes first.
-        return Ok(Decision::default());
-    }
-    Ok(Decision {
-        events: vec![DomainEvent::ProjectUpdated(project.clone())],
-        ..Decision::default()
-    })
-}
-
-/// Commits an imported transcript (#63) as one decision. A thread that
-/// already has history (an earlier import, or runs started natively) is left
-/// alone, so the import can never interleave with live runs.
-pub(super) fn import_transcript(
-    cx: &mut DecideContext<'_>,
-    thread_id: ThreadId,
-    transcript: &LegacyTranscript,
-) -> Result<Decision, CommandError> {
-    let projection = match cx.thread {
-        Some(projection) if projection.id() == thread_id => projection,
-        _ => return Err(CommandError::not_found("thread", thread_id)),
-    };
-    if projection.thread.history_origin != HistoryOrigin::WakuImport {
-        return Err(CommandError::invalid_state(
-            "only imported threads take an imported transcript",
-        ));
-    }
-    if !projection.runs.is_empty() || !projection.next_position.is_empty() {
-        return Ok(Decision::default());
-    }
-    let foreign = |owner: ThreadId| owner != thread_id;
-    if transcript
-        .provider_thread
-        .as_ref()
-        .is_some_and(|provider_thread| provider_thread.app_thread_id != Some(thread_id))
-        || transcript.runs.iter().any(|run| foreign(run.thread_id))
-        || transcript.nodes.iter().any(|node| foreign(node.thread_id))
-        || transcript
-            .messages
-            .iter()
-            .any(|message| foreign(message.thread_id))
-        || transcript.items.iter().any(|item| foreign(item.thread_id))
-        || transcript
-            .checkpoint_scopes
-            .iter()
-            .any(|scope| foreign(scope.thread_id))
-        || transcript
-            .checkpoints
-            .iter()
-            .any(|checkpoint| foreign(checkpoint.thread_id))
-    {
-        return Err(CommandError::invalid(
-            "transcript",
-            "holds rows of another thread",
-        ));
-    }
-    let mut events = Vec::new();
-    events.extend(
-        transcript
-            .provider_thread
-            .iter()
-            .cloned()
-            .map(DomainEvent::ProviderThreadUpdated),
-    );
-    events.extend(transcript.runs.iter().cloned().map(DomainEvent::RunUpdated));
-    events.extend(
-        transcript
-            .attempts
-            .iter()
-            .cloned()
-            .map(DomainEvent::RunAttemptUpdated),
-    );
-    events.extend(
-        transcript
-            .nodes
-            .iter()
-            .cloned()
-            .map(DomainEvent::NodeUpdated),
-    );
-    events.extend(
-        transcript
-            .provider_turns
-            .iter()
-            .cloned()
-            .map(DomainEvent::ProviderTurnUpdated),
-    );
-    events.extend(
-        transcript
-            .checkpoint_scopes
-            .iter()
-            .cloned()
-            .map(DomainEvent::CheckpointScopeUpdated),
-    );
-    events.extend(
-        transcript
-            .checkpoints
-            .iter()
-            .cloned()
-            .map(DomainEvent::CheckpointUpdated),
-    );
-    events.extend(
-        transcript
-            .messages
-            .iter()
-            .cloned()
-            .map(DomainEvent::MessageUpdated),
-    );
-    events.extend(
-        transcript
-            .items
-            .iter()
-            .cloned()
-            .map(DomainEvent::TurnItemUpdated),
-    );
-    Ok(Decision {
-        events,
-        ..Decision::default()
-    })
 }

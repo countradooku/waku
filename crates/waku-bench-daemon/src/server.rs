@@ -146,8 +146,8 @@ impl BenchServer {
                     server_backend,
                     server_shutdown,
                     ServerOptions {
-                        allowed_origins: Default::default(),
                         allow_shutdown,
+                        ..ServerOptions::default()
                     },
                 )
             })?;

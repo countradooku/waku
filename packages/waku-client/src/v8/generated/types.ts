@@ -811,6 +811,21 @@ export type FilesReadParams = {
   root: RootRef;
 };
 
+/** One match inside a thread. */
+export type FindHit = {
+  entityId: string;
+  position: number;
+  source: SearchSource;
+};
+
+/** A match of the navigation window, with its snippet. */
+export type FindSnippet = {
+  hit: FindHit;
+  /** Index into [`ThreadFindResult::matches`]. */
+  index: number;
+  snippet: string;
+};
+
 export type ForkOrigin = {
   type: "run";
   runId: string;
@@ -906,6 +921,15 @@ export type IssuedCredential = {
 };
 
 export type ItemStatus = "idle" | "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted" | (string & {});
+
+/**
+ * How many turn items `threads.find` loads before and after the current
+ * match, each at most [`MAX_FIND_ITEMS_AROUND`].
+ */
+export type ItemsAround = {
+  after: number;
+  before: number;
+};
 
 /**
  * Opaque JSON text, never parsed by the protocol layer (RFC 0003 §5.1).
@@ -1098,19 +1122,6 @@ export type Project = {
   path: string;
   removedAt?: number;
   updatedAt: number;
-};
-
-/**
- * A project of the catalog.
- *
- * TODO(#54): replaced by the orchestration `Project` entity.
- */
-export type ProjectInfo = {
-  /** Milliseconds since the Unix epoch. */
-  createdAt: number;
-  id: string;
-  name: string;
-  path: string;
 };
 
 export type ProtocolVersion = {
@@ -1383,6 +1394,8 @@ export type Scope = "read" | "operate" | "files:read" | "files:write" | "vcs:wri
 
 export type ScopeKind = "root_run" | "subagent" | "tool" | "provider_thread" | "manual" | (string & {});
 
+export type SearchSource = "title" | "message" | "plan" | (string & {});
+
 export type SecretStatus = "pending" | "saved" | "declined" | "cancelled" | (string & {});
 
 /** Daemon → client. */
@@ -1609,6 +1622,46 @@ export type ThreadCaps = {
 
 export type ThreadChange = "created" | "imported" | "archived" | "unarchived" | "deleted" | "settled" | "auto_settled" | "unsettled" | "auto_settle_set" | "snoozed" | "unsnoozed" | "snooze_woke" | "pinned" | "unpinned" | "pin_reordered" | "active_reordered" | "visited" | "marked_unread" | "renamed" | "title_generated" | "title_regeneration_started" | "workspace_changed" | "runtime_mode_changed" | "interaction_mode_changed" | "model_selection_changed" | "provider_switched" | "active_provider_thread_changed" | "rollback_requested" | "rollback_failed" | "rollback_completed" | "limit_recovery_changed" | "activity" | (string & {});
 
+/**
+ * `threads.find` params: every match of `query` inside one thread, loaded
+ * by any client or not.
+ */
+export type ThreadFindParams = {
+  /**
+   * The position the reader is at: the current match is the first at or
+   * after it. Absent: the latest match.
+   */
+  anchor?: number;
+  /**
+   * Also load the turn items around the current match, so a client can
+   * jump to history it has not paged in.
+   */
+  itemsAround?: ItemsAround;
+  query: string;
+  threadId: string;
+  /**
+   * Snippets around the current match, at most [`MAX_FIND_WINDOW`]; 17
+   * when absent.
+   */
+  window?: number;
+};
+
+/** `threads.find` result. */
+export type ThreadFindResult = {
+  /** The current match, as an index into `matches`. */
+  current?: number;
+  /**
+   * With `itemsAround`: the turn items around the current match,
+   * wire-projected, ascending by `position`.
+   */
+  items?: Array<TurnItem>;
+  /** Every match in transcript order (at most 5,000). */
+  matches?: Array<FindHit>;
+  /** More matches exist than `matches` holds. */
+  truncated?: boolean;
+  window?: Array<FindSnippet>;
+};
+
 /** A provider-persisted objective (Codex and Claude `/goal`). */
 export type ThreadGoal = {
   objective: string;
@@ -1683,6 +1736,37 @@ export type ThreadRow = {
   pendingRequestCount: number;
   queuedRunCount: number;
   thread: AppThread;
+};
+
+/**
+ * One thread found by `threads.search`: its best match (the title, else
+ * the latest matching message, else the latest matching plan). Results are
+ * ordered by that source, then by recency.
+ */
+export type ThreadSearchHit = {
+  /** The thread's last reply, else its last update (epoch milliseconds). */
+  activityAt: number;
+  /** The message, plan or thread id that matched. */
+  entityId: string;
+  /** The matching turn item's position; absent for a title match. */
+  position?: number;
+  projectId: string;
+  snippet: string;
+  source: SearchSource;
+  threadId: string;
+  title: string;
+};
+
+/**
+ * `threads.search` params: threads across projects whose title, messages
+ * or plans hold every word of `query` (as prefixes).
+ */
+export type ThreadSearchParams = {
+  includeArchived?: boolean;
+  /** At most [`MAX_SEARCH_RESULTS`]; 50 when absent. */
+  limit?: number;
+  projectId?: string;
+  query: string;
 };
 
 /**

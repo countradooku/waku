@@ -64,6 +64,16 @@ pub struct StoredOutput {
 /// Marks where retained output skips bytes.
 pub const ELISION: &str = "\n…\n";
 
+/// `text` capped as the hub retains output (RFC 0001 R12): the first
+/// [`OUTPUT_HEAD_BYTES`] and the last [`OUTPUT_TAIL_BYTES`], for output a
+/// driver reports whole instead of streaming it.
+pub fn cap_output(text: &str) -> StoredOutput {
+    let config = OutputHubConfig::default();
+    let mut retained = Retained::default();
+    retained.push(text, &config);
+    retained.view(&config)
+}
+
 fn floor_boundary(text: &str, index: usize) -> usize {
     let mut index = index.min(text.len());
     while !text.is_char_boundary(index) {
@@ -303,6 +313,30 @@ impl CommandOutputHub {
         });
     }
 
+    /// The command's whole output so far is `text` (a provider that reports
+    /// cumulative output). Subscribers get it as a `replace`.
+    pub fn replace(&self, thread_id: ThreadId, item_id: TurnItemId, text: &str) {
+        let mut inner = self.inner.lock();
+        let tail = self.tail_mut(&mut inner, thread_id, item_id);
+        if !tail.running {
+            return;
+        }
+        tail.retained = Retained::default();
+        tail.retained.push(text, &self.config);
+        tail.subscribers.retain(|subscriber| {
+            let Some(subscriber) = subscriber.upgrade() else {
+                return false;
+            };
+            {
+                let mut state = subscriber.state.lock();
+                state.pending.clear();
+                state.replace = true;
+            }
+            subscriber.wake();
+            true
+        });
+    }
+
     /// The command finished. Returns what its turn item should store
     /// (`None` for a command the hub never saw).
     pub fn finish(&self, item_id: TurnItemId, exit_code: Option<i32>) -> Option<StoredOutput> {
@@ -535,6 +569,48 @@ mod tests {
         assert!(
             hub.subscribe(ThreadId(uuid::Uuid::nil()), item, || {})
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn cumulative_output_replaces_what_was_retained() {
+        let hub = Arc::new(CommandOutputHub::default());
+        let (thread, item) = ids(12);
+        hub.append(thread, item, "partial");
+        let subscription = hub.subscribe(thread, item, || {}).unwrap();
+        subscription.take_frames();
+        hub.append(thread, item, " pending");
+        hub.replace(thread, item, "line 1\nline 2\n");
+        assert_eq!(
+            subscription.take_frames().0,
+            [CommandOutputItem::Replace {
+                text: "line 1\nline 2\n".into(),
+                truncated: false,
+                running: true
+            }]
+        );
+        let stored = hub.finish(item, Some(0)).unwrap();
+        assert_eq!(stored.text, "line 1\nline 2\n");
+        // A finished command keeps its output.
+        hub.replace(thread, item, "late");
+        assert_eq!(hub.tail(item).unwrap().0.text, "line 1\nline 2\n");
+    }
+
+    #[test]
+    fn whole_output_is_capped_like_retained_output() {
+        assert_eq!(
+            cap_output("short"),
+            StoredOutput {
+                text: "short".into(),
+                truncated: false
+            }
+        );
+        let long = "x".repeat(OUTPUT_HEAD_BYTES + OUTPUT_TAIL_BYTES + 10);
+        let capped = cap_output(&long);
+        assert!(capped.truncated);
+        assert_eq!(
+            capped.text.len(),
+            OUTPUT_HEAD_BYTES + ELISION.len() + OUTPUT_TAIL_BYTES
         );
     }
 

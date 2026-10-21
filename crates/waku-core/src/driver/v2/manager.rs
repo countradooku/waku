@@ -37,6 +37,7 @@ use waku_orchestrator::{
     IngestEnvelope, IngestOutcome, Orchestrator, ThreadProjection,
 };
 use waku_protocol::orchestration::{self as orch, *};
+use waku_protocol::v8::orchestration::DeltaChannel;
 
 use super::coalescer::SnapshotCoalescer;
 use super::*;
@@ -73,10 +74,13 @@ pub struct RegisteredInstance {
     pub config: InstanceConfig,
 }
 
-/// Every configured instance.
+/// Every configured instance. Clones share one table, so the daemon can
+/// re-register instances when its settings change (binary overrides,
+/// disabled providers) while the manager and `decide` read the same set; a
+/// session already open keeps the configuration it opened with.
 #[derive(Clone, Default)]
 pub struct DriverRegistry {
-    entries: HashMap<ProviderInstanceId, RegisteredInstance>,
+    entries: Arc<parking_lot::RwLock<HashMap<ProviderInstanceId, RegisteredInstance>>>,
 }
 
 impl DriverRegistry {
@@ -84,15 +88,31 @@ impl DriverRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, driver: Arc<dyn DriverV2>, config: InstanceConfig) {
-        self.entries.insert(
+    pub fn register(&self, driver: Arc<dyn DriverV2>, config: InstanceConfig) {
+        self.entries.write().insert(
             config.instance_id.clone(),
             RegisteredInstance { driver, config },
         );
     }
 
-    pub fn get(&self, instance: &ProviderInstanceId) -> Option<&RegisteredInstance> {
-        self.entries.get(instance)
+    /// Replaces every instance at once.
+    pub fn replace(&self, instances: impl IntoIterator<Item = RegisteredInstance>) {
+        let entries = instances
+            .into_iter()
+            .map(|instance| (instance.config.instance_id.clone(), instance))
+            .collect();
+        *self.entries.write() = entries;
+    }
+
+    pub fn get(&self, instance: &ProviderInstanceId) -> Option<RegisteredInstance> {
+        self.entries.read().get(instance).cloned()
+    }
+
+    /// The configured instance ids, sorted.
+    pub fn instances(&self) -> Vec<ProviderInstanceId> {
+        let mut ids = self.entries.read().keys().cloned().collect::<Vec<_>>();
+        ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        ids
     }
 }
 
@@ -112,6 +132,9 @@ pub struct ManagerDeps {
     pub ids: Arc<dyn IdAllocator>,
     pub clock: Arc<dyn Clock>,
     pub output: Arc<dyn OutputSink>,
+    /// Live text deltas of streaming items for `thread` streams (RFC 0003
+    /// §5.4); `None` publishes none.
+    pub deltas: Option<Arc<waku_orchestrator::streams::DeltaBus>>,
     pub raw_log: Arc<dyn RawFrameLog>,
     /// Restores files on a rollback that asks for it.
     pub checkpoints: Option<Arc<dyn CheckpointPort>>,
@@ -153,6 +176,9 @@ struct Live {
     /// Provider turns of subagents (no run attempt); their terminals never
     /// end the session's turn.
     child_turns: Mutex<HashSet<ProviderTurnId>>,
+    /// The streaming items of this session: their text so far and
+    /// `stream_rev`, for live deltas.
+    streams: Mutex<HashMap<TurnItemId, StreamText>>,
     last_activity: AtomicI64,
     closed: AtomicBool,
     shutdown: Shutdown,
@@ -161,6 +187,26 @@ struct Live {
 impl Live {
     fn instance(&self) -> &ProviderInstanceId {
         &self.registered.config.instance_id
+    }
+}
+
+/// What a streaming item's clients have been sent.
+#[derive(Default)]
+struct StreamText {
+    text: String,
+    rev: u32,
+}
+
+/// A streaming item's channel and text, if `item` is one.
+fn streaming_text(item: &TurnItem) -> Option<(DeltaChannel, &str, bool)> {
+    match &item.kind {
+        TurnItemKind::AssistantMessage {
+            text, streaming, ..
+        } => Some((DeltaChannel::Text, text, *streaming)),
+        TurnItemKind::Reasoning { text, streaming } => {
+            Some((DeltaChannel::Reasoning, text, *streaming))
+        }
+        _ => None,
     }
 }
 
@@ -401,6 +447,7 @@ impl ProviderSessionManager {
             bound: Mutex::new(None),
             current_run: Mutex::new(None),
             child_turns: Mutex::new(HashSet::new()),
+            streams: Mutex::new(HashMap::new()),
             last_activity: AtomicI64::new(now),
             closed: AtomicBool::new(false),
             shutdown,
@@ -579,12 +626,17 @@ impl ProviderSessionManager {
                         *current = None;
                     }
                 }
+                live.streams.lock().clear();
                 self.touch(live);
                 self.settled.lock().insert(attempt);
                 self.terminal_signal.notify_waiters();
             }
             other => {
-                let other = self.merge_bound_thread(live, other);
+                let mut other = self.merge_bound_thread(live, other);
+                if let AdapterEvent::TurnItemUpdated { item } = &mut other {
+                    self.publish_text(live, item);
+                    self.store_output(item);
+                }
                 if let AdapterEvent::ProviderTurnUpdated { turn } = &other
                     && turn.run_attempt_id.is_none()
                 {
@@ -593,6 +645,69 @@ impl ProviderSessionManager {
                 let released = throttle.offer(other);
                 self.persist(live, released).await;
             }
+        }
+    }
+
+    /// Live deltas (RFC 0001 R12, RFC 0003 §5.4): text a streaming item
+    /// gained since its last snapshot goes to `thread` streams at once, and
+    /// the snapshot carries `stream_rev`, the number of deltas folded in, so
+    /// a client applies only the deltas newer than the snapshot it holds.
+    /// Text that does not extend what was sent (a rewrite), and the text of
+    /// the final snapshot, bump the revision without a delta: the snapshot
+    /// follows at once, and a client that saw the gap waits for it.
+    fn publish_text(&self, live: &Live, item: &mut TurnItem) {
+        let Some((channel, text, streaming)) = streaming_text(item) else {
+            return;
+        };
+        let done = !streaming || item.status.is_terminal();
+        let mut streams = live.streams.lock();
+        let state = streams.entry(item.id).or_default();
+        if text != state.text {
+            state.rev += 1;
+            if !done
+                && let Some(added) = text.strip_prefix(state.text.as_str())
+                && let Some(bus) = &self.deps.deltas
+                && bus.has_subscribers(live.thread_id)
+            {
+                bus.publish(waku_orchestrator::streams::LiveDelta {
+                    thread_id: live.thread_id,
+                    item_id: item.id,
+                    channel,
+                    rev: state.rev,
+                    text: added.to_owned(),
+                });
+            }
+            text.clone_into(&mut state.text);
+        }
+        item.stream_rev = state.rev;
+        if done {
+            streams.remove(&item.id);
+        }
+    }
+
+    /// A finished command stores the output the sink retained (capped, R12),
+    /// or its own output capped the same way.
+    fn store_output(&self, item: &mut TurnItem) {
+        if !item.status.is_terminal() {
+            return;
+        }
+        let TurnItemKind::CommandExecution {
+            output,
+            output_truncated,
+            exit_code,
+            ..
+        } = &mut item.kind
+        else {
+            return;
+        };
+        let stored = self.deps.output.finish(item.id, *exit_code).or_else(|| {
+            output
+                .as_deref()
+                .map(waku_orchestrator::streams::output_hub::cap_output)
+        });
+        if let Some(stored) = stored {
+            *output = Some(stored.text);
+            *output_truncated |= stored.truncated;
         }
     }
 
@@ -902,12 +1017,7 @@ impl ProviderSessionManager {
         let fail = |failure: ProviderFailure| {
             self.fail_attempt(cx, thread_id, run_id, attempt_id, failure)
         };
-        let Some(registered) = self
-            .deps
-            .registry
-            .get(&attempt.provider_instance_id)
-            .cloned()
-        else {
+        let Some(registered) = self.deps.registry.get(&attempt.provider_instance_id) else {
             return fail(
                 ProviderFailure::new(
                     FailureClass::ValidationError,
@@ -1345,7 +1455,7 @@ impl ProviderSessionManager {
             return failed("The checkpoint or provider thread is gone.".to_owned());
         };
         let target = checkpoint.app_run_ordinal.unwrap_or(0);
-        let Some(registered) = self.deps.registry.get(&row.provider_instance_id).cloned() else {
+        let Some(registered) = self.deps.registry.get(&row.provider_instance_id) else {
             return failed(format!(
                 "Provider instance {} is not configured.",
                 row.provider_instance_id
@@ -1545,7 +1655,6 @@ impl ProviderSessionManager {
             .deps
             .registry
             .get(&instance)
-            .cloned()
             .ok_or(DriverError::Unsupported { operation: "fork" })?;
         let caps = self
             .session_capabilities(source)

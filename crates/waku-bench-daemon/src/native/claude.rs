@@ -284,6 +284,14 @@ pub fn serve(config: FakeConfig, flags: Flags, input: Receiver<Value>, output: O
     turns.join();
 }
 
+/// Distinguishes this process's message ids from an earlier one's. The
+/// CLI's ids are unique; a conversation resumed by a new process (after a
+/// daemon restart) must not reuse the ids of its first turns.
+fn process_nonce() -> &'static str {
+    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NONCE.get_or_init(|| Uuid::new_v4().simple().to_string()[..8].to_owned())
+}
+
 fn prompt_text(message: &Value) -> String {
     match message.pointer("/message/content") {
         Some(Value::String(text)) => text.clone(),
@@ -373,7 +381,12 @@ impl ClaudeTurn {
             return Ok(id.clone());
         }
         self.messages += 1;
-        let id = format!("msg_bench_{}_{}", self.num_turns, self.messages);
+        let id = format!(
+            "msg_bench_{}_{}_{}",
+            process_nonce(),
+            self.num_turns,
+            self.messages
+        );
         self.message_id = Some(id.clone());
         self.index = 0;
         self.stream(json!({

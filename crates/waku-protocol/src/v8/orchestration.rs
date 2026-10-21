@@ -288,6 +288,138 @@ pub struct ArchivedPage {
     pub next: Option<HistoryCursor>,
 }
 
+// -- threads.search, threads.find ------------------------------------------
+
+/// `threads.search` returns at most this many threads; that is also the
+/// default.
+pub const MAX_SEARCH_RESULTS: u32 = 200;
+/// `threads.find` cuts snippets for at most this many matches around its
+/// anchor…
+pub const MAX_FIND_WINDOW: u32 = 50;
+/// …and loads at most this many turn items on either side of it.
+pub const MAX_FIND_ITEMS_AROUND: u32 = 50;
+
+open_string_enum! {
+    /// Where a search or find match was found.
+    pub enum SearchSource {
+        Title = "title",
+        Message = "message",
+        Plan = "plan",
+    }
+}
+
+/// `threads.search` params: threads across projects whose title, messages
+/// or plans hold every word of `query` (as prefixes).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadSearchParams {
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_archived: bool,
+    /// At most [`MAX_SEARCH_RESULTS`]; 50 when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// One thread found by `threads.search`: its best match (the title, else
+/// the latest matching message, else the latest matching plan). Results are
+/// ordered by that source, then by recency.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadSearchHit {
+    pub thread_id: ThreadId,
+    pub project_id: ProjectId,
+    pub title: String,
+    pub source: SearchSource,
+    /// The message, plan or thread id that matched.
+    pub entity_id: String,
+    /// The matching turn item's position; absent for a title match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u64>,
+    pub snippet: String,
+    /// The thread's last reply, else its last update (epoch milliseconds).
+    pub activity_at: i64,
+}
+
+/// `threads.find` params: every match of `query` inside one thread, loaded
+/// by any client or not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadFindParams {
+    pub thread_id: ThreadId,
+    pub query: String,
+    /// The position the reader is at: the current match is the first at or
+    /// after it. Absent: the latest match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<u64>,
+    /// Snippets around the current match, at most [`MAX_FIND_WINDOW`]; 17
+    /// when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<u32>,
+    /// Also load the turn items around the current match, so a client can
+    /// jump to history it has not paged in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items_around: Option<ItemsAround>,
+}
+
+/// How many turn items `threads.find` loads before and after the current
+/// match, each at most [`MAX_FIND_ITEMS_AROUND`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ItemsAround {
+    pub before: u32,
+    pub after: u32,
+}
+
+/// One match inside a thread.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct FindHit {
+    pub source: SearchSource,
+    pub entity_id: String,
+    pub position: u64,
+}
+
+/// A match of the navigation window, with its snippet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct FindSnippet {
+    /// Index into [`ThreadFindResult::matches`].
+    pub index: u32,
+    pub hit: FindHit,
+    pub snippet: String,
+}
+
+/// `threads.find` result.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadFindResult {
+    /// Every match in transcript order (at most 5,000).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matches: Vec<FindHit>,
+    /// More matches exist than `matches` holds.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    /// The current match, as an index into `matches`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub window: Vec<FindSnippet>,
+    /// With `itemsAround`: the turn items around the current match,
+    /// wire-projected, ascending by `position`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<TurnItem>,
+}
+
 // -- shell -----------------------------------------------------------------
 
 open_string_enum! {

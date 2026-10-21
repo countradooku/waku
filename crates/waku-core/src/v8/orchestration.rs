@@ -1,12 +1,13 @@
 //! Orchestration over v8 (#54, #56, #57): `orchestration.dispatch`, the
-//! `threads.*` reads, and the `shell`, `thread` and `commandOutput` streams,
-//! served from an [`Orchestrator`].
+//! `threads.*` reads and searches, `projects.list`, and the `shell`,
+//! `thread` and `commandOutput` streams, served from an [`Orchestrator`].
 //!
-//! The orchestrator is not the daemon's source of truth yet (#55 moves the
-//! desktop over), so the daemon opens one only when `WAKU_V8_ORCHESTRATOR`
-//! is set ([`Orchestration::from_env`]); without it these methods answer
-//! `unsupported` and the streams end the same way, and the legacy protocol
-//! is untouched either way.
+//! The orchestrator is the daemon's source of truth (#55):
+//! [`crate::daemon_host::DaemonHost`] opens it with the effect workers, the
+//! provider session manager and the lifecycle service, and hands it to the
+//! endpoint. A server started without one (the bench daemon, legacy-protocol
+//! tests) answers these methods `unsupported` and ends the streams the same
+//! way.
 //!
 //! **Event hub.** One pump thread receives the orchestrator's
 //! [`CommittedFeed`](waku_orchestrator::CommittedFeed) and routes each event
@@ -32,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
+use waku_orchestrator::search::{SearchSource as Source, SearchThreadsQuery, ThreadFindQuery};
 use waku_orchestrator::streams::coalesce::ToolCoalescer;
 use waku_orchestrator::streams::shell::{
     ShellChange, ShellFilter, ShellResume, archived_page, plan_shell_resume_default, shell_change,
@@ -43,18 +45,17 @@ use waku_orchestrator::streams::thread::{
 };
 use waku_orchestrator::streams::wire::{externalize_item_images, project_event};
 use waku_orchestrator::streams::{LiveDelta, LiveStreams};
-use waku_orchestrator::{
-    CommandError, Dependencies, DispatchError, NoCapabilities, Orchestrator, OrchestratorConfig,
-    SystemClock, UuidV7Ids,
-};
+use waku_orchestrator::{CommandError, DispatchError, Orchestrator};
 use waku_protocol::orchestration::{
-    Actor, CommandEnvelope, CreationSource, DomainEvent, Sequence, StoredEvent, ThreadId,
+    Actor, CommandEnvelope, CreationSource, DomainEvent, Project, Sequence, StoredEvent, ThreadId,
     TurnItemKind,
 };
 use waku_protocol::v8::orchestration::{
     ArchivedPage, ArchivedParams, CommandOutputItem, CommandOutputSpec, DispatchParams,
-    DispatchResult, HistoryPage, HistoryPageParams, ShellItem, ShellSpec, ThreadItem,
-    ThreadSnapshot, ThreadSnapshotParams, ThreadSpec, TurnItemParams, command_scopes,
+    DispatchResult, FindHit, FindSnippet, HistoryPage, HistoryPageParams, MAX_FIND_ITEMS_AROUND,
+    MAX_FIND_WINDOW, MAX_SEARCH_RESULTS, SearchSource, ShellItem, ShellSpec, ThreadFindParams,
+    ThreadFindResult, ThreadItem, ThreadSearchHit, ThreadSearchParams, ThreadSnapshot,
+    ThreadSnapshotParams, ThreadSpec, TurnItemParams, command_scopes,
 };
 use waku_protocol::v8::{
     ClientKind, Encoding, EndReason, Error, ErrorCode, ErrorDetails, Method, MethodResult,
@@ -75,10 +76,6 @@ const DELTA_QUEUE: usize = 1_024;
 const SHELL_ADVANCE: Duration = Duration::from_secs(1);
 /// How long a dispatch reply waits for its events to be queued.
 const READ_YOUR_WRITES_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// The env var that opens the orchestrator for v8: `1` for
-/// `state.sqlite` next to the task store, or a database path.
-pub const ORCHESTRATOR_ENV: &str = "WAKU_V8_ORCHESTRATOR";
 
 /// A committed event as `thread` streams send it: wire-projected once and
 /// encoded at most once per encoding, shared by every subscriber.
@@ -365,6 +362,15 @@ pub struct Orchestration {
     pub(crate) hub: Arc<EventHub>,
 }
 
+impl std::fmt::Debug for Orchestration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Orchestration")
+            .field("orchestrator", &self.orchestrator)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Orchestration {
     /// Serves `orchestrator` and starts the event pump.
     pub fn new(orchestrator: Arc<Orchestrator>, live: LiveStreams) -> Arc<Self> {
@@ -382,40 +388,6 @@ impl Orchestration {
         })
     }
 
-    /// Opens `path` with production dependencies (no effect workers yet:
-    /// #55 starts them with the provider session manager).
-    pub fn open(path: PathBuf) -> anyhow::Result<Arc<Self>> {
-        let orchestrator = Orchestrator::open(
-            OrchestratorConfig::new(path),
-            Dependencies {
-                clock: Arc::new(SystemClock),
-                ids: Box::new(UuidV7Ids),
-                capabilities: Arc::new(NoCapabilities),
-            },
-        )?;
-        Ok(Self::new(orchestrator, LiveStreams::default()))
-    }
-
-    /// The orchestrator `WAKU_V8_ORCHESTRATOR` asks for, if any.
-    pub fn from_env(default_path: impl FnOnce() -> PathBuf) -> Option<Arc<Self>> {
-        let value = std::env::var(ORCHESTRATOR_ENV).ok()?;
-        let path = match value.as_str() {
-            "" | "0" => return None,
-            "1" => default_path(),
-            path => PathBuf::from(path),
-        };
-        match Self::open(path.clone()) {
-            Ok(orchestration) => Some(orchestration),
-            Err(error) => {
-                eprintln!(
-                    "waku-daemon could not open the orchestrator at {}: {error:#}",
-                    path.display()
-                );
-                None
-            }
-        }
-    }
-
     pub fn store_id(&self) -> uuid::Uuid {
         self.orchestrator.store_id()
     }
@@ -429,7 +401,7 @@ impl Orchestration {
 fn unsupported() -> Error {
     Error::new(
         ErrorCode::Unsupported,
-        format!("orchestration is not enabled on this daemon (set {ORCHESTRATOR_ENV}; #55)"),
+        "orchestration is not served by this daemon",
     )
 }
 
@@ -551,6 +523,8 @@ pub(crate) fn handle(context: &V8Context, method: Method) -> Option<Result<Metho
         Method::ThreadsArchived(params) => {
             archived(context, params).map(MethodResult::ThreadsArchived)
         }
+        Method::ThreadsSearch(params) => search(context, params).map(MethodResult::ThreadsSearch),
+        Method::ThreadsFind(params) => find(context, params).map(MethodResult::ThreadsFind),
         Method::OrchestrationDispatch(_) => Err(Error::new(
             ErrorCode::Internal,
             "orchestration.dispatch is served by the connection",
@@ -653,6 +627,124 @@ fn archived(context: &V8Context, params: ArchivedParams) -> Result<ArchivedPage,
             }
             waku_orchestrator::streams::shell::ArchiveError::Store(error) => storage(error),
         })
+}
+
+/// The live projects in their sidebar order (`projects.list`, and the roots
+/// of project-scoped files calls).
+pub(crate) fn projects(context: &V8Context) -> Result<Vec<Project>, Error> {
+    let orchestration = orchestration(context)?;
+    Ok(orchestration
+        .orchestrator
+        .projects()
+        .into_iter()
+        .filter(|project| project.removed_at.is_none())
+        .collect())
+}
+
+fn search_source(source: Source) -> SearchSource {
+    match source {
+        Source::Title => SearchSource::Title,
+        Source::Message => SearchSource::Message,
+        Source::Plan => SearchSource::Plan,
+    }
+}
+
+fn find_hit(hit: waku_orchestrator::search::FindHit) -> FindHit {
+    FindHit {
+        source: search_source(hit.source),
+        entity_id: hit.entity_id,
+        position: hit.position,
+    }
+}
+
+fn index(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// `threads.search`.
+fn search(context: &V8Context, params: ThreadSearchParams) -> Result<Vec<ThreadSearchHit>, Error> {
+    let orchestration = orchestration(context)?;
+    let limit = params
+        .limit
+        .unwrap_or(waku_orchestrator::search::DEFAULT_SEARCH_LIMIT as u32)
+        .clamp(1, MAX_SEARCH_RESULTS);
+    let query = SearchThreadsQuery {
+        text: params.query,
+        project_id: params.project_id,
+        include_archived: params.include_archived,
+        limit: limit as usize,
+    };
+    let matches = orchestration
+        .orchestrator
+        .search_threads(&query)
+        .map_err(storage)?;
+    Ok(matches
+        .into_iter()
+        .map(|found| ThreadSearchHit {
+            thread_id: found.thread_id,
+            project_id: found.project_id,
+            title: found.title,
+            source: search_source(found.source),
+            entity_id: found.entity_id,
+            position: found.position,
+            snippet: found.snippet,
+            activity_at: found.activity_at,
+        })
+        .collect())
+}
+
+/// `threads.find`: the matches, the snippets around the current one, and
+/// with `itemsAround` the turn items there, wire-projected.
+fn find(context: &V8Context, params: ThreadFindParams) -> Result<ThreadFindResult, Error> {
+    let orchestration = orchestration(context)?;
+    let orchestrator = &orchestration.orchestrator;
+    if orchestrator.thread(params.thread_id).is_err() {
+        return Err(thread_not_found(params.thread_id));
+    }
+    let window = params
+        .window
+        .map_or(waku_orchestrator::search::FIND_WINDOW, |window| {
+            window.min(MAX_FIND_WINDOW) as usize
+        });
+    let query = ThreadFindQuery {
+        thread_id: params.thread_id,
+        text: params.query,
+        anchor: params.anchor,
+        window,
+    };
+    let found = orchestrator.find_in_thread(&query).map_err(storage)?;
+    let items = match (params.items_around, found.current) {
+        (Some(around), Some(current)) => {
+            let position = found.matches[current].position;
+            orchestrator
+                .items_around(
+                    params.thread_id,
+                    position,
+                    around.before.min(MAX_FIND_ITEMS_AROUND) as usize,
+                    around.after.min(MAX_FIND_ITEMS_AROUND) as usize,
+                )
+                .map_err(storage)?
+                .iter()
+                .map(waku_orchestrator::streams::wire::project_turn_item)
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    Ok(ThreadFindResult {
+        current: found.current.map(index),
+        truncated: found.truncated,
+        window: found
+            .window
+            .into_iter()
+            .map(|snippet| FindSnippet {
+                index: index(snippet.index),
+                hit: find_hit(snippet.hit),
+                snippet: snippet.snippet,
+            })
+            .collect(),
+        matches: found.matches.into_iter().map(find_hit).collect(),
+        items,
+    })
 }
 
 /// A thread's root for files, vcs and terminal calls: its worktree, or its
@@ -1098,6 +1190,8 @@ mod tests {
         )
         .unwrap()
     }
+
+    use waku_orchestrator::{Dependencies, NoCapabilities, OrchestratorConfig};
 
     #[test]
     fn a_full_hub_queue_ends_its_subscription_with_overflow() {
