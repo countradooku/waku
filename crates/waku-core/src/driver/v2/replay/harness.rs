@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -201,6 +202,7 @@ pub struct ReplayHarness {
     orchestrator: Arc<Orchestrator>,
     manager: Arc<ProviderSessionManager>,
     pool: Option<EffectWorkerPool>,
+    stopping: Arc<AtomicBool>,
     ports: FakePorts,
     instance: InstanceConfig,
     project: ProjectId,
@@ -223,6 +225,8 @@ struct Daemon {
     orchestrator: Arc<Orchestrator>,
     manager: Arc<ProviderSessionManager>,
     pool: EffectWorkerPool,
+    /// Set before the pool is shut down (see [`QuietExecutor`]).
+    stopping: Arc<AtomicBool>,
     recovery: Option<RecoveryReport>,
 }
 
@@ -242,19 +246,23 @@ struct DaemonParts<'a> {
 /// concurrently; either order is valid, but a replay must commit in the same
 /// order every time, so the worker waits until the pump has ingested what
 /// the replayed frames produced (bounded, so a waiting driver cannot stall
-/// it).
+/// it). Once its daemon is stopping it runs nothing: a worker that outlived
+/// the pool's shutdown must not drive the abandoned session manager into the
+/// next boot's replay channels.
 struct QuietExecutor {
     inner: DefaultExecutor,
     manager: Arc<ProviderSessionManager>,
     adapter_events: Arc<Mutex<Vec<AdapterEvent>>>,
+    stopping: Arc<AtomicBool>,
 }
 
 impl EffectExecutor for QuietExecutor {
     fn execute(&self, effect: &ClaimedEffect, cx: &EffectContext<'_>) -> Result<(), EffectError> {
-        let deadline = Instant::now() + Duration::from_millis(500);
+        // Inside the 200 ms the harness gives the pool to shut down.
+        let deadline = Instant::now() + Duration::from_millis(150);
         let mut last = None;
         let mut stable = 0;
-        while Instant::now() < deadline {
+        while Instant::now() < deadline && !self.stopping.load(Ordering::Acquire) {
             let now = (self.manager.is_idle(), self.adapter_events.lock().len());
             if now.0 && last == Some(now) {
                 stable += 1;
@@ -266,6 +274,9 @@ impl EffectExecutor for QuietExecutor {
             }
             last = Some(now);
             std::thread::sleep(Duration::from_millis(3));
+        }
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(EffectError::Retryable("the daemon is stopping".to_owned()));
         }
         self.inner.execute(effect, cx)
     }
@@ -310,6 +321,7 @@ fn start_daemon(parts: DaemonParts<'_>, boot: u64) -> Result<Daemon, ReplayError
         },
         SessionManagerConfig::default(),
     );
+    let stopping = Arc::new(AtomicBool::new(false));
     let executor = Arc::new(QuietExecutor {
         inner: DefaultExecutor {
             provider: Arc::new(ManagerExecutor(manager.clone())),
@@ -317,6 +329,7 @@ fn start_daemon(parts: DaemonParts<'_>, boot: u64) -> Result<Daemon, ReplayError
         },
         manager: manager.clone(),
         adapter_events: parts.adapter_events.clone(),
+        stopping: stopping.clone(),
     });
     let pool = EffectWorkerPool::start(orchestrator.clone(), executor, WorkerConfig::default());
     let mut live = manager.subscribe();
@@ -330,6 +343,7 @@ fn start_daemon(parts: DaemonParts<'_>, boot: u64) -> Result<Daemon, ReplayError
         orchestrator,
         manager,
         pool,
+        stopping,
         recovery,
     })
 }
@@ -444,6 +458,7 @@ impl ReplayHarness {
             orchestrator: daemon.orchestrator,
             manager: daemon.manager,
             pool: Some(daemon.pool),
+            stopping: daemon.stopping,
             ports,
             instance,
             project: ProjectId(Uuid::nil()),
@@ -889,6 +904,7 @@ impl ReplayHarness {
     /// its sessions only see their processes die, and whatever they still
     /// try to commit is refused by the stopped orchestrator.
     pub fn restart_daemon(&mut self) -> Result<(), ReplayError> {
+        self.stopping.store(true, Ordering::Release);
         if let Some(pool) = self.pool.take() {
             pool.shutdown(Duration::from_millis(200));
         }
@@ -914,6 +930,7 @@ impl ReplayHarness {
         self.orchestrator = daemon.orchestrator;
         self.manager = daemon.manager;
         self.pool = Some(daemon.pool);
+        self.stopping = daemon.stopping;
         self.recoveries.extend(daemon.recovery);
         Ok(())
     }
