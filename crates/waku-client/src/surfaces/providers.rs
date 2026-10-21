@@ -156,6 +156,42 @@ pub fn computer_permissions(
     })
 }
 
+/// A listed provider conversation as the resume picker shows it (times in
+/// seconds). Its `resumeCursor` is the provider cursor the import takes.
+pub fn provider_session_summary(
+    summary: v8::ProviderSessionSummary,
+) -> anyhow::Result<waku_protocol::model::ProviderSessionSummary> {
+    Ok(waku_protocol::model::ProviderSessionSummary {
+        cursor: serde_json::from_str(&summary.resume_cursor.0)
+            .context("the daemon sent an unreadable resume cursor")?,
+        title: summary.title,
+        cwd: PathBuf::from(summary.cwd),
+        created_at: u64::try_from(summary.created_at.div_euclid(1000)).unwrap_or(0),
+        updated_at: u64::try_from(summary.updated_at.div_euclid(1000)).unwrap_or(0),
+    })
+}
+
+/// `provider`'s resumable CLI conversations (`providerSessions.list`), less
+/// those a thread already holds; an unreadable entry is skipped.
+pub fn provider_sessions(
+    daemon: &DaemonV8,
+    provider: ProviderKind,
+    limit: usize,
+) -> anyhow::Result<Vec<waku_protocol::model::ProviderSessionSummary>> {
+    let sessions = daemon.call::<method::ProviderSessionsList>(v8::ProviderSessionsListParams {
+        instance_id: instance_id(provider),
+        limit: Some(
+            u32::try_from(limit)
+                .unwrap_or(u32::MAX)
+                .min(v8::MAX_PROVIDER_SESSIONS),
+        ),
+    })?;
+    Ok(sessions
+        .into_iter()
+        .filter_map(|summary| provider_session_summary(summary).ok())
+        .collect())
+}
+
 /// The orchestrator's ids of the projects at `paths`. The desktop still
 /// lists projects by path; matching on it bridges to the daemon's project
 /// ids until the session layer hands those out itself (#55).

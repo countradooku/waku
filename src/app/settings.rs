@@ -683,6 +683,15 @@ impl Waku {
                         .text_color(theme.text_secondary)
                         .child(tr!("daemon.external_description")),
                 )
+                .when_some(self.daemon_version.clone(), |card, version| {
+                    card.child(
+                        div()
+                            .mt(px(5.0))
+                            .text_size(sp(12.5))
+                            .text_color(theme.text_tertiary)
+                            .child(tr!("daemon.version", version = version)),
+                    )
+                })
                 .into_any_element();
         }
 
@@ -972,7 +981,16 @@ impl Waku {
                                     .line_height(sp(18.0))
                                     .text_color(theme.text_secondary)
                                     .child(tr!("daemon.expose_description")),
-                            ),
+                            )
+                            .when_some(self.daemon_version.clone(), |column, version| {
+                                column.child(
+                                    div()
+                                        .mt(px(5.0))
+                                        .text_size(sp(12.5))
+                                        .text_color(theme.text_tertiary)
+                                        .child(tr!("daemon.version", version = version)),
+                                )
+                            }),
                     )
                     .child(exposure_toggle),
             )

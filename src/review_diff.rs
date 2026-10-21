@@ -860,6 +860,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn working_tree_sources_go_to_review_diff_and_turns_do_not() {
+        use waku_client::v8::ReviewDiffSource as Wire;
+        assert_eq!(v8_source(Source::Uncommitted), Some(Wire::Uncommitted));
+        assert_eq!(v8_source(Source::Unstaged), Some(Wire::Unstaged));
+        assert_eq!(v8_source(Source::Staged), Some(Wire::Staged));
+        assert_eq!(v8_source(Source::Committed), Some(Wire::Committed));
+        assert_eq!(v8_source(Source::Branch), Some(Wire::Branch));
+        assert_eq!(
+            v8_source(Source::LastTurn {
+                session_id: Uuid::nil(),
+                turn_id: Uuid::nil(),
+                turn_count: 1,
+            }),
+            None
+        );
+    }
+
+    #[test]
     fn parses_file_headers_gaps_line_numbers_and_syntax() {
         let numstat = "2\t1\tsrc/lib.rs\n";
         let patch = r#"diff --git a/src/lib.rs b/src/lib.rs

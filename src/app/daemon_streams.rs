@@ -66,6 +66,27 @@ impl Waku {
         .detach();
     }
 
+    /// Read the daemon's version for the Daemon settings page.
+    pub(super) fn load_daemon_info(daemon_v8: &crate::daemon_v8::DaemonV8, cx: &mut Context<Self>) {
+        let daemon_v8 = daemon_v8.clone();
+        cx.spawn(async move |this, cx| {
+            let info = cx
+                .background_executor()
+                .spawn(async move { waku_client::surfaces::settings::daemon_info(&daemon_v8) })
+                .await;
+            match info {
+                Ok(info) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.daemon_version = Some(info.version);
+                        cx.notify();
+                    });
+                }
+                Err(error) => eprintln!("could not read the daemon info: {error:#}"),
+            }
+        })
+        .detach();
+    }
+
     /// Fold drafts another client changed into the editing copy. A draft
     /// edited here since the daemon last saw it keeps the local text, which
     /// the next save sends.
@@ -122,4 +143,75 @@ pub(super) fn apply_remote_drafts(
         outcome.restore_selected |= Some(change.key) == selected;
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::persistence::{ComposerDraft, ComposerDraftKey, ComposerDrafts};
+
+    fn draft(text: &str) -> ComposerDraft {
+        ComposerDraft {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn remote_drafts_replace_unedited_copies_and_yield_to_local_edits() {
+        let selected = ComposerDraftKey::Session(Uuid::from_u128(1));
+        let other = ComposerDraftKey::NewSession(Uuid::from_u128(2));
+        let edited = ComposerDraftKey::Session(Uuid::from_u128(3));
+        let mut drafts = ComposerDrafts::default();
+        drafts.set(selected, draft("hello"));
+        drafts.set(edited, draft("typed here"));
+        let outcome = apply_remote_drafts(
+            &mut drafts,
+            vec![
+                RemoteDraftChange {
+                    key: selected,
+                    previous: Some(draft("hello")),
+                    draft: Some(draft("hello from the web")),
+                },
+                RemoteDraftChange {
+                    key: other,
+                    previous: None,
+                    draft: Some(draft("new task")),
+                },
+                RemoteDraftChange {
+                    key: edited,
+                    previous: Some(draft("typed")),
+                    draft: None,
+                },
+            ],
+            Some(selected),
+        );
+        assert_eq!(
+            outcome,
+            RemoteDraftsOutcome {
+                restore_selected: true,
+                local_kept: true,
+            }
+        );
+        assert_eq!(drafts.get(selected), Some(&draft("hello from the web")));
+        assert_eq!(drafts.get(other), Some(&draft("new task")));
+        assert_eq!(drafts.get(edited), Some(&draft("typed here")));
+    }
+
+    #[test]
+    fn a_remote_change_already_held_changes_nothing() {
+        let key = ComposerDraftKey::Session(Uuid::from_u128(1));
+        let mut drafts = ComposerDrafts::default();
+        drafts.set(key, draft("same"));
+        let outcome = apply_remote_drafts(
+            &mut drafts,
+            vec![RemoteDraftChange {
+                key,
+                previous: None,
+                draft: Some(draft("same")),
+            }],
+            Some(key),
+        );
+        assert_eq!(outcome, RemoteDraftsOutcome::default());
+    }
 }

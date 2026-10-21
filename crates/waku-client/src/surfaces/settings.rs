@@ -469,11 +469,8 @@ fn follow_settings(inner: &WriterInner, mut on_change: impl FnMut(RemoteSettings
                 window: None,
             },
         );
-        loop {
-            let Ok(event) = subscription.events().recv() else {
-                // The connection closed; resume from the last revision.
-                break;
-            };
+        // Until the connection closes; then resume from the last revision.
+        while let Ok(event) = subscription.events().recv() {
             let settings = match event {
                 StreamEvent::Item(StreamItem::Settings(
                     SettingsItem::Snapshot { revision, settings }
@@ -542,7 +539,7 @@ mod tests {
             Some(&["amp".to_owned(), "deepseek".to_owned()][..])
         );
         assert_eq!(
-            patch.provider_binary_overrides.unwrap()["opencode"],
+            patch.provider_binary_overrides.as_ref().unwrap()["opencode"],
             "/opt/opencode"
         );
         assert!(patch.touches_providers_or_all());

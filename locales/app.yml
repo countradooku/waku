@@ -190,6 +190,8 @@ daemon.expose_description:
   en: Listen beyond this machine so another Waku client can connect. Changing this restarts only the daemon.
 daemon.status_local:
   en: Local only
+daemon.version:
+  en: "Daemon %{version}"
 daemon.status_exposed:
   en: Exposed
 daemon.status_restarting:

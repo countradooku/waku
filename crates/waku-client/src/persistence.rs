@@ -23,7 +23,7 @@ use waku_protocol::i18n::AppLanguage;
 use waku_protocol::identity::DATA_DIRECTORY_NAME;
 use waku_protocol::model::{
     AgentSession, FavoriteModel, Project, ProviderKind, ProviderResumeCursor,
-    ProviderSessionHistory, ProviderSessionSummary, RuntimeMode,
+    ProviderSessionHistory, RuntimeMode,
 };
 use waku_protocol::theme::ThemePreference;
 
@@ -800,28 +800,6 @@ impl StateStore {
             ResponsePayload::SessionMessageMatches { matches } => Ok(matches),
             _ => Err(io::Error::other(
                 "Waku daemon returned an invalid message-search response",
-            )),
-        }
-    }
-
-    pub fn provider_sessions(
-        &self,
-        provider: ProviderKind,
-        limit: usize,
-    ) -> impl FnOnce() -> io::Result<Vec<ProviderSessionSummary>> + Send + 'static {
-        let daemon = self.daemon.clone();
-        move || match daemon
-            .client()
-            .request(
-                Uuid::nil(),
-                Uuid::nil(),
-                Command::ListProviderSessions { provider, limit },
-            )
-            .map_err(to_io_error)?
-        {
-            ResponsePayload::ProviderSessions { sessions } => Ok(sessions),
-            _ => Err(io::Error::other(
-                "Waku daemon returned an invalid provider-session response",
             )),
         }
     }

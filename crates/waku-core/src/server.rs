@@ -3172,8 +3172,6 @@ mod tests {
             panic!("expected blob data");
         };
         assert!(read == bytes, "the blob changed in transit");
-        // Over TCP the daemon's files are not assumed to be local.
-        assert!(client.read_reference("waku-blob:test.png", None).unwrap() == bytes);
 
         shutdown.trigger();
         server.join().unwrap();
@@ -3199,10 +3197,19 @@ mod tests {
 
         let client =
             DaemonClient::connect(&format!("unix:{}", path.display()), "secret".into()).unwrap();
-        assert_eq!(
-            client.read_reference("waku-blob:test.png", None).unwrap(),
-            b"on disk"
-        );
+        let ResponsePayload::BlobLocation { path } = client
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::LocateBlob {
+                    reference: "waku-blob:test.png".into(),
+                },
+            )
+            .unwrap()
+        else {
+            panic!("expected a blob location");
+        };
+        assert_eq!(std::fs::read(path).unwrap(), b"on disk");
 
         shutdown.trigger();
         server.join().unwrap();

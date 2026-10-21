@@ -1046,6 +1046,8 @@ pub struct Waku {
     daemon_v8: crate::daemon_v8::DaemonV8,
     /// Writes the desktop's copy of the daemon settings, off the UI thread.
     settings_sync: waku_client::surfaces::settings::SettingsSync,
+    /// The connected daemon's version (`daemon.info`), once read.
+    daemon_version: Option<String>,
     /// Cached once at construction for the Daemon settings connection URL;
     /// rendering must not query account or network configuration.
     daemon_hostname: String,
@@ -2698,6 +2700,7 @@ impl Waku {
 
             // Settings and drafts that other clients change (#55).
             Self::follow_daemon_streams(&settings_sync, &composer_draft_store, cx);
+            Self::load_daemon_info(&daemon_v8, cx);
 
             // Like T3 Code's adapter subscriptions feeding its ingestion
             // worker, provider threads push an edge into this bounded wake
@@ -2807,6 +2810,7 @@ impl Waku {
                 daemon,
                 daemon_v8,
                 settings_sync,
+                daemon_version: None,
                 daemon_hostname,
                 session_hydrations: HashSet::new(),
                 pending_session_activation: None,
