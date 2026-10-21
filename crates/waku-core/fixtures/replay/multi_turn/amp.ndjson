@@ -1,0 +1,11 @@
+{"type":"transcript_start","provider":"amp","protocol":"amp.stream-json","version":"0.0.1760000000","scenario":"multi_turn","metadata":{"recordedBy":"hand-authored","minCliVersion":"","synthetic":true,"source":"Frames as the v1 driver's live-payload tests show them (driver/amp.rs before #51): no echo, whole assistant messages, the turn ends at stop_reason end_turn; the v1 driver's live two-turn test: one process serves both turns."}}
+{"type":"expect_outbound","label":"process_start","channel":"threads-new","frame":{"type":"process_start","program":"amp","args":["threads","new"],"env":{}}}
+{"type":"emit_inbound","label":"stdout","channel":"threads-new","frame":"T-7f3c2a10-5b1e-4c8d-9a2f-000000000001"}
+{"type":"runtime_exit","channel":"threads-new","status":"success"}
+{"type":"expect_outbound","label":"process_start","frame":{"type":"process_start","program":"amp","args":["threads","continue","T-7f3c2a10-5b1e-4c8d-9a2f-000000000001","--execute","--stream-json-thinking","--stream-json-input","--dangerously-allow-all"],"env":{}}}
+{"type":"expect_outbound","label":"user","frame":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"first"}]}}}
+{"type":"emit_inbound","label":"system/init","frame":{"type":"system","subtype":"init","session_id":"T-7f3c2a10-5b1e-4c8d-9a2f-000000000001","tools":["Bash","Read","edit_file","Grep"]}}
+{"type":"emit_inbound","label":"assistant","frame":{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Echo: first"}],"usage":{"input_tokens":1200,"cache_read_input_tokens":300,"cache_creation_input_tokens":0,"output_tokens":12},"stop_reason":"end_turn"},"parent_tool_use_id":null,"session_id":"T-7f3c2a10-5b1e-4c8d-9a2f-000000000001"}}
+{"type":"expect_outbound","label":"user","frame":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"second"}]}}}
+{"type":"emit_inbound","label":"assistant","frame":{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Echo: second"}],"usage":{"input_tokens":1200,"cache_read_input_tokens":300,"cache_creation_input_tokens":0,"output_tokens":12},"stop_reason":"end_turn"},"parent_tool_use_id":null,"session_id":"T-7f3c2a10-5b1e-4c8d-9a2f-000000000001"}}
+{"type":"runtime_exit","status":"success"}

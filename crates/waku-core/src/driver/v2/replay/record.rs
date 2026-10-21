@@ -34,6 +34,8 @@ pub struct RecordingTransportFactory {
     inner: Arc<dyn TransportFactory>,
     entries: Entries,
     spawns: Mutex<HashMap<String, u32>>,
+    /// The recorded channel of each spawned pid, for signals.
+    pids: Mutex<HashMap<u32, String>>,
 }
 
 impl RecordingTransportFactory {
@@ -42,6 +44,7 @@ impl RecordingTransportFactory {
             inner,
             entries: Arc::new(Mutex::new(Vec::new())),
             spawns: Mutex::new(HashMap::new()),
+            pids: Mutex::new(HashMap::new()),
         })
     }
 
@@ -166,6 +169,9 @@ impl TransportFactory for RecordingTransportFactory {
             frame: process_start_frame(&spec),
         });
         let transport = self.inner.spawn_stdio(channel, spec).await?;
+        if let Some(pid) = transport.pid {
+            self.pids.lock().insert(pid, channel.clone());
+        }
         let entries = self.entries.clone();
         let exit_channel = channel_field(channel);
         let exit = transport.exit;
@@ -221,6 +227,18 @@ impl TransportFactory for RecordingTransportFactory {
 
     fn provider_home(&self, cfg: &InstanceConfig) -> PathBuf {
         self.inner.provider_home(cfg)
+    }
+
+    async fn interrupt(&self, channel: &str, pid: Option<u32>) -> io::Result<()> {
+        let name = pid
+            .and_then(|pid| self.pids.lock().get(&pid).cloned())
+            .unwrap_or_else(|| channel.to_owned());
+        self.entries.lock().push(ReplayEntry::ExpectOutbound {
+            label: Some("signal".to_owned()),
+            channel: channel_field(&name),
+            frame: json!({ "type": "signal", "signal": "SIGINT" }),
+        });
+        self.inner.interrupt(&name, pid).await
     }
 }
 

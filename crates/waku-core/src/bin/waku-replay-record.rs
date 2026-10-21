@@ -12,9 +12,9 @@
 //! `<fixtures>/<scenario>/<provider>.ndjson` sanitized, fails closed on any
 //! leaked secret, then replays the file and keeps it only if replay passes.
 //! Only drivers ported to `DriverV2` can record: the in-repo `fake` provider,
-//! `codex` (#46), `claude` (#47) and `pi` / `ohmypi` (#50), each against
-//! the real CLI (`--binary`, default `claude`, `pi` or `omp` on the search
-//! path). `--script` plays a transcript's inbound
+//! `codex` (#46), `claude` (#47), `pi` / `ohmypi` (#50) and `amp` (#51),
+//! each against the real CLI (`--binary`, default `claude`, `pi`, `omp` or
+//! `amp` on the search path). `--script` plays a transcript's inbound
 //! frames to the driver instead of the live CLI (Codex only; see
 //! `driver::codex::script`). The HTTP drivers `opencode` (#49) and `deepseek`
 //! (#52) record against a running service given by `--service-url`
@@ -27,6 +27,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
+use waku_core::driver::amp::{AMP_PROTOCOL, AMP_PROVIDER, AmpDriver, amp_instance};
 use waku_core::driver::claude::{CLAUDE_PROTOCOL, CLAUDE_PROVIDER, ClaudeDriver, claude_instance};
 use waku_core::driver::codex::script::ScriptedAppServer;
 use waku_core::driver::codex::{
@@ -194,6 +195,27 @@ fn main() -> ExitCode {
                 CLAUDE_PROTOCOL,
             )
         }
+        AMP_PROVIDER => {
+            if args.script.is_some() {
+                eprintln!("waku-replay-record: --script is Codex only");
+                return ExitCode::from(2);
+            }
+            let mut instance = amp_instance();
+            if let Some(binary) = &args.binary {
+                instance.binary = binary.clone();
+            }
+            instance.cli_version = args.cli_version.clone();
+            metadata.insert(
+                "minCliVersion".to_owned(),
+                Value::from(args.cli_version.clone().unwrap_or_default()),
+            );
+            (
+                Arc::new(AmpDriver::new()),
+                instance,
+                Arc::new(ProcessTransportFactory),
+                AMP_PROTOCOL,
+            )
+        }
         PI_PROVIDER | OHMYPI_PROVIDER => {
             if args.script.is_some() {
                 eprintln!("waku-replay-record: --script is Codex only");
@@ -263,9 +285,7 @@ fn main() -> ExitCode {
             )
         }
         other => {
-            eprintln!(
-                "waku-replay-record: {other} has no DriverV2 port yet; recording arrives with its port (#51)"
-            );
+            eprintln!("waku-replay-record: {other} cannot be recorded by this tool");
             return ExitCode::from(2);
         }
     };

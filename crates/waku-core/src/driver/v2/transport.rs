@@ -131,6 +131,40 @@ pub trait TransportFactory: Send + Sync {
     /// Root for provider state on disk. Replay points it at a temp copy of
     /// the fixture's home.
     fn provider_home(&self, cfg: &InstanceConfig) -> PathBuf;
+    /// Sends SIGINT to a process this factory spawned under `channel` (its
+    /// `StdioTransport::pid`): Amp's interrupt, the one exception to
+    /// "shut down by closing stdin" (RFC 0002 "Threading" rule 2). Replay
+    /// records it as an outbound `{"type": "signal", "signal": "SIGINT"}`.
+    async fn interrupt(&self, _channel: &str, pid: Option<u32>) -> io::Result<()> {
+        send_interrupt(pid)
+    }
+}
+
+/// SIGINT to `pid`.
+pub fn send_interrupt(pid: Option<u32>) -> io::Result<()> {
+    let Some(pid) = pid.and_then(|pid| i32::try_from(pid).ok()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the process has no pid to signal",
+        ));
+    };
+    #[cfg(unix)]
+    {
+        // SAFETY: `kill` takes a plain pid and signal number.
+        if unsafe { libc::kill(pid, libc::SIGINT) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "interrupting a process needs a Unix signal",
+        ))
+    }
 }
 
 /// Real processes. Children are never killed on drop: `close()` owns

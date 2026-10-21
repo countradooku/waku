@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+use waku_core::driver::amp::{AMP_PROVIDER, AmpDriver, amp_capabilities, amp_instance};
 use waku_core::driver::claude::{
     CLAUDE_PROVIDER, ClaudeDriver, claude_capabilities, claude_instance,
 };
@@ -57,6 +58,7 @@ fn driver_for(provider: &str) -> Arc<dyn DriverV2> {
         OPENCODE_PROVIDER => Arc::new(OpenCodeDriver),
         DEEPSEEK_PROVIDER => Arc::new(DeepSeekDriver),
         PI_PROVIDER | OHMYPI_PROVIDER => Arc::new(PiDriver::new()),
+        AMP_PROVIDER => Arc::new(AmpDriver::new()),
         other => panic!("no DriverV2 for {other} yet"),
     }
 }
@@ -78,6 +80,7 @@ fn instance_of(provider: &str) -> InstanceConfig {
         DEEPSEEK_PROVIDER => deepseek_replay_instance(),
         PI_PROVIDER => pi_replay_instance(PiFlavor::Pi),
         OHMYPI_PROVIDER => pi_replay_instance(PiFlavor::OhMyPi),
+        AMP_PROVIDER => amp_instance(),
         other => panic!("no DriverV2 instance for {other} here"),
     }
 }
@@ -714,6 +717,7 @@ fn every_fixture_has_assertions() {
             OPENCODE_PROVIDER => opencode::COVERED,
             DEEPSEEK_PROVIDER => deepseek::COVERED,
             PI_PROVIDER | OHMYPI_PROVIDER => pi::COVERED,
+            AMP_PROVIDER => amp::COVERED,
             other => panic!("{other} fixtures have no assertions"),
         }
     };
@@ -747,6 +751,7 @@ fn every_fixture_has_assertions() {
         DEEPSEEK_PROVIDER,
         PI_PROVIDER,
         OHMYPI_PROVIDER,
+        AMP_PROVIDER,
     ] {
         for scenario in covered(provider) {
             assert!(
@@ -2793,5 +2798,229 @@ mod pi {
                 expected
             );
         }
+    }
+}
+
+// -- Amp (#51): stream-json over stdio ---------------------------------------------
+
+/// The Amp fixtures (`<scenario>/amp.ndjson`), hand-derived (see
+/// `fixtures/replay/README.md`). Amp has no approvals, questions, native
+/// rollback or fork, so only the R rows and steering are recorded.
+mod amp {
+    use super::*;
+
+    pub const COVERED: &[&str] = &[
+        "simple",
+        "multi_turn",
+        "tool_call_read_only",
+        "turn_interrupt",
+        "turn_interrupt_mid_tool",
+        "message_steering",
+        "provider_thread_resume",
+        "usage_limit",
+        "runtime_exit_unexpected",
+    ];
+
+    const THREAD: &str = "T-7f3c2a10-5b1e-4c8d-9a2f-000000000001";
+
+    fn amp(scenario: &str) -> ScenarioResult {
+        replay_as(scenario, AMP_PROVIDER)
+    }
+
+    fn spawns(scenario: &str) -> Vec<Value> {
+        read_transcript(&fixtures().join(scenario).join("amp.ndjson"))
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ReplayEntry::ExpectOutbound { frame, .. } if frame["type"] == "process_start" => {
+                    Some(frame["args"].clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn amp_fixtures_replay() {
+        let mut failures = Vec::new();
+        for scenario in COVERED {
+            let transcript =
+                read_transcript(&fixtures().join(scenario).join("amp.ndjson")).unwrap();
+            if let Err(error) = run_transcript(scenario, transcript) {
+                failures.push(format!("{scenario}: {error}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    }
+
+    #[test]
+    fn amp_simple() {
+        let result = amp("simple");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["fixture simple ok"]
+        );
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::Reasoning { text, streaming: false } if text == "The user wants an echo."
+        )));
+        // `threads new` names the thread; turns bind by ordinal.
+        let run = runs(main)[0];
+        assert_eq!(native_thread(main, run).as_deref(), Some(THREAD));
+        let turn = provider_turns(main)[0];
+        assert!(turn.native_turn_ref.is_none());
+        assert_eq!(
+            turn.token_usage.as_ref().map(|usage| usage.used),
+            Some(1512)
+        );
+        let session = main.provider_sessions.values().next().unwrap();
+        assert_eq!(session.capabilities, amp_capabilities());
+        assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+    }
+
+    #[test]
+    fn amp_multi_turn_keeps_one_process() {
+        let result = amp("multi_turn");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["Echo: first", "Echo: second"]
+        );
+        assert_eq!(main.provider_sessions.len(), 1);
+        assert_eq!(
+            spawns("multi_turn").len(),
+            2,
+            "threads new, then one session"
+        );
+    }
+
+    #[test]
+    fn amp_read_only_tool() {
+        let result = amp("tool_call_read_only");
+        assert_eq!(statuses(&result.projection), [RunStatus::Completed]);
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::DynamicTool { tool_name: Some(name), output: Some(_), .. } if name == "Read"
+        ) && item.status == ItemStatus::Completed));
+    }
+
+    #[test]
+    fn amp_interrupt_keeps_the_thread_reusable() {
+        let result = amp("turn_interrupt");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Interrupted]);
+        assert_eq!(terminals(&result), [TurnOutcome::Interrupted]);
+        let terminal = result
+            .adapter_events
+            .iter()
+            .find_map(|event| match event {
+                AdapterEvent::TurnTerminal { terminal } => Some(terminal.thread_disposition),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(terminal, waku_core::driver::v2::ThreadDisposition::Reusable);
+        // The provider thread survives the process.
+        let thread = &main.provider_threads[&runs(main)[0].provider_thread_id.unwrap()];
+        assert_ne!(thread.status, ProviderThreadStatus::Error);
+        assert_eq!(main.thread.active_provider_thread_id, Some(thread.id));
+    }
+
+    #[test]
+    fn amp_interrupt_mid_tool_closes_the_command() {
+        let result = amp("turn_interrupt_mid_tool");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Interrupted]);
+        let rows = items(&result, main_id(&result));
+        let command = rows
+            .iter()
+            .find(|item| matches!(item.kind, TurnItemKind::CommandExecution { .. }))
+            .expect("the running command");
+        assert_eq!(command.status, ItemStatus::Interrupted);
+    }
+
+    #[test]
+    fn amp_message_steering_is_native() {
+        let result = amp("message_steering");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let run = runs(main)[0];
+        let attempts = main
+            .attempts
+            .values()
+            .filter(|attempt| attempt.run_id == run.id)
+            .count();
+        assert_eq!(attempts, 1, "native steering keeps one attempt");
+        assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["Working", "Steered: use tabs"]
+        );
+    }
+
+    #[test]
+    fn amp_resumes_with_threads_continue() {
+        let result = amp("provider_thread_resume");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+        assert_eq!(main.provider_sessions.len(), 2);
+        let all = runs(main);
+        assert_eq!(all[0].provider_thread_id, all[1].provider_thread_id);
+        let spawns = spawns("provider_thread_resume");
+        assert_eq!(spawns.len(), 3);
+        assert_eq!(
+            spawns[2].as_array().unwrap()[0..3],
+            ["threads", "continue", THREAD]
+        );
+    }
+
+    #[test]
+    fn amp_usage_limit() {
+        let result = amp("usage_limit");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Failed]);
+        let failure = runs(main)[0].failure.clone().unwrap();
+        assert_eq!(failure.class, FailureClass::UsageLimit);
+        assert_eq!(failure.reset_at, Some(1_767_240_000_000));
+    }
+
+    #[test]
+    fn amp_unexpected_exit_fails_the_turn_once() {
+        let result = amp("runtime_exit_unexpected");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Failed]);
+        let failure = runs(main)[0].failure.clone().unwrap();
+        assert_eq!(failure.class, FailureClass::TransportError);
+        assert_eq!(failure.code.as_deref(), Some("process_exit"));
+        assert!(matches!(
+            terminals(&result)[..],
+            [TurnOutcome::Failed { .. }]
+        ));
+    }
+
+    #[test]
+    fn amp_capabilities_match_the_snapshot() {
+        let path = fixtures().join("../capabilities_amp.json");
+        let expected: Capabilities =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(amp_capabilities(), expected);
+        assert_eq!(AmpDriver::new().capabilities(&amp_instance()), expected);
+        // Declared gaps: no approvals, no native rollback or fork, Full
+        // access only at the client boundary.
+        assert_eq!(expected.approvals, ApprovalCaps::default());
+        assert!(!expected.threads.rollback && !expected.threads.fork);
+        assert_eq!(
+            expected.runtime_policy.supported_modes,
+            [RuntimeMode::FullAccess]
+        );
+        assert_eq!(
+            expected.runtime_policy.enforcement,
+            Enforcement::ClientBoundary
+        );
     }
 }

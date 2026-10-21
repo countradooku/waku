@@ -1321,22 +1321,10 @@ impl WakuBackend {
                 })?;
                 Ok((fork.cursor, HashMap::new()))
             }
+            // Amp has no native fork (RFC 0002 D-6): the orchestrator hands
+            // the history to a new thread instead (#51).
             ProviderKind::Amp => {
-                let Some(ProviderResumeCursor::Amp {
-                    thread_id,
-                    fork_context,
-                }) = source.provider_cursor.as_ref()
-                else {
-                    bail!("Amp's native thread is unavailable");
-                };
-                let fork = fork_provider_session(ProviderSessionForkRequest::Amp {
-                    binary: self.provider_binary(ProviderKind::Amp)?,
-                    cwd: cwd.to_owned(),
-                    thread_id: thread_id.clone(),
-                    fork_context: fork_context.clone(),
-                    turn_count: provider_turn_count,
-                })?;
-                Ok((fork.cursor, HashMap::new()))
+                bail!("Amp has no native fork; branch it through the orchestrator")
             }
             ProviderKind::OpenCode => {
                 let Some(ProviderResumeCursor::OpenCode { session_id, .. }) =
@@ -1519,23 +1507,9 @@ impl WakuBackend {
                 };
                 Ok((Some(cursor), HashMap::new(), false))
             }
+            // Amp has no native rollback (RFC 0002 D-6, #51).
             ProviderKind::Amp => {
-                let Some(ProviderResumeCursor::Amp {
-                    thread_id,
-                    fork_context,
-                }) = source.provider_cursor.as_ref()
-                else {
-                    bail!("Amp's native thread is unavailable");
-                };
-                let cursor = fork_provider_session(ProviderSessionForkRequest::Amp {
-                    binary: binary.to_owned(),
-                    cwd: cwd.to_owned(),
-                    thread_id: thread_id.clone(),
-                    fork_context: fork_context.clone(),
-                    turn_count: provider_turn_count,
-                })?
-                .cursor;
-                Ok((Some(cursor), HashMap::new(), false))
+                bail!("Amp has no native rollback; rewind it through the orchestrator")
             }
             ProviderKind::Cursor => {
                 let cursor = fork_provider_session(ProviderSessionForkRequest::Cursor {
@@ -1914,23 +1888,10 @@ fn fork_provider_session(
                 Some(source_resume_at),
             )
         }
-        ProviderSessionForkRequest::Amp {
-            binary,
-            cwd,
-            thread_id,
-            fork_context,
-            turn_count,
-        } => (
-            crate::amp_session::fork_session_at_turn(
-                &binary,
-                &cwd,
-                &thread_id,
-                fork_context.as_deref(),
-                turn_count,
-            )?,
-            HashMap::new(),
-            None,
-        ),
+        // Amp has no native fork (RFC 0002 D-6, #51).
+        ProviderSessionForkRequest::Amp { .. } => {
+            bail!("Amp has no native fork; branch it through the orchestrator")
+        }
         ProviderSessionForkRequest::Cursor { source, turn_count } => (
             crate::cursor_session::fork_session_at_turn(&source, turn_count)?,
             HashMap::new(),

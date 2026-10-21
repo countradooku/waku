@@ -1,0 +1,9 @@
+{"type":"transcript_start","provider":"amp","protocol":"amp.stream-json","version":"0.0.1760000000","scenario":"usage_limit","metadata":{"recordedBy":"hand-authored","minCliVersion":"","synthetic":true,"source":"Synthetic: an error `result` in Claude's shared stream-json shape with `api_error_status: 429` and `resetsAt` (epoch seconds). Amp's real limit payload has not been observed."}}
+{"type":"expect_outbound","label":"process_start","channel":"threads-new","frame":{"type":"process_start","program":"amp","args":["threads","new"],"env":{}}}
+{"type":"emit_inbound","label":"stdout","channel":"threads-new","frame":"T-7f3c2a10-5b1e-4c8d-9a2f-000000000001"}
+{"type":"runtime_exit","channel":"threads-new","status":"success"}
+{"type":"expect_outbound","label":"process_start","frame":{"type":"process_start","program":"amp","args":["threads","continue","T-7f3c2a10-5b1e-4c8d-9a2f-000000000001","--execute","--stream-json-thinking","--stream-json-input","--dangerously-allow-all"],"env":{}}}
+{"type":"expect_outbound","label":"user","frame":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[usage-limit] go"}]}}}
+{"type":"emit_inbound","label":"system/init","frame":{"type":"system","subtype":"init","session_id":"T-7f3c2a10-5b1e-4c8d-9a2f-000000000001","tools":["Bash","Read","edit_file","Grep"]}}
+{"type":"emit_inbound","label":"result","frame":{"type":"result","subtype":"error_during_execution","is_error":true,"error":"Usage limit reached for this billing window.","api_error_status":429,"resetsAt":1767240000,"session_id":"T-7f3c2a10-5b1e-4c8d-9a2f-000000000001"}}
+{"type":"runtime_exit","status":"success"}

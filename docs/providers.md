@@ -23,7 +23,7 @@ session that spans the whole conversation**:
 | OpenCode background service (HTTP + server-sent events), `DriverV2` | [driver/opencode/](../crates/waku-core/src/driver/opencode/mod.rs) | OpenCode |
 | Pi RPC mode (NDJSON request/response over stdio), `DriverV2` | [driver/pi/](../crates/waku-core/src/driver/pi/mod.rs) | Pi, Oh My Pi |
 | Claude streaming-input session (NDJSON over stdio) | [driver/claude/](../crates/waku-core/src/driver/claude/mod.rs) | Claude Code |
-| Amp streaming-JSON session (NDJSON over stdio) | [driver/amp.rs](../crates/waku-core/src/driver/amp.rs) | Amp |
+| Amp streaming-JSON session (NDJSON over stdio), `DriverV2` | [driver/amp/](../crates/waku-core/src/driver/amp/mod.rs) | Amp |
 | Harness client API (typed HTTP + WebSocket downlinks), `DriverV2` | [driver/deepseek/](../crates/waku-core/src/driver/deepseek/mod.rs) | DeepSeek Harness |
 
 DeepSeek Harness has no dedicated section below yet; its driver's module
@@ -177,7 +177,7 @@ stops a turn, and the short-lived server that backs a Grok fork.
 | Model discovery | yes | yes | yes | no (fixed) | no (modes) | yes | yes | yes | yes | yes |
 | Computer Use | yes | no (dropped by the `DriverV2` port, #50) | no (ships its own) | no | no | no | no | no (dropped by the `DriverV2` port, #49) | yes | no |
 | Restricted to Full access | no | no | no | no | yes | no | no | no | no | no |
-| Rewind and branch at a turn | yes | yes | yes | yes | yes | yes | **no** | yes | yes | **no** |
+| Rewind and branch at a turn | yes | yes | yes | yes | handoff (orchestrator, #51) | yes | **no** | yes | yes | **no** |
 
 Kimi Code's steering is the transport's, not a probed policy: the ACP driver
 sends the second `session/prompt` for every agent it drives, but Kimi's
@@ -501,39 +501,49 @@ fallback ([model_catalog.rs](../crates/waku-core/src/model_catalog.rs)).
 
 ## Amp
 
-**Launch** — `amp [threads continue <thread-id>] --execute --stream-json-thinking
---stream-json-input --dangerously-allow-all [--mode M] [--effort E] [--fast]`
-([driver/amp.rs](../crates/waku-core/src/driver/amp.rs)). `--stream-json-thinking` implies
-`--stream-json`, which `--stream-json-input` requires.
+The driver is on `DriverV2` (RFC 0002, #51):
+[driver/amp/](../crates/waku-core/src/driver/amp/mod.rs). It runs only behind
+the orchestrator (decision D6: no `V1Bridge`); until the desktop starts
+sessions through it, `start_local` refuses Amp with "not available until the
+orchestrator cut-over".
+
+**Threads** — `ensure_thread` runs `amp threads new` (a short-lived process on
+channel `threads-new`) and binds the `T-…` id it prints. The session process
+starts with the first turn:
+`amp threads continue <id> --execute --stream-json-thinking
+--stream-json-input --dangerously-allow-all [--mode M] [--effort E] [--fast]`.
+`--stream-json-thinking` implies `--stream-json`, which `--stream-json-input`
+requires. `resume_thread` does no I/O: the next turn continues the thread.
 
 **Protocol** — newline-delimited JSON in both directions. Amp keeps the process
 alive until *both* the assistant is done and stdin closes, which is what makes
-one process serve the conversation.
+one process serve the thread's turns. Turns are written as
+`{"type":"user","message":{"role":"user","content":[…]}}`, with every context
+block in the shared `WAKU_CONTEXT_V1` envelope.
 
-**Lifetime** — long-lived. Turns are written as
-`{"type":"user","message":{"role":"user","content":[…]}}`.
-
-**Turn completion is not a `result` message.** Amp emits none; the turn is over
-when an `assistant` message carries `stop_reason: "end_turn"`. A `tool_use` stop
+**Turn completion is not a `result` message.** The turn is over when an
+`assistant` message carries `stop_reason: "end_turn"`; a `tool_use` stop
 reason is mid-turn. This was found by probing — a driver waiting for `result`
-hangs forever.
+hangs forever. An error `result` fails the turn.
 
-**Inbound stream** — Anthropic-shaped: `system`/`init` carries the thread id;
-`assistant` blocks carry text, thinking and `tool_use`; `user` blocks carry
-`tool_result`. Redacted thinking is ignored rather than displayed. Text arrives
-as whole blocks — Amp has no partial-message deltas.
+**Inbound stream** — Anthropic-shaped: `system`/`init` names the thread;
+`assistant` frames are whole messages (text, thinking and `tool_use` blocks —
+no partial deltas); `user` frames carry `tool_result`. Redacted thinking is
+ignored, and a subagent's frames (`parent_tool_use_id` set) never reach the
+parent's transcript.
 
-**Access modes** — Build with Full access only; the driver refuses to start
-otherwise. Amp's "models" are agent modes, and the fast service tier is `--fast`.
-All three are launch arguments, so changing any of them restarts.
+**Access modes and approvals** — none on the stream: Amp's rules live in
+`amp permissions`, so the port declares `approvals` all false,
+`supported_modes = [full_access]` and client-boundary enforcement, and the
+orchestrator refuses the other modes. Amp's "models" are agent modes (the
+agent preset, else the model, becomes `--mode`); mode, effort and the fast
+tier are launch arguments, so changing any of them restarts the session.
 
-**Approvals** — none. Amp is the one long-lived provider that exposes no
-permission request on its stream; its rules live in `amp permissions`, so Waku
-still decides the posture at launch with `--dangerously-allow-all`.
-
-**Cancel** — no stream interrupt exists, so Stop ends the process. The thread
-survives on Amp's side and the next prompt resumes it with `threads continue`,
-which is why Amp's runtime is not retained after a cancel.
+**Interrupt** — no stream interrupt exists. `interrupt_turn` sends SIGINT
+through the transports (the one signal RFC 0002 allows; replay records it as
+an outbound `signal` frame) and retires the process. The turn ends
+`Interrupted` with a reusable thread, and the next turn starts a new process
+with `threads continue`.
 
 **Steer** — the user message with a documented top-level `"steer": true`
 attribute. A plain mid-turn message is held until the current turn's
@@ -543,12 +553,18 @@ it and one `end_turn` settles everything. Both behaviors probed against the
 real CLI — the plain-message probe is why an unmarked write must never be
 used as a steer.
 
-**Branch** — `amp threads export <id>` dumps the thread, Waku keeps the retained
-prefix, `amp threads new` creates an empty thread, and the retained history is
-replayed as a length-delimited envelope prepended to the first prompt
-(`WAKU_AMP_BRANCH_CONTEXT_V1`). Forking a thread that was itself seeded this way
-re-expands the nested envelope first, so branches of branches stay flat
-([amp_session.rs](../crates/waku-core/src/amp_session.rs)).
+**Branch and rewind** — not native (D-6). The orchestrator hands a fork's
+history to a new thread and rolls back with a fresh thread plus a summary;
+the driver's `fork` and `rollback` are `Unsupported`, and the daemon's Amp
+fork and rewind arms refuse. `amp_session.rs` keeps discovery and history
+import (it still expands branch prompts the v1 driver seeded with
+`WAKU_AMP_BRANCH_CONTEXT_V1`); `read_snapshot` is `amp threads export <id>`.
+
+**Gaps** — approvals, an interrupt that keeps the process, model discovery,
+the native title (it was polled from the `threads` index; titles come from
+the orchestrator's title port now), images. Capabilities are in
+[capabilities_amp.json](../crates/waku-core/fixtures/capabilities_amp.json);
+fixtures are `crates/waku-core/fixtures/replay/<scenario>/amp.ndjson`.
 
 ---
 
@@ -935,7 +951,10 @@ maps into each CLI's own vocabulary.
 | Full access | `never` / `danger-full-access` / `user` | `bypassPermissions` + `--dangerously-skip-permissions` | auto-answered | `session/set_mode` → `code` | auto-answered (`once`) | auto-answered | auto-answered |
 
 Amp accepts Full access only and always runs wide open
-(`--dangerously-allow-all`): its stream carries no permission request.
+(`--dangerously-allow-all`): its stream carries no permission request, so
+its `DriverV2` port declares `supported_modes = [full_access]` with
+client-boundary enforcement and the orchestrator refuses the other modes
+(#51).
 
 Every other provider distinguishes Supervised from the auto modes in a way the
 user can actually answer. Pi has no permission system of its own, so since #50
