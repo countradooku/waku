@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"[question] pick a color"},{"type":"wait","until":"request_pending"},{"type":"answer","request":"first_pending","answers":[{"questionId":"dialog-1","answers":["Blue"]}]},{"type":"wait","until":"turn_terminal"}]}

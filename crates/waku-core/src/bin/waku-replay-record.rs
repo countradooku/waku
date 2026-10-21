@@ -12,8 +12,9 @@
 //! `<fixtures>/<scenario>/<provider>.ndjson` sanitized, fails closed on any
 //! leaked secret, then replays the file and keeps it only if replay passes.
 //! Only drivers ported to `DriverV2` can record: the in-repo `fake` provider,
-//! `codex` (#46) and `claude` (#47, against the real CLI: `--binary`, default
-//! `claude` on the search path). `--script` plays a transcript's inbound
+//! `codex` (#46), `claude` (#47) and `pi` / `ohmypi` (#50), each against
+//! the real CLI (`--binary`, default `claude`, `pi` or `omp` on the search
+//! path). `--script` plays a transcript's inbound
 //! frames to the driver instead of the live CLI (Codex only; see
 //! `driver::codex::script`). The HTTP drivers `opencode` (#49) and `deepseek`
 //! (#52) record against a running service given by `--service-url`
@@ -33,6 +34,9 @@ use waku_core::driver::codex::{
 };
 use waku_core::driver::deepseek::{DEEPSEEK_PROTOCOL, DEEPSEEK_PROVIDER, DeepSeekDriver};
 use waku_core::driver::opencode::{OPENCODE_PROTOCOL, OPENCODE_PROVIDER, OpenCodeDriver};
+use waku_core::driver::pi::{
+    OHMYPI_PROVIDER, PI_PROTOCOL, PI_PROVIDER, PiDriver, PiFlavor, pi_replay_instance,
+};
 use waku_core::driver::v2::fake::{
     FAKE_PROTOCOL, FAKE_PROVIDER, FakeDriver, FakeProfile, fake_instance,
 };
@@ -190,6 +194,34 @@ fn main() -> ExitCode {
                 CLAUDE_PROTOCOL,
             )
         }
+        PI_PROVIDER | OHMYPI_PROVIDER => {
+            if args.script.is_some() {
+                eprintln!("waku-replay-record: --script is Codex only");
+                return ExitCode::from(2);
+            }
+            let flavor = if args.provider == PI_PROVIDER {
+                PiFlavor::Pi
+            } else {
+                PiFlavor::OhMyPi
+            };
+            // The same instance replay uses: the approval extension goes
+            // under the temp directory.
+            let mut instance = pi_replay_instance(flavor);
+            if let Some(binary) = &args.binary {
+                instance.binary = binary.clone();
+            }
+            instance.cli_version = args.cli_version.clone();
+            metadata.insert(
+                "minCliVersion".to_owned(),
+                Value::from(args.cli_version.clone().unwrap_or_default()),
+            );
+            (
+                Arc::new(PiDriver::new()),
+                instance,
+                Arc::new(ProcessTransportFactory),
+                PI_PROTOCOL,
+            )
+        }
         OPENCODE_PROVIDER | DEEPSEEK_PROVIDER => {
             let Some(service_url) = args.service_url.clone() else {
                 eprintln!(
@@ -232,7 +264,7 @@ fn main() -> ExitCode {
         }
         other => {
             eprintln!(
-                "waku-replay-record: {other} has no DriverV2 port yet; recording arrives with its port (#50-#51)"
+                "waku-replay-record: {other} has no DriverV2 port yet; recording arrives with its port (#51)"
             );
             return ExitCode::from(2);
         }
