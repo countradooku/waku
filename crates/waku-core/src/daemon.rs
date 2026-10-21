@@ -1951,7 +1951,14 @@ fn fork_provider_session(
             session_id,
             turn_count,
         } => (
-            crate::grok_session::fork_session_at_turn(&binary, &cwd, &session_id, turn_count)?,
+            ProviderResumeCursor::Grok {
+                session_id: crate::driver::grok_fork_session_at_turn(
+                    &binary,
+                    &cwd,
+                    &session_id,
+                    turn_count,
+                )?,
+            },
             HashMap::new(),
             None,
         ),

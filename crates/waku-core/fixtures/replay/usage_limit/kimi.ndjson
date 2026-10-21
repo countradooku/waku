@@ -1,0 +1,9 @@
+{"type":"transcript_start","provider":"kimi","protocol":"acp.stdio","version":"0.0.0","scenario":"usage_limit","metadata":{"recordedBy":"acp_fixtures.py","source":"T3 grok_prompt_error shape with Grok's rate_limit stop reason; generic: JSON-RPC error with http_status 429","synthetic":true,"ignore":["/params/clientInfo/version"]}}
+{"type":"expect_outbound","label":"process_start","frame":{"type":"process_start","program":"kimi","args":["acp"],"env":{}}}
+{"type":"expect_outbound","label":"initialize","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"waku","version":"0.0.0"}}}}
+{"type":"emit_inbound","label":"initialize","frame":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":false,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":false,"sse":false}},"authMethods":[]}}}
+{"type":"expect_outbound","label":"session/new","frame":{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"<workspace>","mcpServers":[]}}}
+{"type":"emit_inbound","label":"session/new","frame":{"jsonrpc":"2.0","id":2,"result":{"sessionId":"acp-session-1"}}}
+{"type":"expect_outbound","label":"session/prompt","frame":{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"acp-session-1","prompt":[{"type":"text","text":"[usage-limit] go"}]}}}
+{"type":"emit_inbound","label":"session/prompt","frame":{"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"Internal error","data":{"message":"You have reached your usage limit. Upgrade or wait for the limit to reset.","http_status":429,"resetAt":"2026-01-01T05:00:00Z"}}}}
+{"type":"runtime_exit","status":"success"}

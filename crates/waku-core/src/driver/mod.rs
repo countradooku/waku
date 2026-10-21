@@ -1,6 +1,6 @@
 //! Local provider runtime owned by `waku-daemon`.
 
-mod acp;
+pub mod acp;
 mod activity;
 mod amp;
 mod claude;
@@ -17,7 +17,7 @@ pub mod v2;
 /// One-shot title generation for the orchestrator's `TitlePort` (RFC 0001).
 pub(crate) use codex::generate_codex_title;
 
-pub(crate) use acp::catalog_agent;
+pub(crate) use acp::{catalog_agent, grok_fork_session_at_turn};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -231,7 +231,7 @@ pub(crate) fn start_local(
         // which is the only way their Supervised mode can actually ask the user
         // rather than silently forcing or denying.
         ProviderKind::Cursor | ProviderKind::Fx | ProviderKind::Grok | ProviderKind::Kimi => {
-            Arc::new(acp::AcpDriver::start(provider, options, events)?)
+            Arc::new(acp::start(provider, options, events)?)
         }
         ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),
         // OpenCode is not a per-workspace server: one adopted background

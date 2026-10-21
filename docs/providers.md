@@ -16,7 +16,7 @@ session that spans the whole conversation**:
 | Transport | File | Providers |
 | --- | --- | --- |
 | Codex app-server (JSON-RPC over stdio) | [driver/codex.rs](../crates/waku-core/src/driver/codex.rs) | Codex CLI |
-| Agent Client Protocol (JSON-RPC over stdio) | [driver/acp.rs](../crates/waku-core/src/driver/acp.rs) | Cursor CLI, Fx, Grok Build, Kimi Code |
+| Agent Client Protocol (JSON-RPC over stdio) | [driver/acp/](../crates/waku-core/src/driver/acp/mod.rs) | Cursor CLI, Fx, Grok Build, Kimi Code |
 | OpenCode background service (HTTP + server-sent events) | [driver/opencode.rs](../crates/waku-core/src/driver/opencode.rs) | OpenCode |
 | Pi RPC mode (NDJSON request/response over stdio) | [driver/pi.rs](../crates/waku-core/src/driver/pi.rs) | Pi, Oh My Pi |
 | Claude streaming-input session (NDJSON over stdio) | [driver/claude.rs](../crates/waku-core/src/driver/claude.rs) | Claude Code |
@@ -632,13 +632,23 @@ instruction entry; see [computer-use.md](computer-use.md).
 ## Agent Client Protocol
 
 **Launch** — `cursor-agent acp`, `fx acp`, `grok agent [--reasoning-effort E] stdio`, `kimi acp`
-([driver/acp.rs](../crates/waku-core/src/driver/acp.rs)).
+([driver/acp/](../crates/waku-core/src/driver/acp/mod.rs)).
 
 **Protocol** — newline-delimited JSON-RPC over stdio, bidirectional. One agent
 process serves the whole conversation, streams `session/update` notifications,
 and asks the client for tool permission with a real request it expects an answer
 to. Alongside Codex's app-server, this is the only transport where Waku's
 Supervised mode means what it says.
+
+**Driver** — one `DriverV2` for every flavor (#48), the flavor taken from the
+instance's provider; a spec-only ACP agent is the `acp` flavor. It speaks
+JSON-RPC itself, with request ids from 1 per process, so replay fixtures
+(`fixtures/replay/<scenario>/{acp,grok,cursor,kimi,fx}.ndjson`, sources in
+`fixtures/replay/ACP_FIXTURES.md`) match literally; the SDK still serves the
+session catalog. Capabilities are the RFC 0002 ACP column, with
+`threads.read_snapshot` negotiated from `initialize`'s `loadSession`
+(snapshots in `driver/acp/snapshots/`). Until the orchestrator cutover the
+desktop runs it behind `V1Bridge`.
 
 **Lifetime** — long-lived, like Codex and Pi. Cursor and Grok previously spawned
 a process per turn; Fx and Kimi Code arrived on this transport directly.
@@ -804,24 +814,27 @@ field — hence two probes
 **Cancel** — `session/cancel`, a notification; the open `session/prompt` reports
 the cancellation.
 
-**Steer** — a second `session/prompt` while one is open. The agent continues
-the same conversation under the newer request; the superseded request
-resolves early — Cursor answers it `cancelled` the moment the steer lands and
-re-plans with the message in context, Grok finishes the current work first
-and answers the message before settling — and only the last open prompt's
-response settles the merged turn. Both policies probed against the real
-agents; T3 Code runs the same last-prompt-settles bookkeeping for both. Kimi
-Code takes the same path by virtue of the transport, but its superseded-prompt
-policy has not been probed against a live turn.
+**Steer** — none (RFC 0002 D-7, #48). The v1 driver steered by sending a
+second `session/prompt` that superseded the open one; that is outside the ACP
+spec and was never probed for Kimi Code, so the `DriverV2` port removed it and
+declares `turns.active_steering = false`. The orchestrator steers by
+interrupt and restart: `session/cancel`, wait for the `cancelled` stop reason,
+then a new `session/prompt` as a `steering_restart` attempt. Behind the
+`V1Bridge` the desktop sees `supports_steer() == false`, so a follow-up waits
+in Waku's queue until the turn settles, as it always did for Fx.
 
-Fx allows only one active prompt per connection, so its driver does not
-advertise steering. Follow-ups remain in Waku's queue and start after the
-current prompt settles.
-
-**Rewind and branch** — unchanged and still out of band: Grok forks through its
-own ACP server plus on-disk truncation
-([grok_session.rs](../crates/waku-core/src/grok_session.rs)), Cursor re-seeds a
-fresh session ([cursor_session.rs](../crates/waku-core/src/cursor_session.rs)).
+**Rewind and branch** — Grok only, by replacement: the driver asks a
+short-lived second Grok process (replay channel `fork-1`) for
+`_x.ai/session/fork`, truncates the copy's `chat_history.jsonl` and
+`updates.jsonl` to the retained prompts, and returns the copy as a new provider
+thread (`RollbackOutcome { replaced: true }`); the next turn resumes it with
+`session/resume` ([driver/acp/grok.rs](../crates/waku-core/src/driver/acp/grok.rs)).
+The desktop's out-of-band fork and rewind still call the same code
+(`driver::grok_fork_session_at_turn`). Cursor declares no fork: the
+orchestrator's portable handoff replaces the driver's re-seeding (D-6); the
+v1 desktop's Cursor branch cursor still carries its retained history, which
+the driver now sends with the first prompt in the shared `WAKU_CONTEXT_V1`
+envelope.
 
 **Kimi Code and Fx have neither, deliberately.** Kimi advertises a `fork` session
 capability, but `session/fork` takes only `{sessionId, cwd}` and copies the
@@ -950,7 +963,7 @@ transcript uuid as a rewind checkpoint.
 2. Add a `ProviderResumeCursor` variant carrying whatever resume actually needs
    (an id is often not enough — see Pi's session file and Claude's message uuid).
 3. Pick a transport, and look hard before settling for the one-shot path. Ask
-   whether the CLI speaks ACP (`acp` / `agent stdio` — [driver/acp.rs](../crates/waku-core/src/driver/acp.rs)
+   whether the CLI speaks ACP (`acp` / `agent stdio` — [driver/acp/](../crates/waku-core/src/driver/acp/mod.rs)
    already covers it), serves an HTTP API, or has a persistent RPC mode; three
    providers were on `headless.rs` until someone checked. Only when none of those
    exist should you add a `parse_*` arm and an args builder to `headless.rs`.
