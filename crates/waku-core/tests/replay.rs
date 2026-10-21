@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+use waku_core::driver::codex::{CODEX_PROVIDER, CodexDriver, codex_capabilities, codex_instance};
 use waku_core::driver::v2::fake::{
     FAKE_PROVIDER, FakeDriver, FakeProfile, fake_capabilities, fake_instance,
 };
@@ -24,7 +25,7 @@ use waku_core::driver::v2::replay::{
     ReplayEntry, ReplayError, ReplayHarness, ReplayProfile, ReplayTranscript, ScenarioInput,
     ScenarioResult, read_transcript,
 };
-use waku_core::driver::v2::{AdapterEvent, DriverV2, TurnOutcome};
+use waku_core::driver::v2::{AdapterEvent, DriverV2, InstanceConfig, TurnOutcome};
 use waku_orchestrator::ThreadProjection;
 use waku_protocol::orchestration::*;
 
@@ -33,14 +34,21 @@ fn fixtures() -> PathBuf {
 }
 
 fn input(scenario: &str) -> ScenarioInput {
-    let text = std::fs::read_to_string(fixtures().join(scenario).join("input.json")).unwrap();
-    serde_json::from_str(&text).unwrap()
+    ScenarioInput::load(&fixtures().join(scenario), FAKE_PROVIDER).unwrap()
 }
 
 fn driver_for(provider: &str) -> Arc<dyn DriverV2> {
     match provider {
         FAKE_PROVIDER => Arc::new(FakeDriver),
+        CODEX_PROVIDER => Arc::new(CodexDriver::new()),
         other => panic!("no DriverV2 for {other} yet"),
+    }
+}
+
+fn instance_of(provider: &str) -> InstanceConfig {
+    match provider {
+        CODEX_PROVIDER => codex_instance(),
+        _ => fake_instance(FakeProfile::default()),
     }
 }
 
@@ -48,8 +56,9 @@ fn run_transcript(
     scenario: &str,
     transcript: ReplayTranscript,
 ) -> Result<ScenarioResult, ReplayError> {
-    let input = input(scenario);
-    let instance = instance_for(fake_instance(FakeProfile::default()), &input);
+    let provider = transcript.header.provider.clone();
+    let input = ScenarioInput::load(&fixtures().join(scenario), &provider)?;
+    let instance = instance_for(instance_of(&provider), &input);
     let protocol = transcript.header.protocol.clone();
     let mut harness = ReplayHarness::replay(
         driver_for(&transcript.header.provider),
@@ -62,8 +71,33 @@ fn run_transcript(
 }
 
 fn replay(scenario: &str) -> ScenarioResult {
-    let transcript = read_transcript(&fixtures().join(scenario).join("fake.ndjson")).unwrap();
+    replay_as(scenario, FAKE_PROVIDER)
+}
+
+fn replay_as(scenario: &str, provider: &str) -> ScenarioResult {
+    let transcript =
+        read_transcript(&fixtures().join(scenario).join(format!("{provider}.ndjson"))).unwrap();
     run_transcript(scenario, transcript).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Every `(scenario, provider)` fixture, sorted.
+fn all_fixtures() -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let scenario = entry.file_name().to_string_lossy().into_owned();
+        for file in std::fs::read_dir(entry.path()).unwrap() {
+            let name = file.unwrap().file_name().to_string_lossy().into_owned();
+            if let Some(provider) = name.strip_suffix(".ndjson") {
+                found.push((scenario.clone(), provider.to_owned()));
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 // -- helpers ---------------------------------------------------------------------
@@ -620,7 +654,7 @@ fn compaction_reaches_the_live_session() {
 
 #[test]
 fn every_fixture_has_assertions() {
-    let covered = [
+    let fake = [
         "simple",
         "multi_turn",
         "queued_turn",
@@ -641,27 +675,46 @@ fn every_fixture_has_assertions() {
         "model_switch",
         "compact",
     ];
+    let covered = |provider: &str| -> &[&str] {
+        match provider {
+            FAKE_PROVIDER => &fake,
+            CODEX_PROVIDER => &codex::COVERED,
+            other => panic!("{other} fixtures have no assertions"),
+        }
+    };
+    let recorded = all_fixtures();
+    for (scenario, provider) in &recorded {
+        assert!(
+            covered(provider).contains(&scenario.as_str()),
+            "{scenario}/{provider} has no assertions"
+        );
+    }
     for entry in std::fs::read_dir(fixtures()).unwrap() {
         let entry = entry.unwrap();
+        if !entry.path().is_dir() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
-        assert!(covered.contains(&name.as_str()), "{name} has no assertions");
         assert!(
-            entry.path().join("fake.ndjson").exists(),
+            recorded.iter().any(|(scenario, _)| scenario == &name),
             "{name} has no recorded fixture"
         );
+    }
+    for provider in [FAKE_PROVIDER, CODEX_PROVIDER] {
+        for scenario in covered(provider) {
+            assert!(
+                recorded.contains(&(scenario.to_string(), provider.to_owned())),
+                "{scenario}/{provider} is asserted but not recorded"
+            );
+        }
     }
 }
 
 #[test]
 fn replay_is_deterministic() {
-    let mut scenarios = std::fs::read_dir(fixtures())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    scenarios.sort();
-    for scenario in scenarios.iter().map(String::as_str) {
-        let first = replay(scenario);
-        let second = replay(scenario);
+    for (scenario, provider) in all_fixtures() {
+        let first = replay_as(&scenario, &provider);
+        let second = replay_as(&scenario, &provider);
         // Only the temporary workspace path differs between two runs.
         let normalize = |result: &ScenarioResult| -> Vec<String> {
             let workspace = result.workspace.display().to_string();
@@ -682,7 +735,7 @@ fn replay_is_deterministic() {
             .position(|(left, right)| left != right);
         assert!(
             differs.is_none() && first.len() == second.len(),
-            "{scenario}: event logs differ at {differs:?} ({} vs {} events):\n{:?}\n{:?}",
+            "{scenario}/{provider}: event logs differ at {differs:?} ({} vs {} events):\n{:?}\n{:?}",
             first.len(),
             second.len(),
             differs.map(|index| &first[index]),
@@ -785,4 +838,432 @@ fn the_recorder_reproduces_the_committed_fixture() {
     .unwrap();
     assert!(Path::new(&out).exists());
     assert_eq!(recorded.entries, committed.entries);
+}
+
+// -- Codex (#46) ---------------------------------------------------------------------
+
+/// The Codex app-server fixtures (`<scenario>/codex.ndjson`). Their
+/// sources are listed in `fixtures/replay/CODEX.md`.
+mod codex {
+    use super::*;
+
+    pub const COVERED: [&str; 16] = [
+        "simple",
+        "multi_turn",
+        "tool_call_read_only",
+        "tool_call_approval",
+        "plan_questions",
+        "todo_list",
+        "turn_interrupt",
+        "turn_interrupt_mid_tool",
+        "message_steering",
+        "provider_thread_resume",
+        "thread_rollback",
+        "thread_fork_native",
+        "subagent",
+        "usage_limit",
+        "runtime_exit_unexpected",
+        "background_work",
+    ];
+
+    fn replay(scenario: &str) -> ScenarioResult {
+        replay_as(scenario, CODEX_PROVIDER)
+    }
+
+    fn native_id(reference: Option<&ProviderRef>) -> Option<(&str, RefStrength)> {
+        reference.and_then(|reference| Some((reference.native_id.as_deref()?, reference.strength)))
+    }
+
+    #[test]
+    fn simple() {
+        let result = replay("simple");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["fixture simple ok"]
+        );
+        let turns = provider_turns(main);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].status, ProviderTurnStatus::Completed);
+        assert_eq!(
+            native_id(turns[0].native_turn_ref.as_ref()),
+            Some(("00000000-0000-4000-8000-000000000002", RefStrength::Strong))
+        );
+        // The context meter: the newest call's total and the window.
+        let usage = turns[0].token_usage.clone().expect("usage");
+        assert_eq!((usage.used, usage.max), (22737, Some(258400)));
+        let run = runs(main)[0];
+        let provider_thread = &main.provider_threads[&run.provider_thread_id.unwrap()];
+        assert_eq!(
+            native_id(provider_thread.native_thread_ref.as_ref()),
+            Some(("00000000-0000-4000-8000-000000000001", RefStrength::Strong))
+        );
+        let session = main.provider_sessions.values().next().unwrap();
+        assert_eq!(session.capabilities, codex_capabilities(&codex_instance()));
+        assert_eq!(session.status, SessionStatus::Stopped);
+        assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+    }
+
+    #[test]
+    fn multi_turn() {
+        let result = replay("multi_turn");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            [
+                "first fixture turn complete",
+                "second fixture turn complete"
+            ]
+        );
+        let turns = provider_turns(main);
+        assert_eq!(
+            turns.iter().map(|turn| turn.ordinal).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(main.provider_sessions.len(), 1);
+    }
+
+    #[test]
+    fn tool_call_read_only_streams_command_output() {
+        let result = replay("tool_call_read_only");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::CommandExecution { output: Some(output), exit_code: Some(0), .. }
+                if output.contains("stream line 4")
+        ) && item.status == ItemStatus::Completed));
+        let deltas = result
+            .adapter_events
+            .iter()
+            .filter(|event| matches!(event, AdapterEvent::CommandOutputDelta { .. }))
+            .count();
+        assert!(deltas >= 4, "{deltas} output deltas");
+        assert!(
+            main.nodes
+                .values()
+                .any(|node| node.kind == NodeKind::ToolCall && node.status == NodeStatus::Completed)
+        );
+        assert!(
+            assistant_texts(&result, main_id(&result))
+                .contains(&"command output fixture complete".to_owned())
+        );
+        // Rate-limit snapshots without windows show no meter.
+        assert!(
+            !result
+                .adapter_events
+                .iter()
+                .any(|event| matches!(event, AdapterEvent::AccountUsageUpdated { .. }))
+        );
+    }
+
+    #[test]
+    fn tool_call_approval_passes_native_decisions_through() {
+        let result = replay("tool_call_approval");
+        let main = &result.projection;
+        assert_eq!(main.thread.runtime_mode, RuntimeMode::Ask);
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let request = main.runtime_requests.values().next().unwrap();
+        assert_eq!(request.kind, RuntimeRequestKind::CommandApproval);
+        assert_eq!(request.status, RequestStatus::Resolved);
+        assert_eq!(
+            request.response,
+            Some(RuntimeResponse::Approval {
+                option_id: "accept".into()
+            })
+        );
+        assert_eq!(
+            request
+                .options
+                .iter()
+                .map(|option| (option.id.as_str(), option.allow))
+                .collect::<Vec<_>>(),
+            [
+                ("accept", true),
+                ("acceptWithExecpolicyAmendment", true),
+                ("cancel", false)
+            ]
+        );
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::ApprovalRequest { prompt: Some(prompt), .. } if prompt.contains(".codex-probe-write-action.txt")
+        )));
+    }
+
+    #[test]
+    fn plan_questions_answer_the_native_question() {
+        let result = replay("plan_questions");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let request = main.runtime_requests.values().next().unwrap();
+        assert_eq!(request.kind, RuntimeRequestKind::UserInput);
+        assert_eq!(request.status, RequestStatus::Resolved);
+        assert_eq!(request.questions[0].id, "schema_preference");
+        assert_eq!(request.questions[0].options.len(), 2);
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::UserInputRequest { answers: Some(answers), .. }
+                if answers[0].answers == ["Strict schemas (Recommended)"]
+        )));
+    }
+
+    #[test]
+    fn todo_list_maps_turn_plan_updates() {
+        let result = replay("todo_list");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let plan = main.plans.values().next().unwrap();
+        let PlanKind::TodoList { steps, .. } = &plan.kind else {
+            panic!("a todo list");
+        };
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Inspect package.json",
+                "Inspect tsconfig.json",
+                "Report completion"
+            ]
+        );
+        assert!(
+            steps
+                .iter()
+                .all(|step| step.status == PlanStepStatus::Completed)
+        );
+        assert_eq!(plan.status, PlanStatus::Completed);
+        let plan_updates = result
+            .adapter_events
+            .iter()
+            .filter(|event| matches!(event, AdapterEvent::PlanUpdated { .. }))
+            .count();
+        assert_eq!(plan_updates, 2);
+    }
+
+    #[test]
+    fn turn_interrupt_keeps_the_session() {
+        let result = replay("turn_interrupt");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Interrupted]);
+        assert_eq!(terminals(&result), [TurnOutcome::Interrupted]);
+        assert_eq!(
+            provider_turns(main)[0].status,
+            ProviderTurnStatus::Interrupted
+        );
+        let rows = items(&result, main_id(&result));
+        assert!(
+            rows.iter()
+                .any(|item| matches!(item.kind, TurnItemKind::RunInterruptResult { .. }))
+        );
+        // The session ended only at shutdown, not with the interrupt.
+        let session = main.provider_sessions.values().next().unwrap();
+        assert_ne!(session.detach_reason.as_deref(), Some("session lost"));
+    }
+
+    #[test]
+    fn turn_interrupt_mid_tool_closes_the_running_command() {
+        let result = replay("turn_interrupt_mid_tool");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Interrupted]);
+        assert_eq!(terminals(&result), [TurnOutcome::Interrupted]);
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(
+            |item| matches!(item.kind, TurnItemKind::CommandExecution { .. })
+                && item.status == ItemStatus::Interrupted
+        ));
+        assert!(
+            !main
+                .nodes
+                .values()
+                .any(|node| node.kind == NodeKind::ToolCall && node.status == NodeStatus::Running)
+        );
+    }
+
+    #[test]
+    fn message_steering_is_native() {
+        let result = replay("message_steering");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let run = runs(main)[0];
+        let attempts = main
+            .attempts
+            .values()
+            .filter(|attempt| attempt.run_id == run.id)
+            .count();
+        assert_eq!(attempts, 1, "native steering keeps one attempt");
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::UserMessage { input_intent: InputIntent::Steer, text, .. }
+                if text == "Actually, respond with exactly: steering fixture observed"
+        )));
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            [
+                "steering fixture initial response",
+                "steering fixture observed"
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_thread_resume_reopens_the_native_thread() {
+        let result = replay("provider_thread_resume");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+        assert_eq!(main.provider_sessions.len(), 2);
+        let all = runs(main);
+        assert_eq!(all[0].provider_thread_id, all[1].provider_thread_id);
+        let transcript =
+            read_transcript(&fixtures().join("provider_thread_resume/codex.ndjson")).unwrap();
+        assert!(transcript.entries.iter().any(|entry| matches!(
+            entry,
+            ReplayEntry::ExpectOutbound { frame, channel: Some(channel), .. }
+                if frame["method"] == "thread/resume" && channel == "main#2"
+        )));
+    }
+
+    #[test]
+    fn thread_rollback_reverts_in_place() {
+        let result = replay("thread_rollback");
+        let main = &result.projection;
+        assert_eq!(
+            statuses(main),
+            [
+                RunStatus::Completed,
+                RunStatus::RolledBack,
+                RunStatus::Completed
+            ]
+        );
+        let provider_threads = runs(main)
+            .iter()
+            .map(|run| run.provider_thread_id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(provider_threads.len(), 1, "reverted in place");
+        assert!(
+            result
+                .checkpoint_calls
+                .iter()
+                .any(|call| call.starts_with("restore refs/waku/t/"))
+        );
+        // `beforeTurnId` names the first dropped turn: the second one.
+        let transcript = read_transcript(&fixtures().join("thread_rollback/codex.ndjson")).unwrap();
+        let second_turn = provider_turns(main)
+            .iter()
+            .find(|turn| turn.ordinal == 2)
+            .and_then(|turn| turn.native_turn_ref.as_ref())
+            .and_then(|reference| reference.native_id.clone())
+            .unwrap();
+        assert!(transcript.entries.iter().any(|entry| matches!(
+            entry,
+            ReplayEntry::ExpectOutbound { frame, .. }
+                if frame["method"] == "thread/revert" && frame["params"]["beforeTurnId"] == second_turn.as_str()
+        )));
+    }
+
+    #[test]
+    fn thread_fork_native_runs_the_fork_in_its_own_session() {
+        let result = replay("thread_fork_native");
+        assert!(matches!(result.forks[..], [ForkResult::Native { .. }]));
+        let main = &result.projection;
+        let fork = &result.threads["fork-a"];
+        let source_thread = main.thread.active_provider_thread_id.unwrap();
+        let forked = &fork.provider_threads[&fork.thread.active_provider_thread_id.unwrap()];
+        let from = forked.forked_from.as_ref().unwrap();
+        assert_eq!(from.provider_thread_id, source_thread);
+        assert!(from.provider_turn_id.is_some());
+        assert_eq!(statuses(fork), [RunStatus::Completed, RunStatus::Completed]);
+        assert_eq!(
+            assistant_texts(&result, fork.thread.id),
+            ["fork marker stored", "source-marker-7Q9V|fork-marker-2K4M"]
+        );
+    }
+
+    #[test]
+    fn subagent_turns_do_not_close_the_parent() {
+        let result = replay("subagent");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let subagent = main.subagents.values().next().unwrap();
+        assert_eq!(subagent.status, SubagentStatus::Completed);
+        assert_eq!(subagent.result.as_deref(), Some("Hello."));
+        assert_eq!(subagent.title.as_deref(), Some("/root/say_hello"));
+        let child_thread = main
+            .provider_threads
+            .values()
+            .find(|thread| thread.owner_node_id == Some(subagent.id))
+            .expect("the subagent's provider thread");
+        assert!(child_thread.native_thread_ref.is_some());
+        let child_turn = main
+            .provider_turns
+            .values()
+            .find(|turn| turn.provider_thread_id == child_thread.id)
+            .unwrap();
+        assert_eq!(child_turn.status, ProviderTurnStatus::Completed);
+        assert_eq!(
+            terminals(&result),
+            [TurnOutcome::Completed, TurnOutcome::Completed]
+        );
+        assert_eq!(assistant_texts(&result, main_id(&result)), ["Hello."]);
+    }
+
+    #[test]
+    fn usage_limit_takes_the_reset_time_from_the_rate_limits() {
+        let result = replay("usage_limit");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Failed]);
+        let failure = runs(main)[0].failure.clone().unwrap();
+        assert_eq!(failure.class, FailureClass::UsageLimit);
+        assert_eq!(failure.code.as_deref(), Some("usageLimitExceeded"));
+        assert_eq!(failure.reset_at, Some(2_000_100_000_000));
+        let recovery = main.thread.limit_recovery.clone().unwrap();
+        assert_eq!(recovery.reset_at, Some(2_000_100_000_000));
+        // The account meters reached the instance.
+        let usage = result
+            .adapter_events
+            .iter()
+            .find_map(|event| match event {
+                AdapterEvent::AccountUsageUpdated { usage } => Some(usage.clone()),
+                _ => None,
+            })
+            .expect("account usage");
+        assert_eq!(usage.windows[0].percent, 100.0);
+        assert_eq!(usage.windows[0].resets_at, Some(2_000_100_000));
+    }
+
+    #[test]
+    fn runtime_exit_unexpected_fails_the_turn_once() {
+        let result = replay("runtime_exit_unexpected");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Failed]);
+        let failure = runs(main)[0].failure.clone().unwrap();
+        assert_eq!(failure.class, FailureClass::TransportError);
+        assert_eq!(terminals(&result).len(), 1);
+    }
+
+    #[test]
+    fn background_work_outlives_the_turn() {
+        let result = replay("background_work");
+        assert_eq!(statuses(&result.projection), [RunStatus::Completed]);
+        let work = result
+            .adapter_events
+            .iter()
+            .filter_map(|event| match event {
+                AdapterEvent::BackgroundWorkUpdated { work } => {
+                    Some((work.task.task_id.clone(), work.live))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            work,
+            [("26567".to_owned(), true), ("26567".to_owned(), false)]
+        );
+    }
 }

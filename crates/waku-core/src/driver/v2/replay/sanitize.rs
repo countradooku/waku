@@ -207,7 +207,9 @@ impl<'a> Pass<'a> {
 
     fn value(&mut self, value: &Value, key: Option<&str>) -> Value {
         if let Some(key) = key {
-            if self.secret_key.is_match(key) && !value.is_object() && !value.is_array() {
+            // Only strings can hold a secret; a number under a matching key
+            // is a count (`totalTokens`), kept so usage survives.
+            if self.secret_key.is_match(key) && value.is_string() {
                 return Value::String(REDACTED.to_owned());
             }
             if self
@@ -367,6 +369,7 @@ mod tests {
             "ids": ["0F0E0D0C-0000-1111-2222-333344445555", "0f0e0d0c-0000-1111-2222-333344445555",
                     "aaaaaaaa-0000-1111-2222-333344445555"],
             "installationId": "abc",
+            "usage": {"totalTokens": 22737},
             "env": "opensesame-123",
         }));
         assert_eq!(frame["cwd"], "<workspace>/src");
@@ -382,6 +385,7 @@ mod tests {
         assert_eq!(frame["ids"][1], "00000000-0000-4000-8000-000000000001");
         assert_eq!(frame["ids"][2], "00000000-0000-4000-8000-000000000002");
         assert_eq!(frame["installationId"], INSTALLATION_ID);
+        assert_eq!(frame["usage"]["totalTokens"], 22737);
         assert_eq!(frame["env"], REDACTED);
     }
 

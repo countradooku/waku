@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"Do not answer immediately. First run the local shell command `sleep 30`, then respond with exactly: interrupt fixture should not finish naturally."},{"type":"wait","until":"running"},{"type":"interrupt"},{"type":"wait","until":"turn_terminal"}]}

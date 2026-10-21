@@ -46,7 +46,28 @@ pub struct ScenarioInput {
     /// Merged into the instance's `extra` (driver profile switches).
     #[serde(default)]
     pub instance: Option<serde_json::Value>,
+    /// The main thread's runtime mode (full access when absent).
+    #[serde(default)]
+    pub runtime_mode: Option<RuntimeMode>,
     pub steps: Vec<ScenarioStep>,
+}
+
+impl ScenarioInput {
+    /// `<dir>/input.<provider>.json` when a provider needs its own steps
+    /// (native option ids, prompts its recording used), else the shared
+    /// `<dir>/input.json`.
+    pub fn load(dir: &std::path::Path, provider: &str) -> Result<Self, ReplayError> {
+        let own = dir.join(format!("input.{provider}.json"));
+        let path = if own.exists() {
+            own
+        } else {
+            dir.join("input.json")
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| ReplayError::Io(format!("{}: {error}", path.display())))?;
+        serde_json::from_str(&text)
+            .map_err(|error| ReplayError::Harness(format!("{}: {error}", path.display())))
+    }
 }
 
 /// A model-selection change.
@@ -687,6 +708,13 @@ impl ReplayHarness {
     pub fn run(&mut self, input: &ScenarioInput) -> Result<ScenarioResult, ReplayError> {
         let mut forks = Vec::new();
         self.settle()?;
+        if let Some(runtime_mode) = input.runtime_mode {
+            let thread_id = self.thread(&None)?;
+            self.dispatch(Command::ThreadSetRuntimeMode {
+                thread_id,
+                runtime_mode,
+            })?;
+        }
         for step in &input.steps {
             self.step(step, &mut forks)?;
         }

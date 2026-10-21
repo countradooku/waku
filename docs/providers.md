@@ -15,7 +15,7 @@ session that spans the whole conversation**:
 
 | Transport | File | Providers |
 | --- | --- | --- |
-| Codex app-server (JSON-RPC over stdio) | [driver/codex.rs](../crates/waku-core/src/driver/codex.rs) | Codex CLI |
+| Codex app-server (JSON-RPC over stdio) | [driver/codex/](../crates/waku-core/src/driver/codex/) | Codex CLI |
 | Agent Client Protocol (JSON-RPC over stdio) | [driver/acp.rs](../crates/waku-core/src/driver/acp.rs) | Cursor CLI, Fx, Grok Build, Kimi Code |
 | OpenCode background service (HTTP + server-sent events) | [driver/opencode.rs](../crates/waku-core/src/driver/opencode.rs) | OpenCode |
 | Pi RPC mode (NDJSON request/response over stdio) | [driver/pi.rs](../crates/waku-core/src/driver/pi.rs) | Pi, Oh My Pi |
@@ -85,7 +85,9 @@ A runtime — and with it that session's provider process — is dropped when:
 Stop drops the runtime for Codex, whose app-server owns the Computer Use process
 tree, and for Amp, which offers no interrupt on its stream — for both, stopping
 means ending the process, and the next prompt resumes the native thread
-(`thread/resume`, `threads continue`). Every other provider has a protocol
+(`thread/resume`, `threads continue`). (The ported Codex driver itself keeps
+its session after `turn/interrupt`; the desktop's policy changes with the
+orchestrator cutover.) Every other provider has a protocol
 interrupt and keeps its runtime (`retain_runtime_after_cancel`).
 
 Option changes go through `DriverControl::apply_options`, which returns whether
@@ -182,82 +184,92 @@ turned out to already serve a session protocol; nobody had looked.
 
 ## Codex CLI
 
-**Launch** — `codex app-server --stdio`
-([driver/codex.rs:164](../crates/waku-core/src/driver/codex.rs#L164)), plus `-c` config
-overrides when Computer Use is on.
+The Codex driver is the first `DriverV2` port (RFC 0002, #46):
+[driver/codex/](../crates/waku-core/src/driver/codex/). The desktop still talks
+to it through `DriverControl`: `start_local` opens the session behind
+`V1Bridge` ([driver/codex/legacy.rs](../crates/waku-core/src/driver/codex/legacy.rs)).
+
+**Launch** — `codex app-server --stdio` through `ctx.transports`, plus `-c`
+config overrides (and two environment variables) when Computer Use is on, and
+`CODEX_HOME` when the instance names a provider home.
 
 **Protocol** — newline-delimited JSON-RPC over stdio, genuinely bidirectional:
-Codex can send Waku requests (approvals) and Waku answers them by id. Three
-threads: writer (owns stdin and the command queue), reader (parses stdout),
-stderr collector; a fourth waits on the process and emits `ProcessExited`.
+Codex sends Waku requests (approvals, questions) and Waku answers them by id.
+One actor per session on the driver runtime: a single stdin writer with a
+per-process id counter starting at 1, a read loop that applies every frame in
+order ([normalize.rs](../crates/waku-core/src/driver/codex/normalize.rs)), and
+a stderr reader that feeds the raw log.
 
-**Lifetime** — long-lived: one app-server serves the whole session, staying
-resident and idle between turns. It ends when the runtime is dropped — pressing
-Stop, changing a launch option, deleting the session, or quitting — by closing
-its stdin, never by a signal. See
-[Runtime lifetime in the app](#runtime-lifetime-in-the-app).
+**Lifetime** — long-lived: one app-server serves the session, idle between
+turns. It ends when the session closes, by closing stdin, never by a signal.
+The driver's interrupt keeps the app-server and the loaded thread; the desktop
+still drops the runtime on Stop (see above).
 
-**Handshake**
+**Handshake** — `initialize` (id 1) with `clientInfo` and
+`capabilities.experimentalApi`, `initialized`, then `skills/extraRoots/set`
+when Computer Use is on. The thread opens with `thread/start` (`cwd`,
+`approvalPolicy`, `sandbox`, `approvalsReviewer`, `serviceName`, optional
+`model` / `serviceTier`) or `thread/resume` (`threadId`, `excludeTurns: true`).
+A resume that meets a thread still loaded by another app-server (a fresh fork)
+retries briefly.
 
-1. `initialize` (id `0`) with `clientInfo` and `capabilities.experimentalApi`.
-2. `initialized`.
-3. `skills/extraRoots/set` when Computer Use is on, so Waku's bundled skill is
-   discovered like Codex's own skills rather than injected as instructions.
-4. `thread/start` or `thread/resume` (id `1`) with `cwd`, `approvalPolicy`,
-   `sandbox`, `approvalsReviewer`, and optional `model` / `serviceTier`.
+**Per turn** — `turn/start` with `threadId`, `input: [{type: "text"}]`,
+`approvalPolicy`, `approvalsReviewer`, `sandboxPolicy`, `summary: "auto"` and
+optional `model`, `effort`, `serviceTier`. Developer context goes in
+`collaborationMode.settings.developer_instructions` when a model is selected;
+synthetic context in the `WAKU_CONTEXT_V1` envelope.
 
-The reply to id `1` carries `result.thread.id` (→ `Connected` with a
-`ProviderResumeCursor::Codex`) and `result.thread.turns[]`, whose ids are
-retained because `thread/fork` needs a `lastTurnId`.
-
-**Per turn** — `turn/start` with `threadId`, `input: [{type: "text", …}]`,
-`approvalPolicy`, `approvalsReviewer`, `sandboxPolicy`, and optional `model`,
-`effort`, `serviceTier`.
-
-**Inbound stream** ([driver/codex.rs:851](../crates/waku-core/src/driver/codex.rs#L882)):
+**Inbound stream** — normalized to `AdapterEvent`s:
 
 | Method | Becomes |
 | --- | --- |
-| `turn/started` | `TurnStarted` (records the turn id) |
-| `item/agentMessage/delta` | `TextDelta` |
-| `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta` | `ReasoningDelta` |
-| `item/started`, `item/completed` | `RichActivity` (command, patch, web search, plan, MCP tool) |
-| `turn/completed` | `TurnFinished { success: status == "completed" }` |
-| `error`, `mcpServer/startupStatus/updated` (failed) | `Error` |
-| `*requestApproval*` (a request, has an `id`) | `Permission` |
+| `turn/started` / `turn/completed` | `ProviderTurnUpdated`; the completion is the turn's one `TurnTerminal` |
+| `item/agentMessage/delta`, `item/reasoning/*Delta` | coalesced `MessageUpdated` / `TurnItemUpdated` snapshots |
+| `item/started`, `item/completed` | turn items: command, file change, MCP / dynamic tool, web search, image view |
+| `item/commandExecution/outputDelta` | `CommandOutputDelta` |
+| `turn/plan/updated` | `PlanUpdated` (todo list) |
+| `subAgentActivity`, `collabAgentToolCall` items; child-thread turns | `SubagentUpdated`, the child's provider thread and turns |
+| `thread/tokenUsage/updated` | the turn's token usage (context meter) |
+| `account/rateLimits/updated` | `AccountUsageUpdated`, and the reset time of a usage limit |
+| `thread/goal/updated` / `cleared` | `GoalUpdated` |
+| `*/requestApproval`, `item/tool/requestUserInput` | `RuntimeRequestUpdated` |
+| `error` (no retry) | the failure class of the turn's terminal |
 
-**Approvals** — Codex is the only provider with a real approval channel. The
-request becomes a `Permission` event with `accept` / `acceptForSession` /
-`decline`, and the answer is written back as a JSON-RPC *response*:
-`{"id": <original>, "result": {"decision": …}}`. Because JSON-RPC ids are
-per-peer, the reader only treats method-less messages as replies to Waku's own
-requests ([driver/codex.rs:779](../crates/waku-core/src/driver/codex.rs#L809)).
+**Approvals** — the request's own `availableDecisions` are the option ids
+(`accept`, `acceptForSession`, `acceptWithExecpolicyAmendment`, `decline`,
+`cancel`), passed through unchanged; the answer is a JSON-RPC response
+`{"decision": …}` (a permission grant for `item/permissions/requestApproval`).
+MCP elicitations are declined automatically (a declared gap).
 
-**Cancel** — `turn/interrupt {threadId, turnId}`.
+**Steer** — `turn/steer {threadId, expectedTurnId, input}`; an error response
+is `SteerRejected`. **Stop** — `turn/interrupt {threadId, turnId}`, sent as
+soon as Codex names the turn when Stop came first.
 
-**Steer** — `turn/steer {threadId, expectedTurnId, input}`. The RPC response
-resolves the pending steer to `SteerAccepted`, or to `SteerRejected` with the
-CLI's reason when the expected turn no longer matches — the server-side check
-that makes Codex the one provider whose steer cannot race a settling turn.
+**Rollback** — `thread/turns/list` (newest first) finds the first turn to
+drop, then `thread/revert {threadId, beforeTurnId}`, in place. `/goal`
+continuations Codex started itself are dropped with the turns around them.
+**Fork** — `thread/fork {threadId, lastTurnId?, cwd, excludeTurns,
+deferGoalContinuation}` on the live connection, then `thread/unsubscribe` so the
+fork's own session can load it. **Snapshot** — `thread/read`.
 
-**Rewind** — `thread/rollback {threadId, numTurns}`, in place; the cursor is
-unchanged. **Branch** — `thread/fork {threadId, lastTurnId}` returns a new
-thread id. Both are synchronous from the UI's perspective: the command carries a
-response channel and blocks up to 15 s.
+**Background terminals** — a command still running when its turn completes is
+background work until its `item/completed`; `thread/backgroundTerminals/list`
+and `/terminate` back the panel's refresh and stop.
 
-**Citations** — Codex marks web citations with private-use characters
-(`U+E200`/`U+E201`/`U+E202`). They are buffered across deltas and rewritten into
-markdown links against the `webSearch` results captured earlier in the turn;
-unknown markers are dropped. Private control markers never reach the transcript
-([driver/codex.rs:660](../crates/waku-core/src/driver/codex.rs#L690)).
+**Citations** — web citations marked with private-use characters
+(`U+E200`/`U+E201`/`U+E202`) are rewritten into markdown links; unknown markers
+are dropped. Private control markers never reach the transcript.
+
+**Titles** — a one-shot ephemeral turn on a short-lived app-server
+([title.rs](../crates/waku-core/src/driver/codex/title.rs)), used by the
+orchestrator's `TitlePort` and, behind the bridge, for the first prompt.
 
 **Models** — a throwaway app-server, `model/list` paged via `nextCursor`, up to
 32 pages ([model_catalog.rs:367](../crates/waku-core/src/model_catalog.rs#L367)).
 
-**Computer Use** — `-c mcp_servers.waku_js_repl.command=…` registers Waku's
-QuickJS MCP server, with several `-c` flags disabling Codex's own external
-computer-use plugin/MCP/skill so only Waku's `js` / `js_reset` surface is
-visible.
+**Replay** — every RFC 0002 scenario Codex needs is under
+`crates/waku-core/fixtures/replay/<scenario>/codex.ndjson`; their sources are in
+[fixtures/replay/CODEX.md](../crates/waku-core/fixtures/replay/CODEX.md).
 
 ---
 

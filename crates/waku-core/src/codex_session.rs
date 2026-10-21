@@ -136,39 +136,6 @@ fn app_server_request_in(binary: &Path, cwd: &Path, request: Value) -> anyhow::R
     Ok(response)
 }
 
-/// Create the fork outside the source session's resident app-server. Returning
-/// only after this process exits makes the cursor immediately resumable.
-pub(crate) fn fork_session_at_turn(
-    binary: &Path,
-    cwd: &Path,
-    thread_id: &str,
-    last_turn_id: &str,
-) -> anyhow::Result<ProviderResumeCursor> {
-    let response = app_server_request_in(
-        binary,
-        cwd,
-        json!({
-            "method": "thread/fork",
-            "id": 1,
-            "params": {
-                "threadId": thread_id,
-                "lastTurnId": last_turn_id,
-                "cwd": cwd,
-                "excludeTurns": true,
-                "deferGoalContinuation": true
-            }
-        }),
-    )?;
-    let thread_id = response
-        .pointer("/result/thread/id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| anyhow!("Codex returned no forked thread ID."))?;
-    Ok(ProviderResumeCursor::Codex {
-        thread_id: thread_id.to_owned(),
-    })
-}
-
 fn title_from_prompt(prompt: &str) -> Option<String> {
     let mut title = prompt
         .split_whitespace()
