@@ -187,6 +187,7 @@ fn every_kind() -> Vec<TurnItemKind> {
         },
         TurnItemKind::SystemNotice {
             message: "notice".into(),
+            lifecycle: Some(LifecycleNotice::RestartResumed),
         },
         TurnItemKind::Error {
             failure: failure(),
@@ -266,6 +267,7 @@ fn every_turn_item_kind_round_trips_with_its_tag() {
 fn unknown_turn_item_kind_is_a_skippable_row() {
     let known = serde_json::to_value(base_item(TurnItemKind::SystemNotice {
         message: "ok".into(),
+        lifecycle: None,
     }))
     .unwrap();
     let mut unknown = known.clone();

@@ -138,6 +138,10 @@ pub trait TransportFactory: Send + Sync {
     async fn interrupt(&self, _channel: &str, pid: Option<u32>) -> io::Result<()> {
         send_interrupt(pid)
     }
+    /// Kills every process this factory spawned, as a daemon crash would
+    /// (replay's `restart_daemon` step, #59). Real processes are not tracked
+    /// here, so the default does nothing.
+    fn kill_all(&self) {}
 }
 
 /// SIGINT to `pid`.

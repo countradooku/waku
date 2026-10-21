@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"Respond with exactly: provider thread resume fixture first turn complete"},{"type":"wait","until":"running"},{"type":"restart_daemon"}]}

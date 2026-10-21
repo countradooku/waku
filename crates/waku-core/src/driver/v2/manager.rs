@@ -953,15 +953,47 @@ impl ProviderSessionManager {
                 }
                 Ok(())
             }
-            Effect::ProviderRuntimeContinue { .. } => Err(EffectError::Permanent(
-                "provider_runtime.continue arrives with recovery (#59)".to_owned(),
-            )),
+            Effect::ProviderRuntimeContinue { source_run_id, .. } => {
+                self.continue_after_restart(thread_id, *source_run_id)
+            }
             // Delegated tasks are Phase 3; there is nothing to stop yet.
             Effect::DelegatedTasksStop { .. } => Ok(()),
             other => Err(EffectError::Permanent(format!(
                 "{} is not a provider effect",
                 other.effect_type().as_str()
             ))),
+        }
+    }
+
+    /// `provider_runtime.continue` (#59): dispatches the `ContinueRun` the
+    /// recovery asked for, with its stable command id. Its run's
+    /// `provider_turn.start` then resumes the provider thread natively
+    /// (`bind_thread`), so the conversation continues where it stopped. A
+    /// rejection (the thread moved on, or the run was already continued)
+    /// settles the effect.
+    fn continue_after_restart(
+        &self,
+        thread_id: ThreadId,
+        source_run_id: RunId,
+    ) -> Result<(), EffectError> {
+        let projection = self
+            .deps
+            .orchestrator
+            .thread(thread_id)
+            .map_err(retryable)?;
+        let Some(source) = projection.runs.get(&source_run_id) else {
+            return Ok(());
+        };
+        let (command_id, command) =
+            waku_orchestrator::recovery::continuation_command(thread_id, source);
+        match self
+            .deps
+            .orchestrator
+            .dispatch_internal(command_id, command)
+        {
+            Ok(_) | Err(DispatchError::Rejected(_)) => Ok(()),
+            Err(DispatchError::ShuttingDown) => Err(EffectError::Cancelled),
+            Err(DispatchError::Storage(error)) => Err(EffectError::Retryable(error)),
         }
     }
 
@@ -1110,7 +1142,15 @@ impl ProviderSessionManager {
                 run: run_ref,
                 run_ordinal: run.ordinal.unwrap_or_default(),
                 provider_turn_ordinal,
-                restart_continuation_of: continuation_of,
+                // A steering restart continues its own run; a restart
+                // continuation (#59) names the run the daemon restart
+                // interrupted.
+                restart_continuation_of: continuation_of.or_else(|| {
+                    run.continuation
+                        .as_ref()
+                        .filter(|continuation| continuation.kind == ContinuationKind::Restart)
+                        .map(|continuation| continuation.of_run_id)
+                }),
                 thread: thread_ref.clone(),
                 message: TurnMessage {
                     message_id: message.id,

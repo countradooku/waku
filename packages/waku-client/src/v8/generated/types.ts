@@ -1419,6 +1419,8 @@ export type ItemsAround = {
  */
 export type JsonText = string;
 
+export type LifecycleNotice = "restart_interrupted" | "restart_resumed" | (string & {});
+
 export type LimitRecovery = {
   autoResume?: boolean;
   resetAt?: number;
@@ -2134,6 +2136,11 @@ export type SessionStatus = "starting" | "ready" | "running" | "waiting" | "stop
 export type Settings = {
   computerUseAllowedApps?: Array<AppGrant>;
   computerUseEnabled?: boolean;
+  /**
+   * Continue threads whose turn a daemon restart interrupted (#59). On
+   * by default.
+   */
+  continueThreadsAfterRestart?: boolean;
   /** Provider instance ids that are switched off. */
   disabledProviders?: Array<string>;
   /** Binary path per provider instance id. */
@@ -2162,6 +2169,8 @@ export type SettingsItem = {
 export type SettingsPatch = {
   computerUseAllowedApps?: Array<AppGrant>;
   computerUseEnabled?: boolean;
+  /** Continue threads whose turn a daemon restart interrupted (#59). */
+  continueThreadsAfterRestart?: boolean;
   disabledProviders?: Array<string>;
   /** The whole map: binary path per provider instance id. */
   providerBinaryOverrides?: { [key: string]: string };
@@ -2980,6 +2989,8 @@ export type TurnItemKind = ({
   message: string;
 } | {
   type: "system_notice";
+  /** Set on lifecycle rows (restart recovery, #59). */
+  lifecycle?: LifecycleNotice;
   message: string;
 } | {
   type: "error";

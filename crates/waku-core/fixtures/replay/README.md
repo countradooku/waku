@@ -23,6 +23,13 @@ every file it finds.
   prompts that differ from a shared `input.json` written by another port are
   in `input.opencode.json` / `input.deepseek.json`.
 
+`daemon_restart` (#59) has a `{"type": "daemon_restart"}` entry where the
+harness's `restart_daemon` step kills the daemon: every process still running
+dies with it (no `runtime_exit` is recorded for it), a new orchestrator,
+session manager and worker pool open the same `state.sqlite`, reconcile the
+outbox and recover, and the transcript continues with the restarted daemon's
+`main#2` resuming the native thread with "Continue where you left off.".
+
 `tests/replay.rs` replays every transcript except the ACP family's (fake,
 Codex, Claude, OpenCode, DeepSeek, Pi, Oh My Pi, Amp) through the real orchestrator and session
 manager, and `replay_is_deterministic` replays each one twice; the ACP
@@ -49,6 +56,7 @@ Codex's sources are in `CODEX.md`.
 | `background_work` | 2.1.258 shapes quoted by the v1 driver's tests: a backgrounded Bash task joins `background_tasks_changed` before `task_started`, the reply parks the turn; the settle arrives during the next turn (the prompt-less wake is unit-tested: in replay it would race the first turn's finalization). |
 | `subagent` | 2.1.226 `task_*` shapes quoted by the v1 driver's tests: an `Agent` tool call, `task_started` (`local_agent`), the subagent's own frames (`parent_tool_use_id` set), `task_progress`, `task_notification` with the report. |
 | `model_switch` | `set_model` control request on the live process (verified against 2.1.228 by the v1 driver). |
+| `daemon_restart` | `provider_thread_resume` cut after the first answer delta: the daemon (and the process) is killed, and the restarted daemon's process resumes the conversation with `--resume` for the restart continuation. |
 
 ## `opencode` (OpenCode 2, `opencode.http-sse`, #49)
 

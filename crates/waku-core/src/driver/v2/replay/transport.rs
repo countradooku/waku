@@ -66,6 +66,9 @@ struct Channel {
     streams: HashMap<String, mpsc::UnboundedSender<Value>>,
     /// `stream.event` data for a path whose downlink is not open (yet).
     buffered: HashMap<String, Vec<Value>>,
+    /// Killed by a daemon restart: a dead process reads nothing, so what the
+    /// old driver still writes is dropped.
+    killed: bool,
 }
 
 impl Channel {
@@ -77,6 +80,7 @@ impl Channel {
             responses: None,
             streams: HashMap::new(),
             buffered: HashMap::new(),
+            killed: false,
         }
     }
 
@@ -88,6 +92,7 @@ impl Channel {
             responses: Some(responses),
             streams: HashMap::new(),
             buffered: HashMap::new(),
+            killed: false,
         }
     }
 
@@ -254,7 +259,9 @@ impl ReplayTransportFactory {
                 return;
             };
             match entry {
-                ReplayEntry::ExpectOutbound { .. } => return,
+                // Both wait: for the driver's frame, or for the harness's
+                // `restart_daemon` step.
+                ReplayEntry::ExpectOutbound { .. } | ReplayEntry::DaemonRestart => return,
                 ReplayEntry::EmitInbound {
                     channel,
                     frame,
@@ -323,10 +330,57 @@ impl ReplayTransportFactory {
         state.progress += 1;
     }
 
+    /// The harness's `restart_daemon` step: the transcript must be at a
+    /// `daemon_restart` entry. Every live process is killed (its output
+    /// ends, it exits with SIGKILL) and the cursor moves past the entry.
+    pub fn restart_daemon(&self) -> Result<(), ReplayError> {
+        let mut state = self.state.lock();
+        if let Some(error) = &state.error {
+            return Err(error.clone());
+        }
+        self.advance(&mut state);
+        let cursor = state.cursor;
+        match state.transcript.entries.get(cursor) {
+            Some(ReplayEntry::DaemonRestart) => {}
+            other => {
+                let at = other.map_or_else(|| "the end".to_owned(), ReplayEntry::describe);
+                let line = state.transcript.lines.get(cursor).copied().unwrap_or(0);
+                return Err(ReplayError::Harness(format!(
+                    "restart_daemon, but the transcript is at line {line}: {at}"
+                )));
+            }
+        }
+        for channel in state.channels.values_mut() {
+            if channel.killed {
+                continue;
+            }
+            channel.killed = true;
+            channel.end();
+            if let Some(exit) = channel.exit.take() {
+                let _ = exit.send(ProcessExit {
+                    success: false,
+                    code: None,
+                    signal: Some(9),
+                });
+            }
+        }
+        state.cursor += 1;
+        state.progress += 1;
+        self.advance(&mut state);
+        Ok(())
+    }
+
     /// Checks one outbound frame against the cursor.
     fn outbound(&self, channel: &str, frame: Value) {
         let mut state = self.state.lock();
         if state.error.is_some() {
+            return;
+        }
+        if state
+            .channels
+            .get(channel)
+            .is_some_and(|channel| channel.killed)
+        {
             return;
         }
         self.advance(&mut state);
@@ -398,6 +452,9 @@ impl ReplayTransportFactory {
     fn stdin_closed(&self, channel: &str) {
         let mut state = self.state.lock();
         if let Some(channel) = state.channels.get_mut(channel) {
+            if channel.killed {
+                return;
+            }
             channel.stdin_closed = true;
         }
         self.advance(&mut state);

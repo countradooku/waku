@@ -32,6 +32,8 @@ use crate::driver::v2::transport::{
     HttpTransport, ProcessExit, ProcessSpec, StdioTransport, TransportFactory,
 };
 
+type ExitSender = Arc<Mutex<Option<oneshot::Sender<ProcessExit>>>>;
+
 /// Plays a script's inbound frames to a live driver.
 pub struct ScriptedAppServer {
     entries: Vec<ReplayEntry>,
@@ -39,6 +41,8 @@ pub struct ScriptedAppServer {
     home: PathBuf,
     /// Why the script stopped matching, if it did.
     error: Arc<Mutex<Option<String>>>,
+    /// Running app-servers, for `kill_all` (a daemon restart, #59).
+    running: Mutex<Vec<(tokio::task::AbortHandle, ExitSender)>>,
 }
 
 impl ScriptedAppServer {
@@ -48,6 +52,7 @@ impl ScriptedAppServer {
             spawns: Mutex::new(HashMap::new()),
             home,
             error: Arc::new(Mutex::new(None)),
+            running: Mutex::new(Vec::new()),
         })
     }
 
@@ -113,6 +118,8 @@ impl Channel {
         while let Some(entry) = self.entries.get(self.cursor) {
             match entry {
                 ReplayEntry::ExpectOutbound { .. } => break,
+                // A process sees nothing of a daemon restart but its kill.
+                ReplayEntry::DaemonRestart => {}
                 ReplayEntry::EmitInbound { frame, .. } => {
                     let mut frame = materialize(frame, &self.workspace);
                     if shape(&frame) == Shape::Response
@@ -196,9 +203,11 @@ impl TransportFactory for ScriptedAppServer {
         let (mut server_stdout, driver_stdout) = tokio::io::duplex(1 << 20);
         let (_, driver_stderr) = tokio::io::duplex(64);
         let (exit_sender, exit_receiver) = oneshot::channel();
+        let exit_sender: ExitSender = Arc::new(Mutex::new(Some(exit_sender)));
+        let killable = exit_sender.clone();
         let error = self.error.clone();
-        tokio::spawn(async move {
-            let mut exit_sender = Some(exit_sender);
+        let task = tokio::spawn(async move {
+            let exit_sender = exit_sender;
             let mut lines = BufReader::new(server_stdin).lines();
             let mut pending_exit = None;
             let play =
@@ -228,7 +237,7 @@ impl TransportFactory for ScriptedAppServer {
                 if let Some((status, crash)) = exit.take() {
                     if crash {
                         drop(server_stdout);
-                        if let Some(sender) = exit_sender.take() {
+                        if let Some(sender) = exit_sender.lock().take() {
                             let _ = sender.send(status);
                         }
                         return;
@@ -250,10 +259,13 @@ impl TransportFactory for ScriptedAppServer {
             }
             // stdin closed (or the script stopped matching): the process ends.
             drop(server_stdout);
-            if let Some(sender) = exit_sender.take() {
+            if let Some(sender) = exit_sender.lock().take() {
                 let _ = sender.send(pending_exit.unwrap_or(ProcessExit::SUCCESS));
             }
         });
+        let mut running = self.running.lock();
+        running.retain(|(task, _)| !task.is_finished());
+        running.push((task.abort_handle(), killable));
         Ok(StdioTransport {
             stdin: Box::new(driver_stdin),
             stdout: Box::new(driver_stdout),
@@ -278,5 +290,19 @@ impl TransportFactory for ScriptedAppServer {
         cfg.provider_home
             .clone()
             .unwrap_or_else(|| self.home.clone())
+    }
+
+    /// SIGKILL for every running app-server (a daemon restart).
+    fn kill_all(&self) {
+        for (task, exit) in self.running.lock().drain(..) {
+            task.abort();
+            if let Some(exit) = exit.lock().take() {
+                let _ = exit.send(ProcessExit {
+                    success: false,
+                    code: None,
+                    signal: Some(9),
+                });
+            }
+        }
     }
 }

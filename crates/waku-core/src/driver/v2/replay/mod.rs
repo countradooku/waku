@@ -108,6 +108,10 @@ pub enum ReplayEntry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<Value>,
     },
+    /// The daemon was killed here (`restart_daemon`, #59): every process
+    /// still running ends at once (SIGKILL), and the transcript continues
+    /// with the processes the restarted daemon spawns.
+    DaemonRestart,
 }
 
 impl ReplayEntry {
@@ -117,6 +121,7 @@ impl ReplayEntry {
             Self::ExpectOutbound { channel, .. }
             | Self::EmitInbound { channel, .. }
             | Self::RuntimeExit { channel, .. } => channel,
+            Self::DaemonRestart => return "*",
         };
         channel.as_deref().unwrap_or("main")
     }
@@ -126,7 +131,7 @@ impl ReplayEntry {
             Self::ExpectOutbound { label, .. } | Self::EmitInbound { label, .. } => {
                 label.as_deref()
             }
-            Self::RuntimeExit { .. } => None,
+            Self::RuntimeExit { .. } | Self::DaemonRestart => None,
         }
     }
 
@@ -136,6 +141,7 @@ impl ReplayEntry {
             Self::ExpectOutbound { .. } => "expect_outbound",
             Self::EmitInbound { .. } => "emit_inbound",
             Self::RuntimeExit { .. } => "runtime_exit",
+            Self::DaemonRestart => return "daemon_restart".to_owned(),
         };
         match self.label() {
             Some(label) => format!("{kind} {label} ({})", self.channel()),

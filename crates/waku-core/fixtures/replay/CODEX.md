@@ -37,6 +37,7 @@ Codex's native option ids, the runtime mode) are in `input.codex.json`.
 | `usage_limit` | R | `simple` cut after `turn/started` | **synthetic tail**: `account/rateLimits/updated` (primary window 100 %, `resetsAt` 2000100000), an `error` notification and a failed `turn/completed`, both with `codexErrorInfo: "usageLimitExceeded"`; shapes from T3's `CodexAdapterV2.test.ts` usage-limit cases and the Codex 0.159.2 `ErrorNotification` / `TurnCompletedNotification` schemas |
 | `runtime_exit_unexpected` | R | `simple` cut after the first `item/agentMessage/delta` | **synthetic tail**: the process exits with status 1 |
 | `background_work` | S | `todo_list` | **reordered**: the command's `item/completed` moved after `turn/completed`, so the command outlives its turn as a background terminal |
+| `daemon_restart` | (#59) | `provider_thread_resume` | **cut and continued**: the first process is killed (`daemon_restart`) after three answer deltas; `main#2` resumes the thread and its turn is the restart continuation ("Continue where you left off.", one answer delta) |
 
 `steering_restart` is not applicable to Codex (it declares native steering).
 

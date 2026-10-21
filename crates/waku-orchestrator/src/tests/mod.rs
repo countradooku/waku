@@ -13,6 +13,7 @@ mod ingest;
 mod lifecycle;
 mod migrations;
 mod rebuild;
+mod recovery;
 mod search;
 mod serialization;
 mod streams;

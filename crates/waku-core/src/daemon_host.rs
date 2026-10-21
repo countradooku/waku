@@ -8,7 +8,11 @@
 //!    version check);
 //! 2. `EffectWorkerPool::reconcile_after_process_loss`: process-bound
 //!    effects of the previous process are cancelled, replay-safe ones
-//!    requeued;
+//!    requeued; then restart recovery (#59, `waku_orchestrator::recovery`):
+//!    every thread the previous process left busy is recovered, its
+//!    sessions stopped, its in-flight run interrupted and, when the settings
+//!    allow it, continued by a `provider_runtime.continue` effect the
+//!    workers run once they start;
 //! 3. the provider session manager with every ported `DriverV2` registered
 //!    from the daemon settings ([`provider_instances`]), on the shared driver
 //!    runtime, feeding the output hub and the delta bus ([`LiveStreams`]) the
@@ -40,6 +44,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use uuid::Uuid;
 use waku_orchestrator::lifecycle::{AutoSettleSettings, LifecycleService, NoPullRequests};
+use waku_orchestrator::recovery::{RecoveryReport, recover_after_restart};
 use waku_orchestrator::streams::LiveStreams;
 use waku_orchestrator::{
     Clock, DefaultExecutor, Dependencies, EffectWorkerPool, Orchestrator, OrchestratorConfig,
@@ -99,6 +104,7 @@ pub struct DaemonHost {
     sweeper: Option<BlobSweeper>,
     release_watch: Option<std::thread::JoinHandle<()>>,
     environment_id: Uuid,
+    recovery: RecoveryReport,
 }
 
 impl DaemonHost {
@@ -119,8 +125,11 @@ impl DaemonHost {
         registry.replace(provider_instances(&backend.daemon_settings()));
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let database = data_dir.join(STATE_DATABASE);
+        let mut config = OrchestratorConfig::new(database.clone());
+        config.settings.continue_after_restart =
+            backend.daemon_settings().continue_threads_after_restart();
         let orchestrator = Orchestrator::open(
-            OrchestratorConfig::new(database.clone()),
+            config,
             Dependencies {
                 clock: clock.clone(),
                 ids: Box::new(UuidV7Ids),
@@ -136,6 +145,18 @@ impl DaemonHost {
                 reconciled.cancelled.len(),
                 reconciled.requeued.len()
             );
+        }
+        let recovery = recover_after_restart(&orchestrator, Uuid::now_v7())
+            .context("could not recover threads after a restart")?;
+        if !recovery.threads.is_empty() {
+            eprintln!(
+                "waku-daemon recovered {} threads after a restart, continuing {}",
+                recovery.threads.len(),
+                recovery.continuations
+            );
+        }
+        for (thread_id, error) in &recovery.failed {
+            eprintln!("waku-daemon could not recover thread {thread_id}: {error}");
         }
 
         let live = LiveStreams::default();
@@ -192,8 +213,12 @@ impl DaemonHost {
             .spawn(move || watch_releases(&watched, &sweeps))?;
 
         let observed = registry.clone();
+        let followed = Arc::downgrade(&orchestrator);
         backend.on_settings_changed(Box::new(move |settings| {
             observed.replace(provider_instances(settings));
+            if let Some(orchestrator) = followed.upgrade() {
+                orchestrator.set_continue_after_restart(settings.continue_threads_after_restart());
+            }
         }));
 
         Ok(Self {
@@ -205,6 +230,7 @@ impl DaemonHost {
             sweeper: Some(sweeper),
             release_watch: Some(release_watch),
             environment_id,
+            recovery,
         })
     }
 
@@ -223,6 +249,11 @@ impl DaemonHost {
 
     pub fn registry(&self) -> &DriverRegistry {
         &self.registry
+    }
+
+    /// What this start's restart recovery did (#59).
+    pub fn recovery(&self) -> &RecoveryReport {
+        &self.recovery
     }
 
     /// The persistent environment id.
