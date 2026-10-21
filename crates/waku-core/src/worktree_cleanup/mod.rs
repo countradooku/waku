@@ -148,7 +148,7 @@ fn managed_roots(storage: &StorageSettings) -> Vec<PathBuf> {
         .cloned()
         .chain(default_worktrees_directory().ok());
     for root in candidates {
-        if let Ok(root) = fs::canonicalize(&root)
+        if let Ok(root) = dunce::canonicalize(&root)
             && root.parent().is_some()
             && !roots.contains(&root)
         {
@@ -162,7 +162,7 @@ fn managed_roots(storage: &StorageSettings) -> Vec<PathBuf> {
 /// `path` exists inside a managed root. Paths are compared canonically, so a
 /// symlink cannot lead cleanup outside the managed folder.
 fn managed_toplevel(roots: &[PathBuf], path: &Path) -> Option<PathBuf> {
-    let path = fs::canonicalize(path).ok()?;
+    let path = dunce::canonicalize(path).ok()?;
     roots.iter().find_map(|root| {
         let mut rest = path.strip_prefix(root).ok()?.components();
         let (Some(Component::Normal(project)), Some(Component::Normal(slug))) =
@@ -179,7 +179,7 @@ fn canonicalize_lossy(path: &Path) -> PathBuf {
     let mut existing = path;
     let mut missing = Vec::new();
     loop {
-        if let Ok(canonical) = fs::canonicalize(existing) {
+        if let Ok(canonical) = dunce::canonicalize(existing) {
             return missing
                 .iter()
                 .rev()

@@ -8965,6 +8965,7 @@ dependencies = [
  "chrono",
  "crossbeam-channel",
  "dirs",
+ "dunce",
  "futures-util",
  "libc",
  "nucleo-matcher",

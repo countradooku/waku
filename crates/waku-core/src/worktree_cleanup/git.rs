@@ -90,7 +90,7 @@ pub fn main_worktree(toplevel: &Path) -> anyhow::Result<PathBuf> {
     if main.bare {
         bail!("bare repositories are not managed");
     }
-    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+    let canonical = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.into());
     let wanted = canonical(toplevel);
     if !worktrees
         .iter()

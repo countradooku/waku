@@ -21,7 +21,7 @@ impl TempDir {
     fn new(label: &str) -> Self {
         let path = std::env::temp_dir().join(format!("waku-ports-{label}-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
-        Self(fs::canonicalize(path).unwrap())
+        Self(dunce::canonicalize(path).unwrap())
     }
 }
 

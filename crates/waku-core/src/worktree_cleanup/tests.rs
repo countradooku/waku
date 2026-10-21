@@ -51,7 +51,7 @@ impl Fixture {
         let root = std::env::temp_dir().join(format!("waku-cleanup-{}", Uuid::new_v4()));
         let repository = root.join("repository");
         fs::create_dir_all(&repository).unwrap();
-        let repository = fs::canonicalize(&repository).unwrap();
+        let repository = dunce::canonicalize(&repository).unwrap();
         git(&repository, &["init", "-b", "main"]);
         git(&repository, &["config", "core.autocrlf", "false"]);
         fs::write(repository.join("README.md"), "main\n").unwrap();
@@ -426,7 +426,7 @@ fn merged_and_unchanged_rules_compare_with_the_base_branch() {
 
     let report = fixture.run(&host, &fixture.storage(|rules| rules.merged = true));
     let reason_for = |path: &Path| {
-        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         report
             .entries
             .iter()
