@@ -14,7 +14,8 @@ fn snapshot_path(flavor: Flavor) -> PathBuf {
 
 fn instance(flavor: Flavor) -> InstanceConfig {
     let mut cfg = InstanceConfig::new(flavor.id(), flavor.driver_kind());
-    // Computer Use is a debug-build Grok extension; the snapshot shows it on.
+    // Computer Use is a debug-build Grok extension, off on v8 until #181
+    // even when enabled.
     cfg.computer_use_enabled = flavor == Flavor::Grok;
     cfg
 }
@@ -57,7 +58,7 @@ fn the_rfc_matrix_rows_that_differ_by_flavor() {
         assert_eq!(caps.threads.rollback, grok);
         assert_eq!(caps.threads.fork, grok);
         assert_eq!(caps.threads.fork_from_turn, grok);
-        assert_eq!(caps.extras.computer_use, grok);
+        assert!(!caps.extras.computer_use);
         assert_eq!(
             caps.planning.structured_questions,
             matches!(flavor, Flavor::Cursor | Flavor::Grok)

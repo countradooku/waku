@@ -107,7 +107,7 @@
     "background_work": false,
     "account_usage_stream": false,
     "agent_presets": false,
-    "computer_use": true,
+    "computer_use": false,
     "model_discovery": true
   }
 }

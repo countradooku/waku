@@ -213,7 +213,7 @@ impl AgentInfo {
 /// The capabilities an ACP session declares (RFC 0002 matrix, ACP column).
 /// `agent` is what `initialize` returned; [`AgentInfo::everything`] gives the
 /// instance-level claim before any session exists.
-pub fn capabilities(flavor: Flavor, cfg: &InstanceConfig, agent: &AgentInfo) -> Capabilities {
+pub fn capabilities(flavor: Flavor, _cfg: &InstanceConfig, agent: &AgentInfo) -> Capabilities {
     let mut caps = Capabilities::default();
     caps.sessions.model_switch_in_session = flavor.model_switch_in_session();
     caps.sessions.provider_switching_via_handoff = true;
@@ -262,7 +262,9 @@ pub fn capabilities(flavor: Flavor, cfg: &InstanceConfig, agent: &AgentInfo) -> 
     caps.identity.request_ids = RefStrength::Strong;
     caps.runtime_policy.enforcement = Enforcement::Native;
     caps.runtime_policy.supported_modes = flavor.supported_modes();
-    caps.extras.computer_use = flavor == Flavor::Grok && cfg.computer_use_enabled;
+    // Grok's Computer Use runtime is not wired to v8 yet (#181), so no
+    // flavor offers it.
+    caps.extras.computer_use = false;
     caps.extras.model_discovery = true;
     caps
 }

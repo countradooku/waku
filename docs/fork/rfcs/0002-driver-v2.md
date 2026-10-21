@@ -822,7 +822,7 @@ Driver columns: Codex (`codex.rs`), Claude (`claude.rs`), ACP (`acp.rs`, flavors
 | background_work | Y | Y | N | Y | N | N | Y |
 | account_usage_stream | Y | N | N | N | N | N | N |
 | agent_presets | N | N | N | Y | N | Y | Y |
-| computer_use | Y | N | Grok | N (#49 amendment) | Pi only | N | N |
+| computer_use | Y | N | N (#181) | N (#49 amendment) | Pi only | N | N |
 | model_discovery | Y | Y | Y | Y | Y | N | Y |
 
 Notes:
