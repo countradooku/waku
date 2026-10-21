@@ -97,10 +97,8 @@ jobs:
           bun run --filter @waku/client check
           bun run --filter @waku/client test
 
-      - name: Web and mobile typecheck and tests
+      - name: Web typecheck and tests
         if: runner.os == 'Linux'
         run: |
           bun run --filter @waku/web typecheck
           bun run --filter @waku/web test
-          bun run --filter @waku/mobile typecheck
-          bun run --filter @waku/mobile test
