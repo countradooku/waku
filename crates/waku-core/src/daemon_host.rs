@@ -305,8 +305,7 @@ pub fn provider_instances(settings: &DaemonSettings) -> Vec<RegisteredInstance> 
         .collect()
 }
 
-/// The `DriverV2` port of `provider`; `None` for providers still served
-/// only through the legacy protocol.
+/// The `DriverV2` port of `provider`.
 fn driver_for(provider: ProviderKind) -> Option<Arc<dyn DriverV2>> {
     Some(match provider {
         ProviderKind::Codex => Arc::new(crate::driver::codex::CodexDriver::new()),
@@ -316,9 +315,8 @@ fn driver_for(provider: ProviderKind) -> Option<Arc<dyn DriverV2>> {
         }
         ProviderKind::OpenCode => Arc::new(crate::driver::opencode::OpenCodeDriver),
         ProviderKind::DeepSeek => Arc::new(crate::driver::deepseek::DeepSeekDriver),
-        // TODO(#50, #51): register Pi, Oh My Pi and Amp here once their
-        // `DriverV2` ports land.
-        ProviderKind::Pi | ProviderKind::OhMyPi | ProviderKind::Amp => return None,
+        ProviderKind::Pi | ProviderKind::OhMyPi => Arc::new(crate::driver::pi::PiDriver::new()),
+        ProviderKind::Amp => Arc::new(crate::driver::amp::AmpDriver::new()),
     })
 }
 
@@ -391,7 +389,8 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "claude", "codex", "cursor", "deepseek", "fx", "opencode", "kimi"
+                "amp", "claude", "codex", "cursor", "deepseek", "fx", "opencode", "kimi", "ohmypi",
+                "pi"
             ]
         );
         let get = |id: &str| {
