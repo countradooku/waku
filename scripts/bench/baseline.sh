@@ -21,9 +21,11 @@
 #                     (default $BENCH_OUT/summary.json)
 #   BENCH_SKIP_BUILD  set to 1 to reuse target/release as it is
 #
-# The app opens a window for every run. It talks only to the bench daemon (or,
-# for RPC latency, a private waku-daemon), with HOME pointed into BENCH_OUT, so
-# your own Waku data is never read or written. Keep the machine otherwise idle
+# The app opens a window for every run. It talks only to the bench daemon (the
+# real daemon composition over protocol v8, whose Codex and Claude CLIs are
+# fake-codex / fake-claude replaying the timelines), with HOME pointed into
+# BENCH_OUT, so your own Waku data is never read or written. RPC latency runs
+# rpc-latency against the bench daemon, no app. Keep the machine otherwise idle
 # and on AC power while it runs; the full matrix takes about 45 minutes at 3
 # rounds.
 
@@ -45,7 +47,8 @@ raw="${BENCH_RAW:-$out/summary.json}"
 if [[ "${BENCH_SKIP_BUILD:-0}" != 1 ]]; then
   echo "building release binaries" >&2
   cargo build --release --locked --features perf-counters --bin waku
-  cargo build --release --locked -p waku-daemon -p waku-bench-daemon
+  # waku-bench-daemon, fake-codex, fake-claude, replay-client, rpc-latency.
+  cargo build --release --locked -p waku-bench-daemon
 fi
 
 mkdir -p "$out"

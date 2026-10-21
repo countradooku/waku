@@ -2,22 +2,28 @@
 //! own protocol (issue #8).
 //!
 //! `fake-codex` speaks `codex app-server` JSON-RPC and `fake-claude` speaks
-//! Claude Code's stream-json control protocol. Both the real Waku daemon and
-//! T3 Code can drive them with no network. The translation is deliberately
-//! the one a real provider would produce for the same transcript, so the
-//! visible result matches the bench daemon's direct replay; README.md lists
-//! what is approximated.
+//! Claude Code's stream-json control protocol. The Waku daemon (and so
+//! `waku-bench-daemon`, which runs them as its provider CLIs) and T3 Code can
+//! drive them with no network. The translation is deliberately the one a
+//! real provider would produce for the same transcript, so Waku's real
+//! drivers see a realistic stream; README.md lists what is approximated.
 //!
 //! Configuration, highest precedence first:
-//! 1. `WAKU_BENCH_TIMELINE`, `WAKU_BENCH_RATE`, `WAKU_BENCH_LOOPS` and
-//!    `WAKU_BENCH_LOG` in the environment;
+//! 1. `WAKU_BENCH_TIMELINE`, `WAKU_BENCH_RATE`, `WAKU_BENCH_LOOPS`,
+//!    `WAKU_BENCH_LOG` and `WAKU_BENCH_STATS` in the environment;
 //! 2. `waku-bench.json` beside the invoked executable, which
-//!    `scripts/bench/fake-path.sh` writes into the private PATH directory
-//!    (`{"timeline": "burst", "rate": "1", "loops": 1, "log": "/tmp/x.jsonl"}`);
+//!    `scripts/bench/fake-path.sh` and `waku-bench-daemon` write into a
+//!    private directory (`{"timeline": "burst", "rate": "1", "loops": 1,
+//!    "log": "/tmp/x.jsonl", "stats": "/tmp/replays.jsonl"}`);
 //! 3. timeline `prose` at its recorded rate, once.
 //!
 //! A prompt whose whole text is a built-in timeline name replays that
 //! timeline instead.
+//!
+//! With `stats`, every replay appends one JSON line
+//! ([`ReplayStats::to_json`](crate::replay::ReplayStats::to_json)) to that
+//! file before the turn completes, so whoever drives the fake (the bench
+//! daemon's run report) can read what the replay did.
 
 pub mod claude;
 pub mod codex;
@@ -48,6 +54,7 @@ struct ConfigFile {
     rate: Option<Value>,
     loops: Option<u32>,
     log: Option<PathBuf>,
+    stats: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -56,6 +63,8 @@ pub struct FakeConfig {
     pub rate: Rate,
     pub loops: u32,
     pub log: Option<PathBuf>,
+    /// Where each replay's statistics are appended, one JSON line each.
+    pub stats: Option<PathBuf>,
     builtins: Arc<Mutex<HashMap<String, Arc<Timeline>>>>,
 }
 
@@ -91,11 +100,13 @@ impl FakeConfig {
             None => file.loops.unwrap_or(1),
         };
         let log = env("WAKU_BENCH_LOG").map(PathBuf::from).or(file.log);
+        let stats = env("WAKU_BENCH_STATS").map(PathBuf::from).or(file.stats);
         Ok(Self {
             default_timeline: Arc::new(Timeline::resolve(&timeline)?),
             rate,
             loops: loops.max(1),
             log,
+            stats,
             builtins: Arc::default(),
         })
     }
@@ -106,6 +117,7 @@ impl FakeConfig {
             rate,
             loops: loops.max(1),
             log: None,
+            stats: None,
             builtins: Arc::default(),
         }
     }
@@ -232,6 +244,7 @@ impl TurnRunner {
         self.cancel = cancel.clone();
         let rate = config.rate;
         let loops = config.loops;
+        let stats_path = config.stats.clone();
         self.worker = Some(
             std::thread::Builder::new()
                 .name("fake-provider-turn".into())
@@ -242,6 +255,9 @@ impl TurnRunner {
                     let events = replay::expand(&timeline, loops);
                     let stats =
                         replay::play(&timeline.name, &events, rate, &cancel, |event| emit(event));
+                    if let Some(path) = &stats_path {
+                        append_stats(path, &stats);
+                    }
                     finish(stats.canceled);
                 })
                 .expect("could not start turn thread"),
@@ -257,6 +273,24 @@ impl TurnRunner {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+/// One line per replay; written before the turn's completion is sent, so a
+/// reader that sees the turn end finds its line.
+fn append_stats(path: &Path, stats: &replay::ReplayStats) {
+    let mut line = stats.to_json().to_string();
+    line.push('\n');
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = written {
+        eprintln!(
+            "could not record replay stats in {}: {error}",
+            path.display()
+        );
     }
 }
 

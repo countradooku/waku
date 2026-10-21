@@ -86,6 +86,40 @@ impl ReplayStats {
     pub fn events_per_second(&self) -> f64 {
         self.events as f64 / self.elapsed.as_secs_f64().max(1e-9)
     }
+
+    /// One line of a fake's stats file (`waku-bench.json` `stats`), which the
+    /// bench daemon reads when the run that replayed it ends.
+    pub fn to_json(&self) -> Value {
+        serde_json::json!({
+            "timeline": self.timeline,
+            "events": self.events,
+            "payloadBytes": self.payload_bytes,
+            "textDeltas": self.text_deltas,
+            "reasoningDeltas": self.reasoning_deltas,
+            "activities": self.activities,
+            "scheduledUs": self.scheduled.as_micros() as u64,
+            "elapsedUs": self.elapsed.as_micros() as u64,
+            "maxLagUs": self.max_lag.as_micros() as u64,
+            "canceled": self.canceled,
+        })
+    }
+
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let number = |key: &str| value.get(key).and_then(Value::as_u64);
+        let micros = |key: &str| number(key).map(Duration::from_micros);
+        Some(Self {
+            timeline: value.get("timeline")?.as_str()?.to_owned(),
+            events: number("events")?,
+            payload_bytes: number("payloadBytes").unwrap_or_default(),
+            text_deltas: number("textDeltas").unwrap_or_default(),
+            reasoning_deltas: number("reasoningDeltas").unwrap_or_default(),
+            activities: number("activities").unwrap_or_default(),
+            scheduled: micros("scheduledUs").unwrap_or_default(),
+            elapsed: micros("elapsedUs")?,
+            max_lag: micros("maxLagUs").unwrap_or_default(),
+            canceled: value.get("canceled").and_then(Value::as_bool)?,
+        })
+    }
 }
 
 /// The events of `timeline` expanded for `loops` repetitions.
@@ -263,6 +297,23 @@ mod tests {
                 ),
             ],
         }
+    }
+
+    #[test]
+    fn stats_round_trip_through_json() {
+        let stats = play(
+            "t",
+            &timeline().events,
+            Rate::Max,
+            &AtomicBool::new(false),
+            |_| Ok(()),
+        );
+        let back = ReplayStats::from_json(&stats.to_json()).unwrap();
+        assert_eq!(back.timeline, "t");
+        assert_eq!(back.events, stats.events);
+        assert_eq!(back.text_deltas, 1);
+        assert_eq!(back.elapsed.as_micros(), stats.elapsed.as_micros());
+        assert!(!back.canceled);
     }
 
     #[test]

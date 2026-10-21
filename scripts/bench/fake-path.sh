@@ -12,8 +12,10 @@
 #   PATH="$(scripts/bench/fake-path.sh --timeline burst):$PATH" <app>
 #
 # Only the runner's own environment should see this PATH. Env vars
-# WAKU_BENCH_TIMELINE, WAKU_BENCH_RATE, WAKU_BENCH_LOOPS and WAKU_BENCH_LOG
-# override the file per process. See crates/waku-bench-daemon/README.md.
+# WAKU_BENCH_TIMELINE, WAKU_BENCH_RATE, WAKU_BENCH_LOOPS, WAKU_BENCH_LOG and
+# WAKU_BENCH_STATS (one JSON line per replay) override the file per process.
+# `waku-bench-daemon` sets up the same directory for itself. See
+# crates/waku-bench-daemon/README.md.
 
 set -euo pipefail
 

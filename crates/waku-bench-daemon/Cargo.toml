@@ -43,20 +43,18 @@ parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.18", features = ["v4", "serde"] }
-# The bench daemon is the real daemon server (`waku_core::serve`) and the real
-# persistence backend with only the provider runtime replaced, so the desktop
-# cannot tell the two apart on the wire.
+# The bench daemon is `waku-daemon`'s composition (`WakuBackend`,
+# `DaemonHost`, `serve_listeners`, protocol v8) with the fake provider CLIs
+# as its Codex and Claude binaries, so the desktop cannot tell the two apart.
 waku-core = { path = "../waku-core" }
 waku-protocol = { path = "../waku-protocol" }
-# `--autoplay` and `rpc-latency` talk to a daemon the way the desktop does.
+# The fixture is written through the orchestrator (`ingest_decision`).
+waku-orchestrator = { path = "../waku-orchestrator" }
+# `replay-client` and `rpc-latency` talk protocol v8 the way the desktop does.
 waku-client = { path = "../waku-client" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[dev-dependencies]
-# The restart e2e (#59) checks the recovery's notices and failure code.
-waku-orchestrator = { path = "../waku-orchestrator" }
 
 [lints]
 workspace = true
