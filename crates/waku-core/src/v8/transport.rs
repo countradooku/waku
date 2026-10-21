@@ -20,7 +20,6 @@ use waku_protocol::v8::{Encoding, FRAME_HEADER_BYTES};
 pub(crate) enum Incoming {
     /// An encoded message and its encoding.
     Message(Vec<u8>, Encoding),
-    #[expect(dead_code, reason = "uploads (`blobs.put`) will read the DATA")]
     Data {
         channel: u32,
         fin: bool,

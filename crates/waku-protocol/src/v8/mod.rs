@@ -28,21 +28,32 @@ mod macros;
 mod buffered;
 
 pub mod api;
+pub mod blobs;
 pub mod codec;
+pub mod composer;
 pub mod cursor;
+pub mod daemon;
 pub mod error;
+pub mod files;
 pub mod frame;
 pub mod handshake;
 pub mod message;
 pub mod orchestration;
+pub mod providers;
 #[cfg(feature = "schema")]
 pub mod schema;
 pub mod scope;
+pub mod terminal;
+pub mod vcs;
 
 pub use api::*;
+pub use blobs::*;
 pub use codec::{CodecError, Encoding};
+pub use composer::*;
 pub use cursor::StreamCursor;
+pub use daemon::*;
 pub use error::{Error, ErrorCode, ErrorDetails};
+pub use files::*;
 pub use frame::{Frame, FrameDecoder, FrameError, FrameHeader, FrameLimits};
 pub use handshake::{
     ClientInfo, ClientKind, Compression, Credential, EnvironmentInfo, Hello, IssuedCredential,
@@ -52,7 +63,10 @@ pub use message::{
     ClientMessage, DecodeContext, End, EndReason, GoodbyeCode, Notice, Reply, ServerMessage,
     ServerMessageSeed, Subscribe,
 };
+pub use providers::*;
 pub use scope::Scope;
+pub use terminal::*;
+pub use vcs::*;
 
 /// The protocol's major version. A daemon serves exactly one.
 pub const PROTOCOL_MAJOR: u16 = 8;

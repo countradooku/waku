@@ -1,5 +1,9 @@
 {
   "$defs": {
+    "Ack": {
+      "description": "The result of a method that only acknowledges: an empty map.",
+      "type": "object"
+    },
     "Actor": {
       "enum": [
         "user",
@@ -8,6 +12,36 @@
       ],
       "type": "string",
       "x-waku-open": true
+    },
+    "AgentPreset": {
+      "description": "A provider-owned agent composition (DeepSeek Harness presets).",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "isCustom": {
+          "default": false,
+          "type": "boolean"
+        },
+        "isDefault": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
     },
     "AppGrant": {
       "properties": {
@@ -378,6 +412,77 @@
       ],
       "type": "object"
     },
+    "AttachmentKind": {
+      "enum": [
+        "file",
+        "directory"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "AttachmentPart": {
+      "properties": {
+        "blob": {
+          "description": "A `waku-blob:` reference from `blobs.put`.",
+          "type": "string"
+        },
+        "relativePath": {
+          "description": "`/`-separated, inside the directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "relativePath",
+        "blob"
+      ],
+      "type": "object"
+    },
+    "AttachmentsImportParams": {
+      "description": "`attachments.import` params: an attachment assembled from uploaded\nblobs. A file attachment has one part (its `relativePath` is ignored); a\ndirectory has one part per file.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/AttachmentKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "parts": {
+          "items": {
+            "$ref": "#/$defs/AttachmentPart"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "parts",
+        "opId"
+      ],
+      "type": "object"
+    },
+    "AttachmentsImportPathParams": {
+      "description": "`attachments.importPath` params: copy a file or directory on the daemon\nhost into the attachment store.",
+      "properties": {
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "opId"
+      ],
+      "type": "object"
+    },
     "AttemptReason": {
       "enum": [
         "initial",
@@ -465,6 +570,13 @@
             "null"
           ]
         },
+        "path": {
+          "description": "With a `waku-attachment:` reference, the file inside it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "reference": {
           "description": "`waku-blob:<sha256>.<ext>`.",
           "type": "string"
@@ -472,6 +584,181 @@
       },
       "required": [
         "reference"
+      ],
+      "type": "object"
+    },
+    "BlobPut": {
+      "properties": {
+        "deduplicated": {
+          "type": "boolean"
+        },
+        "reference": {
+          "description": "`waku-blob:<name>`.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "Lowercase hex.",
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reference",
+        "size",
+        "sha256",
+        "deduplicated"
+      ],
+      "type": "object"
+    },
+    "BlobStat": {
+      "properties": {
+        "localPath": {
+          "description": "Where the file is on the daemon host; only on the local socket, where\nthe client may read it directly.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mime": {
+          "type": "string"
+        },
+        "sha256": {
+          "description": "Lowercase hex.",
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "size",
+        "mime",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "BlobsPutParams": {
+      "description": "`blobs.put` params. `channel` must not be in use by a subscription or\nanother upload; it is free again once the reply arrives.",
+      "properties": {
+        "channel": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "description": "Lowercase hex. Verified when given, and lets the daemon answer at once\nfor a blob it already holds (`deduplicated`); the client then stops\nand sends an empty DATA frame with `FIN`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "Exactly the bytes that follow, at most `maxBlobBytes`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel",
+        "size",
+        "mime"
+      ],
+      "type": "object"
+    },
+    "BlobsStatParams": {
+      "description": "`blobs.stat` params: a `waku-blob:` reference, or a\n`waku-attachment:` reference with the `path` of a file inside it.",
+      "properties": {
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reference": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference"
+      ],
+      "type": "object"
+    },
+    "BranchEntry": {
+      "properties": {
+        "checkedOutElsewhere": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "checkedOutElsewhere"
+      ],
+      "type": "object"
+    },
+    "BranchSnapshot": {
+      "properties": {
+        "additions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branches": {
+          "items": {
+            "$ref": "#/$defs/BranchEntry"
+          },
+          "type": "array"
+        },
+        "current": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultBranch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deletions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "detachedHead": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "branches",
+        "additions",
+        "deletions"
       ],
       "type": "object"
     },
@@ -842,6 +1129,406 @@
         "missing",
         "error",
         "stale"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "CleanupOutcome": {
+      "enum": [
+        "removed",
+        "kept",
+        "failed"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "CleanupReason": {
+      "description": "Why a worktree was removed, kept, or could not be removed. Clients\nlocalize these; `base` names the branch compared with.",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "taskDeleted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "days": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "inactive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "days"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "days": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "days"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base": {
+              "type": "string"
+            },
+            "type": {
+              "const": "merged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "base"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base": {
+              "type": "string"
+            },
+            "type": {
+              "const": "unchanged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "base"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "noRuleApplies",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "taskRunning",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "liveRuntime",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "openTerminal",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "outsideManagedFolder",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "notWakuBranch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "notLinkedWorktree",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "branchChanged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "files": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "uncommittedChanges",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "files"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "example": {
+              "type": "string"
+            },
+            "type": {
+              "const": "ignoredFiles",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "example"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "commits": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "unpushedCommits",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "commits"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "days": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "of": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "inactiveFor",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "days",
+            "of"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "days": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "of": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "finishedFor",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "days",
+            "of"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "notFinished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base": {
+              "type": "string"
+            },
+            "type": {
+              "const": "notMerged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "base"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base": {
+              "type": "string"
+            },
+            "commits": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "hasCommits",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "commits",
+            "base"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "baseUnavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "changedDuringCleanup",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "const": "error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CleanupTrigger": {
+      "enum": [
+        "automatic",
+        "manual"
       ],
       "type": "string",
       "x-waku-open": true
@@ -2267,6 +2954,92 @@
       ],
       "type": "object"
     },
+    "CommandScope": {
+      "enum": [
+        "project",
+        "user",
+        "skill",
+        "builtin",
+        "waku"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "CommitMessage": {
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
+    "CommitResult": {
+      "properties": {
+        "pushed": {
+          "type": "boolean"
+        },
+        "sha": {
+          "description": "The new commit.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "pushed"
+      ],
+      "type": "object"
+    },
+    "CommitSnapshot": {
+      "description": "What a commit dialog shows before committing.",
+      "properties": {
+        "additions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "canPush": {
+          "type": "boolean"
+        },
+        "deletions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hasStaged": {
+          "type": "boolean"
+        },
+        "hasUnstaged": {
+          "type": "boolean"
+        },
+        "stagedAdditions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stagedDeletions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "branch",
+        "additions",
+        "deletions",
+        "stagedAdditions",
+        "stagedDeletions",
+        "hasStaged",
+        "hasUnstaged",
+        "canPush"
+      ],
+      "type": "object"
+    },
     "CompletionDelivery": {
       "properties": {
         "observedByRunId": {
@@ -2293,12 +3066,133 @@
       "type": "string",
       "x-waku-open": true
     },
+    "ComposerDraft": {
+      "properties": {
+        "attachments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DraftAttachment"
+          },
+          "type": "array"
+        },
+        "text": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ComposerDrafts": {
+      "description": "Unsent composer text, per project (a thread not started yet) and per\nthread.",
+      "properties": {
+        "newThreads": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ComposerDraft"
+          },
+          "default": {},
+          "description": "By project id.",
+          "type": "object"
+        },
+        "threads": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ComposerDraft"
+          },
+          "default": {},
+          "description": "By thread id.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "ComposerSlashCommandsParams": {
+      "description": "`composer.slashCommands` params.",
+      "properties": {
+        "instanceId": {
+          "description": "The provider instance whose commands are listed. Required until a\nthread's own instance can stand in for it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef",
+          "description": "The project the commands are discovered in."
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "type": "object"
+    },
     "Compression": {
       "enum": [
         "zstd"
       ],
       "type": "string",
       "x-waku-open": true
+    },
+    "ComputerPermissions": {
+      "properties": {
+        "accessibility": {
+          "type": "boolean"
+        },
+        "screenRecording": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "screenRecording",
+        "accessibility"
+      ],
+      "type": "object"
+    },
+    "ComputerUsePermissionsParams": {
+      "description": "`computerUse.permissions` params. `prompt: true` asks macOS to show its\npermission prompts; it needs `operate` and the local socket.",
+      "properties": {
+        "prompt": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ContentHit": {
+      "description": "One matching line.",
+      "properties": {
+        "column": {
+          "description": "1-based, in characters (Unicode scalar values) of the line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "description": "1-based.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "preview": {
+          "description": "The line, cut to [`CONTENT_PREVIEW_CHARS`].",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "preview"
+      ],
+      "type": "object"
     },
     "ContextCaps": {
       "properties": {
@@ -2677,6 +3571,48 @@
       "type": "string",
       "x-waku-open": true
     },
+    "CostQuality": {
+      "properties": {
+        "cacheSavingsUsd": {
+          "format": "double",
+          "type": "number"
+        },
+        "modelPricedShare": {
+          "format": "double",
+          "type": "number"
+        },
+        "providerReportedShare": {
+          "format": "double",
+          "type": "number"
+        },
+        "unpricedShare": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "providerReportedShare",
+        "modelPricedShare",
+        "unpricedShare",
+        "cacheSavingsUsd"
+      ],
+      "type": "object"
+    },
+    "CreatedWorktree": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "branch"
+      ],
+      "type": "object"
+    },
     "CreationSource": {
       "enum": [
         "desktop",
@@ -2761,6 +3697,64 @@
         }
       ]
     },
+    "DaemonInfo": {
+      "description": "`daemon.info` result.",
+      "properties": {
+        "defaultCwd": {
+          "description": "Where a thread without a project runs by default.",
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentInfo"
+        },
+        "features": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "home": {
+          "description": "The daemon user's home directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectlessRoot": {
+          "description": "The folder scratch projects are created in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uptimeMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "environment",
+        "features",
+        "uptimeMs",
+        "defaultCwd"
+      ],
+      "type": "object"
+    },
+    "DaemonShutdownParams": {
+      "description": "`daemon.shutdown` params. Only a desktop-owned daemon accepts it.",
+      "properties": {
+        "reason": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "DelegatedCompletionCohort": {
       "description": "(P3) The delegated-task completion cohort of a parent run.",
       "properties": {
@@ -2807,6 +3801,60 @@
       ],
       "type": "string",
       "x-waku-open": true
+    },
+    "Directory": {
+      "description": "A directory on the daemon host, for project pickers.",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/DirectoryEntry"
+          },
+          "type": "array"
+        },
+        "filesystemRoot": {
+          "type": "string"
+        },
+        "home": {
+          "type": "string"
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Canonical absolute path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "home",
+        "filesystemRoot",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "DirectoryEntry": {
+      "properties": {
+        "isDir": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "isDir"
+      ],
+      "type": "object"
     },
     "DispatchCommand": {
       "$ref": "#/$defs/Command",
@@ -3179,6 +4227,257 @@
           "type": "object"
         }
       ]
+    },
+    "DraftAttachment": {
+      "properties": {
+        "blobReference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isDir": {
+          "type": "boolean"
+        },
+        "isImage": {
+          "type": "boolean"
+        },
+        "mention": {
+          "description": "The `@` mention text in the draft.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "Daemon-host path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "mention",
+        "name",
+        "isDir",
+        "isImage"
+      ],
+      "type": "object"
+    },
+    "DraftChange": {
+      "description": "Set one draft, or remove it with `draft` absent (an empty draft is a\nremoval too).",
+      "properties": {
+        "draft": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComposerDraft"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/DraftTarget"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    },
+    "DraftTarget": {
+      "description": "Which draft a change applies to.",
+      "oneOf": [
+        {
+          "description": "The composer of a project's next thread.",
+          "properties": {
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "newThread",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "projectId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "thread",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DraftsApplyParams": {
+      "description": "`drafts.apply` params. Changes are keyed, so concurrent clients only\nconflict on the same draft; `baseRevision` makes the whole apply\nconditional (`conflict` with `revisionConflict` otherwise).",
+      "properties": {
+        "baseRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/DraftChange"
+          },
+          "type": "array"
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changes",
+        "opId"
+      ],
+      "type": "object"
+    },
+    "DraftsItem": {
+      "description": "`drafts` items: a snapshot (skipped when `after` is the current\nrevision), `synchronized`, then the changes of every apply.",
+      "oneOf": [
+        {
+          "properties": {
+            "drafts": {
+              "$ref": "#/$defs/ComposerDrafts"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "snapshot",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "revision",
+            "drafts"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "changes": {
+              "items": {
+                "$ref": "#/$defs/DraftChange"
+              },
+              "type": "array"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "revision",
+            "changes"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cursor": {
+              "$ref": "#/$defs/StreamCursor"
+            },
+            "type": {
+              "const": "synchronized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cursor"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DraftsRevision": {
+      "properties": {
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "type": "object"
+    },
+    "DraftsSnapshot": {
+      "description": "`drafts.get` result. `revision` is a content hash: compare for equality\nonly.",
+      "properties": {
+        "drafts": {
+          "$ref": "#/$defs/ComposerDrafts"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "drafts"
+      ],
+      "type": "object"
+    },
+    "DraftsSpec": {
+      "type": "object"
     },
     "DriverKind": {
       "enum": [
@@ -3851,6 +5150,66 @@
       ],
       "type": "object"
     },
+    "FileDiffSummary": {
+      "properties": {
+        "additions": {
+          "description": "Absent for binary files.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "binary": {
+          "type": "boolean"
+        },
+        "deletions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "binary"
+      ],
+      "type": "object"
+    },
+    "FileEntry": {
+      "description": "A file or directory (with a trailing `/`) relative to the root.",
+      "properties": {
+        "isDir": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "isDir"
+      ],
+      "type": "object"
+    },
+    "FileRevision": {
+      "description": "The revision a file has after `files.write`.",
+      "properties": {
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "type": "object"
+    },
     "FileSearchResult": {
       "properties": {
         "column": {
@@ -3906,6 +5265,116 @@
       "required": [
         "root",
         "path"
+      ],
+      "type": "object"
+    },
+    "FilesSearchContentsParams": {
+      "description": "`files.searchContents` params.",
+      "properties": {
+        "caseSensitive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "At most [`MAX_CONTENT_HITS`]; [`DEFAULT_CONTENT_HITS`] when absent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "type": "string"
+        },
+        "regex": {
+          "default": false,
+          "description": "`query` is a regular expression (Rust `regex` syntax) instead of a\nliteral.",
+          "type": "boolean"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        }
+      },
+      "required": [
+        "root",
+        "query"
+      ],
+      "type": "object"
+    },
+    "FilesSearchEntriesParams": {
+      "description": "`files.searchEntries` params: the project's files and directories for\n`@` mentions, fuzzy-ranked by `query` (all of them, shallow first, when it\nis empty).",
+      "properties": {
+        "limit": {
+          "description": "At most [`MAX_SEARCH_ENTRIES`]; [`DEFAULT_SEARCH_ENTRIES`] when absent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "default": "",
+          "type": "string"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "type": "object"
+    },
+    "FilesTreeParams": {
+      "description": "`files.tree` params.",
+      "properties": {
+        "expanded": {
+          "default": [],
+          "description": "Directories (relative to `root`) whose children are listed too.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "type": "object"
+    },
+    "FilesWriteParams": {
+      "description": "`files.write` params. With `baseRevision`, the write is refused with\n`conflict` (`revisionConflict`) unless the file still has that revision;\n`\"\"` means \"the file must not exist yet\".",
+      "properties": {
+        "baseRevision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        }
+      },
+      "required": [
+        "root",
+        "path",
+        "content",
+        "opId"
       ],
       "type": "object"
     },
@@ -4082,6 +5551,125 @@
         }
       ],
       "x-waku-closed": true
+    },
+    "FsBrowseParams": {
+      "description": "`fs.browse` params: an absolute daemon-host directory, or the home\ndirectory when absent.",
+      "properties": {
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GitStatus": {
+      "properties": {
+        "ahead": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "behind": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/GitStatusFile"
+          },
+          "type": "array"
+        },
+        "head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "type": "string"
+        },
+        "upstream": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "repository",
+        "ahead",
+        "behind",
+        "files"
+      ],
+      "type": "object"
+    },
+    "GitStatusFile": {
+      "description": "One changed path, with git's porcelain status letters.",
+      "properties": {
+        "indexStatus": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "previousPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worktreeStatus": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "indexStatus",
+        "worktreeStatus"
+      ],
+      "type": "object"
+    },
+    "GitWorktree": {
+      "properties": {
+        "bare": {
+          "type": "boolean"
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head": {
+          "type": "string"
+        },
+        "locked": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "prunable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "head",
+        "bare",
+        "locked",
+        "prunable"
+      ],
+      "type": "object"
     },
     "GoodbyeCode": {
       "enum": [
@@ -4314,6 +5902,18 @@
       ],
       "type": "string",
       "x-waku-open": true
+    },
+    "InstanceParams": {
+      "description": "The params of a read about one provider instance.",
+      "properties": {
+        "instanceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceId"
+      ],
+      "type": "object"
     },
     "InteractionMode": {
       "enum": [
@@ -4570,6 +6170,52 @@
       ],
       "type": "string",
       "x-waku-open": true
+    },
+    "ModelCatalogSource": {
+      "enum": [
+        "discovered",
+        "cached",
+        "fallback"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "ModelCost": {
+      "properties": {
+        "costUsd": {
+          "format": "double",
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "costUsd"
+      ],
+      "type": "object"
+    },
+    "ModelOption": {
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
     },
     "ModelSelection": {
       "description": "The provider, model and per-model options of a thread or run.",
@@ -5084,6 +6730,52 @@
       "type": "string",
       "x-waku-open": true
     },
+    "PlanUsage": {
+      "description": "An account's plan usage windows.",
+      "properties": {
+        "planLabel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "windows": {
+          "items": {
+            "$ref": "#/$defs/PlanWindow"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "windows"
+      ],
+      "type": "object"
+    },
+    "PlanWindow": {
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "percent": {
+          "description": "0–100.",
+          "format": "double",
+          "type": "number"
+        },
+        "resetsAt": {
+          "description": "Milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "label",
+        "percent"
+      ],
+      "type": "object"
+    },
     "PlanningCaps": {
       "properties": {
         "emits_plan_updated": {
@@ -5108,6 +6800,15 @@
         }
       },
       "type": "object"
+    },
+    "PricingStatus": {
+      "enum": [
+        "fresh",
+        "cached",
+        "unavailable"
+      ],
+      "type": "string",
+      "x-waku-open": true
     },
     "Project": {
       "properties": {
@@ -5223,6 +6924,148 @@
     "ProviderInstanceId": {
       "description": "A configured provider instance. Phase 2: the driver tag (`\"codex\"`);\nPhase 3: `\"codex:<name>\"`.",
       "type": "string"
+    },
+    "ProviderModel": {
+      "properties": {
+        "contextWindows": {
+          "default": [],
+          "description": "Context window sizes offered as a per-session choice.",
+          "items": {
+            "$ref": "#/$defs/ModelOption"
+          },
+          "type": "array"
+        },
+        "defaultContextWindow": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultReasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultServiceTier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "isDefault": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "reasoningEfforts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ModelOption"
+          },
+          "type": "array"
+        },
+        "serviceTiers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ModelOption"
+          },
+          "type": "array"
+        },
+        "subProvider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "ProviderModels": {
+      "properties": {
+        "agentPresets": {
+          "items": {
+            "$ref": "#/$defs/AgentPreset"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ProviderModel"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/ModelCatalogSource"
+        }
+      },
+      "required": [
+        "models",
+        "agentPresets",
+        "source"
+      ],
+      "type": "object"
+    },
+    "ProviderProbe": {
+      "properties": {
+        "agentPresets": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AgentPreset"
+          },
+          "type": "array"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "models": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProviderModel"
+          },
+          "type": "array"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "instanceId",
+        "installed"
+      ],
+      "type": "object"
+    },
+    "ProviderProbeResult": {
+      "properties": {
+        "probe": {
+          "$ref": "#/$defs/ProviderProbe"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "probe"
+      ],
+      "type": "object"
     },
     "ProviderRef": {
       "description": "A provider-native id with its strength. App ids are primary; this is a\nreference only.",
@@ -5462,6 +7305,124 @@
         "cwd",
         "createdAt",
         "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ProviderSessionSummary": {
+      "description": "A provider-native conversation a thread can be imported from\n(`threadImport`).",
+      "properties": {
+        "createdAt": {
+          "description": "Milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "cwd": {
+          "description": "Where the conversation ran, on the daemon host.",
+          "type": "string"
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "nativeId": {
+          "description": "The provider's id for the conversation.",
+          "type": "string"
+        },
+        "resumeCursor": {
+          "$ref": "#/$defs/JsonText",
+          "description": "The driver's opaque resume cursor, passed back unchanged."
+        },
+        "title": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "instanceId",
+        "nativeId",
+        "resumeCursor",
+        "title",
+        "cwd",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ProviderSessionsListParams": {
+      "description": "`providerSessions.list` params: one provider's resumable CLI\nconversations on the daemon host, newest first, without those already\nimported. Only the chosen provider's CLI is asked.",
+      "properties": {
+        "instanceId": {
+          "type": "string"
+        },
+        "limit": {
+          "description": "At most [`MAX_PROVIDER_SESSIONS`], which is also the default.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "instanceId"
+      ],
+      "type": "object"
+    },
+    "ProviderStatus": {
+      "description": "A provider instance as the providers list shows it.",
+      "properties": {
+        "binaryOverride": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "enabled": {
+          "description": "Not listed in `disabledProviders`.",
+          "type": "boolean"
+        },
+        "installed": {
+          "description": "Whether the binary was found, once a probe has run.",
+          "type": "boolean"
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "The driver kind (`codex`, `claude`, …).",
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planUsage": {
+          "description": "Whether this provider reports plan usage (`providers.planUsage`).",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "The CLI version, once a probe asked for it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "instanceId",
+        "kind",
+        "displayName",
+        "enabled",
+        "installed",
+        "planUsage"
       ],
       "type": "object"
     },
@@ -5749,6 +7710,174 @@
       "type": "string",
       "x-waku-open": true
     },
+    "ProvidersItem": {
+      "description": "`providers` items. Statuses change when settings enable, disable or\nre-point a provider and when a probe runs; plan usage when\n`providers.planUsage` fetches it.",
+      "oneOf": [
+        {
+          "properties": {
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "statuses": {
+              "items": {
+                "$ref": "#/$defs/ProviderStatus"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "snapshot",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "revision",
+            "statuses"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/$defs/ProviderStatus"
+            },
+            "type": {
+              "const": "statusUpdated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "revision",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "instanceId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "planUsageUpdated",
+              "type": "string"
+            },
+            "usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanUsage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "instanceId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cursor": {
+              "$ref": "#/$defs/StreamCursor"
+            },
+            "type": {
+              "const": "synchronized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cursor"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProvidersModelsParams": {
+      "description": "`providers.models` params.",
+      "properties": {
+        "instanceId": {
+          "type": "string"
+        },
+        "refresh": {
+          "default": false,
+          "description": "Ask the CLI for a fresh catalog instead of the cached one.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "instanceId"
+      ],
+      "type": "object"
+    },
+    "ProvidersProbeParams": {
+      "description": "`providers.probe` params.",
+      "properties": {
+        "discoverModels": {
+          "default": false,
+          "description": "Ask the CLI for its model catalog (slow; spawns the provider).",
+          "type": "boolean"
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "probeVersion": {
+          "default": false,
+          "description": "Ask the CLI for its version.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "instanceId"
+      ],
+      "type": "object"
+    },
+    "ProvidersSpec": {
+      "type": "object"
+    },
+    "PullResult": {
+      "properties": {
+        "conflicts": {
+          "description": "Paths left unmerged.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updated": {
+          "description": "`HEAD` moved.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "updated",
+        "conflicts"
+      ],
+      "type": "object"
+    },
     "Quality": {
       "enum": [
         "strong",
@@ -5885,6 +8014,142 @@
       "type": "string",
       "x-waku-open": true
     },
+    "ReviewDiff": {
+      "properties": {
+        "completeContext": {
+          "description": "The patch carries full file context (small diffs only).",
+          "type": "boolean"
+        },
+        "files": {
+          "description": "`numstat`, parsed.",
+          "items": {
+            "$ref": "#/$defs/FileDiffSummary"
+          },
+          "type": "array"
+        },
+        "numstat": {
+          "description": "`git diff --numstat` output.",
+          "type": "string"
+        },
+        "patch": {
+          "$ref": "#/$defs/TextPayload",
+          "description": "The unified patch; a blob reference above [`MAX_INLINE_PATCH_BYTES`]."
+        },
+        "source": {
+          "$ref": "#/$defs/ReviewDiffSource"
+        }
+      },
+      "required": [
+        "source",
+        "numstat",
+        "files",
+        "patch",
+        "completeContext"
+      ],
+      "type": "object"
+    },
+    "ReviewDiffParams": {
+      "description": "`review.diff` params.",
+      "properties": {
+        "ignoreWhitespace": {
+          "default": false,
+          "type": "boolean"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        },
+        "source": {
+          "$ref": "#/$defs/ReviewDiffSource"
+        }
+      },
+      "required": [
+        "root",
+        "source"
+      ],
+      "type": "object"
+    },
+    "ReviewDiffSource": {
+      "description": "Which changes `review.diff` compares. The last turn of a thread is\n`threads.turnDiff`.",
+      "oneOf": [
+        {
+          "description": "Working tree and index against `HEAD`, untracked files included.",
+          "properties": {
+            "type": {
+              "const": "uncommitted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Working tree against the index.",
+          "properties": {
+            "type": {
+              "const": "unstaged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Index against `HEAD`.",
+          "properties": {
+            "type": {
+              "const": "staged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Commits on the branch since it left its base.",
+          "properties": {
+            "type": {
+              "const": "committed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Everything on the branch since its base, committed or not.",
+          "properties": {
+            "type": {
+              "const": "branch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "RollbackState": {
       "properties": {
         "checkpointId": {
@@ -5917,6 +8182,35 @@
       ],
       "type": "object"
     },
+    "RootOpParams": {
+      "description": "The params of a mutation that only names a root (`vcs.push`, `vcs.pull`).",
+      "properties": {
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        }
+      },
+      "required": [
+        "root",
+        "opId"
+      ],
+      "type": "object"
+    },
+    "RootParams": {
+      "description": "The params of a read that only names a root.",
+      "properties": {
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "type": "object"
+    },
     "RootRef": {
       "description": "Where a files, vcs or terminal call operates.",
       "oneOf": [
@@ -5938,7 +8232,7 @@
           "type": "object"
         },
         {
-          "description": "The thread's worktree, or its project's root. TODO(#54): resolved\nthrough the orchestrator; answered `unsupported` until then.",
+          "description": "The thread's worktree, or its project's root, as the orchestrator\nrecords them.",
           "properties": {
             "threadId": {
               "format": "uuid",
@@ -6817,6 +9111,21 @@
           "default": {},
           "description": "Binary path per provider instance id.",
           "type": "object"
+        },
+        "storage": {
+          "$ref": "#/$defs/StorageSettings",
+          "default": {
+            "previousWorktreesDirectories": [],
+            "worktreeCleanup": {
+              "deletedTasks": false,
+              "intervalHours": 24,
+              "keepWhen": "uncommittedChanges",
+              "merged": false,
+              "removeUnpushedCommits": false,
+              "unchanged": false
+            }
+          },
+          "description": "The managed worktree folder and its cleanup rules."
         }
       },
       "type": "object"
@@ -6898,6 +9207,57 @@
         }
       ]
     },
+    "SettingsPatch": {
+      "description": "The settings fields to change. Touching `disabledProviders` or\n`providerBinaryOverrides` needs `providers:manage` as well.",
+      "properties": {
+        "computerUseAllowedApps": {
+          "items": {
+            "$ref": "#/$defs/AppGrant"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "computerUseEnabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "disabledProviders": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "providerBinaryOverrides": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The whole map: binary path per provider instance id.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "storage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StorageSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The managed worktree folder and its cleanup rules. Moving the folder\nkeeps the old location in `previousWorktreesDirectories`."
+        }
+      },
+      "type": "object"
+    },
     "SettingsSnapshot": {
       "description": "`settings.get` result and settings snapshot.",
       "properties": {
@@ -6918,6 +9278,31 @@
       "type": "object"
     },
     "SettingsSpec": {
+      "type": "object"
+    },
+    "SettingsUpdateParams": {
+      "description": "`settings.update` params. Fields present in `patch` replace the current\nvalue; with `baseRevision`, the update is refused with `conflict`\n(`revisionConflict`) unless the settings still have that revision.",
+      "properties": {
+        "baseRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "patch": {
+          "$ref": "#/$defs/SettingsPatch"
+        }
+      },
+      "required": [
+        "patch",
+        "opId"
+      ],
       "type": "object"
     },
     "SettledOverride": {
@@ -7114,6 +9499,296 @@
       },
       "type": "object"
     },
+    "Skill": {
+      "description": "One skill, merged across the places it is installed.",
+      "properties": {
+        "allowedTools": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "body": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "duplicates": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "installs": {
+          "description": "The first install is the primary one.",
+          "items": {
+            "$ref": "#/$defs/SkillInstall"
+          },
+          "type": "array"
+        },
+        "modifiedAt": {
+          "description": "Milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "project": {
+          "description": "The project's name, for project skills.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rowKey": {
+          "description": "A stable key for list rows (53 bits).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/SkillScope"
+        },
+        "supportingFiles": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "scope",
+        "installs",
+        "enabled",
+        "body",
+        "supportingFiles",
+        "totalBytes",
+        "duplicates",
+        "rowKey"
+      ],
+      "type": "object"
+    },
+    "SkillInstall": {
+      "properties": {
+        "dir": {
+          "description": "The skill directory on the daemon host.",
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "skillFile": {
+          "type": "string"
+        },
+        "source": {
+          "description": "`shared` (`~/.agents/skills` and the like) or the provider id whose\nfolder holds it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "dir",
+        "skillFile",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "SkillScope": {
+      "enum": [
+        "user",
+        "project"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
+    "SkillsCatalog": {
+      "properties": {
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/Skill"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "skills"
+      ],
+      "type": "object"
+    },
+    "SkillsListParams": {
+      "description": "`skills.list` params: user skills plus those of these projects.",
+      "properties": {
+        "projectIds": {
+          "default": [],
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SkillsSetEnabledParams": {
+      "description": "`skills.setEnabled` params.",
+      "properties": {
+        "dirs": {
+          "description": "Skill directories (`SkillInstall.dir`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dirs",
+        "enabled",
+        "opId"
+      ],
+      "type": "object"
+    },
+    "SkillsTrashParams": {
+      "description": "`skills.trash` params: move skill directories to the trash.",
+      "properties": {
+        "dirs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dirs",
+        "opId"
+      ],
+      "type": "object"
+    },
+    "SlashCommand": {
+      "properties": {
+        "argumentHint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/CommandScope"
+        },
+        "template": {
+          "description": "The prompt template a Waku command expands to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "StorageRunCleanupParams": {
+      "description": "`storage.runWorktreeCleanup` params.",
+      "properties": {
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "opId"
+      ],
+      "type": "object"
+    },
+    "StorageSettings": {
+      "description": "The managed worktree folder and its cleanup rules (#62).",
+      "properties": {
+        "previousWorktreesDirectories": {
+          "default": [],
+          "description": "Earlier locations, still managed by cleanup.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "worktreeCleanup": {
+          "$ref": "#/$defs/WorktreeCleanupSettings",
+          "default": {
+            "deletedTasks": false,
+            "intervalHours": 24,
+            "keepWhen": "uncommittedChanges",
+            "merged": false,
+            "removeUnpushedCommits": false,
+            "unchanged": false
+          }
+        },
+        "worktreesDirectory": {
+          "description": "Where new worktrees are created; the daemon's default folder when\nabsent. Absolute; a leading `~` is expanded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "StoredAttachment": {
+      "properties": {
+        "isDir": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "The materialized file or directory on the daemon host.",
+          "type": "string"
+        },
+        "reference": {
+          "description": "`waku-attachment:<id>`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference",
+        "path",
+        "name",
+        "isDir"
+      ],
+      "type": "object"
+    },
     "StreamCursor": {
       "description": "Where a subscriber stands in a stream. A client passes its last *applied*\ncursor as `subscribe.after`; the daemon decides between replay and a\nsnapshot.",
       "oneOf": [
@@ -7263,6 +9938,76 @@
           "properties": {
             "type": {
               "const": "commandOutput",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DraftsSpec",
+          "description": "Composer drafts: a snapshot, `synchronized`, then every change.",
+          "properties": {
+            "type": {
+              "const": "drafts",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ProvidersSpec",
+          "description": "Provider statuses and plan usage.",
+          "properties": {
+            "type": {
+              "const": "providers",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/TerminalSpec",
+          "description": "One terminal: `attached`, then output as DATA under credit; input as\nDATA from the client when `interactive` (which needs `terminal`).",
+          "properties": {
+            "type": {
+              "const": "terminal",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/TerminalListSpec",
+          "description": "The open terminals.",
+          "properties": {
+            "type": {
+              "const": "terminalList",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/VcsStatusSpec",
+          "description": "A repository's status while subscribed, at most once a second.",
+          "properties": {
+            "type": {
+              "const": "vcsStatus",
               "type": "string"
             }
           },
@@ -7539,6 +10284,499 @@
         "stream"
       ],
       "type": "object"
+    },
+    "TerminalGeneration": {
+      "description": "`terminal.restart` result: the new shell's generation.",
+      "properties": {
+        "generation": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "generation"
+      ],
+      "type": "object"
+    },
+    "TerminalInfo": {
+      "properties": {
+        "cols": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "createdAt": {
+          "description": "Milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "cwd": {
+          "description": "The shell's working directory on the daemon host.",
+          "type": "string"
+        },
+        "exited": {
+          "type": "boolean"
+        },
+        "generation": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "rows": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "terminalId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "terminalId",
+        "cwd",
+        "cols",
+        "rows",
+        "generation",
+        "exited",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "TerminalItem": {
+      "description": "`terminal` items. The stream starts with `attached`; then output arrives\nas DATA, the first `replay` bytes of it being the retained tail that ends\nat `offset`. A client's cursor is `offset{generation, offset + live\nbytes received after the replay}`; resuming from it gets only the output\nit missed when that is still retained, else a fresh tail.",
+      "oneOf": [
+        {
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "exitCode": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "exited": {
+              "type": "boolean"
+            },
+            "generation": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "offset": {
+              "description": "The raw output offset the replay ends at; live output follows.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "replay": {
+              "description": "How many DATA bytes of retained output follow before live output\n(0 when the cursor was current).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "truncated": {
+              "description": "Earlier output exists that the replay does not contain.",
+              "type": "boolean"
+            },
+            "type": {
+              "const": "attached",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "generation",
+            "cols",
+            "rows",
+            "offset",
+            "replay",
+            "truncated",
+            "exited"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "resized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cols",
+            "rows"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Clear the screen and scrollback: the terminal was cleared, restarted\n(a new `generation`), or this subscriber fell behind what the daemon\nretains. `replay` DATA bytes of retained output follow, then live\noutput from `offset`.",
+          "properties": {
+            "generation": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "offset": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "replay": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "reset",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "generation",
+            "offset",
+            "replay"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The shell exited. The terminal stays open with its output until it is\nrestarted or closed.",
+          "properties": {
+            "code": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "exited",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "const": "error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TerminalListItem": {
+      "oneOf": [
+        {
+          "properties": {
+            "terminals": {
+              "items": {
+                "$ref": "#/$defs/TerminalInfo"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "snapshot",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "terminals"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "terminal": {
+              "$ref": "#/$defs/TerminalInfo"
+            },
+            "type": {
+              "const": "upserted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "terminal"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "terminalId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "removed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "terminalId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TerminalListSpec": {
+      "description": "`terminalList` spec: every terminal, or those whose working directory is\n`root`.",
+      "properties": {
+        "root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RootRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TerminalOpenParams": {
+      "description": "`terminal.open` params.",
+      "properties": {
+        "cols": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef",
+          "description": "The shell's working directory."
+        },
+        "rows": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "root",
+        "cols",
+        "rows",
+        "opId"
+      ],
+      "type": "object"
+    },
+    "TerminalOpened": {
+      "description": "`terminal.open` result.",
+      "properties": {
+        "generation": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "terminalId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminalId",
+        "generation"
+      ],
+      "type": "object"
+    },
+    "TerminalParams": {
+      "description": "`terminal.clear`, `terminal.restart` and `terminal.close` params.",
+      "properties": {
+        "terminalId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminalId"
+      ],
+      "type": "object"
+    },
+    "TerminalResizeParams": {
+      "description": "`terminal.resize` params.",
+      "properties": {
+        "cols": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "terminalId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminalId",
+        "cols",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "TerminalSpec": {
+      "description": "`terminal` spec. `interactive` (which needs the `terminal` scope) makes\nDATA the client sends on the channel the terminal's input.",
+      "properties": {
+        "interactive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "terminalId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminalId"
+      ],
+      "type": "object"
+    },
+    "TextPayload": {
+      "description": "Text that may be too large for a message (RFC 0003 §1.1 `Payload<T>`):\ninline, or a blob reference to download.",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "inline",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reference": {
+              "type": "string"
+            },
+            "size": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "blob",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "reference",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "ThreadActivity": {
       "enum": [
@@ -8202,6 +11440,43 @@
       "type": "string",
       "x-waku-open": true
     },
+    "TokenTotals": {
+      "properties": {
+        "cacheCreation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cachedInput": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reasoning": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uncachedInput": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "uncachedInput",
+        "cachedInput",
+        "cacheCreation",
+        "output",
+        "reasoning"
+      ],
+      "type": "object"
+    },
     "TokenUsage": {
       "description": "Token accounting as the provider reports it.",
       "properties": {
@@ -8601,6 +11876,37 @@
       ],
       "type": "string",
       "x-waku-open": true
+    },
+    "TreeEntry": {
+      "description": "One row of the file tree, depth first.",
+      "properties": {
+        "depth": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expanded": {
+          "type": "boolean"
+        },
+        "isDir": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "Relative to the root, `/`-separated.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "name",
+        "isDir",
+        "expanded",
+        "depth"
+      ],
+      "type": "object"
     },
     "TurnCaps": {
       "properties": {
@@ -9546,6 +12852,441 @@
       ],
       "type": "object"
     },
+    "UsageDay": {
+      "properties": {
+        "byProvider": {
+          "items": {
+            "$ref": "#/$defs/UsageProviderPart"
+          },
+          "type": "array"
+        },
+        "costUsd": {
+          "format": "double",
+          "type": "number"
+        },
+        "day": {
+          "description": "`YYYY-MM-DD`.",
+          "type": "string"
+        },
+        "totalTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "day",
+        "costUsd",
+        "totalTokens",
+        "byProvider"
+      ],
+      "type": "object"
+    },
+    "UsageHistory": {
+      "description": "Token and cost history read from the providers' local logs.",
+      "properties": {
+        "costUsd": {
+          "format": "double",
+          "type": "number"
+        },
+        "daily": {
+          "items": {
+            "$ref": "#/$defs/UsageDay"
+          },
+          "type": "array"
+        },
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/UsageModelSlice"
+          },
+          "type": "array"
+        },
+        "months": {
+          "items": {
+            "$ref": "#/$defs/UsageMonth"
+          },
+          "type": "array"
+        },
+        "pricing": {
+          "$ref": "#/$defs/PricingStatus"
+        },
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/UsageProject"
+          },
+          "type": "array"
+        },
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/UsageProviderSlice"
+          },
+          "type": "array"
+        },
+        "quality": {
+          "$ref": "#/$defs/CostQuality"
+        },
+        "records": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scanDurationMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scannedFiles": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sinceDay": {
+          "description": "`YYYY-MM-DD`.",
+          "type": "string"
+        },
+        "skippedFiles": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totals": {
+          "$ref": "#/$defs/TokenTotals"
+        },
+        "untilDay": {
+          "type": "string"
+        },
+        "window": {
+          "$ref": "#/$defs/UsageWindow"
+        }
+      },
+      "required": [
+        "window",
+        "sinceDay",
+        "untilDay",
+        "totals",
+        "totalTokens",
+        "costUsd",
+        "records",
+        "sessions",
+        "providers",
+        "models",
+        "daily",
+        "months",
+        "projects",
+        "quality",
+        "pricing",
+        "scannedFiles",
+        "skippedFiles",
+        "errors",
+        "scanDurationMs"
+      ],
+      "type": "object"
+    },
+    "UsageHistoryParams": {
+      "description": "`usage.history` params.",
+      "properties": {
+        "projectIds": {
+          "default": [],
+          "description": "Projects whose usage is broken out per project.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "window": {
+          "$ref": "#/$defs/UsageWindow"
+        }
+      },
+      "required": [
+        "window"
+      ],
+      "type": "object"
+    },
+    "UsageModelSlice": {
+      "properties": {
+        "costShare": {
+          "format": "double",
+          "type": "number"
+        },
+        "costUsd": {
+          "format": "double",
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "totalTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "costUsd",
+        "totalTokens",
+        "costShare"
+      ],
+      "type": "object"
+    },
+    "UsageMonth": {
+      "properties": {
+        "activeDays": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "byProvider": {
+          "items": {
+            "$ref": "#/$defs/UsageProviderPart"
+          },
+          "type": "array"
+        },
+        "costUsd": {
+          "format": "double",
+          "type": "number"
+        },
+        "firstDay": {
+          "description": "`YYYY-MM-DD`, the first day of the month.",
+          "type": "string"
+        },
+        "sessions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "topModels": {
+          "items": {
+            "$ref": "#/$defs/ModelCost"
+          },
+          "type": "array"
+        },
+        "totalTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "firstDay",
+        "costUsd",
+        "totalTokens",
+        "byProvider",
+        "sessions",
+        "activeDays",
+        "topModels"
+      ],
+      "type": "object"
+    },
+    "UsageProject": {
+      "properties": {
+        "byProvider": {
+          "items": {
+            "$ref": "#/$defs/UsageProviderPart"
+          },
+          "type": "array"
+        },
+        "costShare": {
+          "format": "double",
+          "type": "number"
+        },
+        "costUsd": {
+          "format": "double",
+          "type": "number"
+        },
+        "lastDay": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "sessions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "topModels": {
+          "items": {
+            "$ref": "#/$defs/ModelCost"
+          },
+          "type": "array"
+        },
+        "totalTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "costUsd",
+        "totalTokens",
+        "byProvider",
+        "sessions",
+        "costShare",
+        "topModels"
+      ],
+      "type": "object"
+    },
+    "UsageProviderPart": {
+      "description": "One provider's part of a day, month or project.",
+      "properties": {
+        "costUsd": {
+          "format": "double",
+          "type": "number"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "totalTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "costUsd",
+        "totalTokens"
+      ],
+      "type": "object"
+    },
+    "UsageProviderSlice": {
+      "description": "One provider's share of a window. `provider` is a provider id.",
+      "properties": {
+        "costShare": {
+          "format": "double",
+          "type": "number"
+        },
+        "costUsd": {
+          "format": "double",
+          "type": "number"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "tokenShare": {
+          "format": "double",
+          "type": "number"
+        },
+        "totalTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "costUsd",
+        "totalTokens",
+        "costShare",
+        "tokenShare"
+      ],
+      "type": "object"
+    },
+    "UsageWindow": {
+      "description": "A usage reporting window.",
+      "oneOf": [
+        {
+          "description": "The last `days` days, today included.",
+          "properties": {
+            "days": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "trailingDays",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "days"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last `months` calendar months, this one included.",
+          "properties": {
+            "months": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "months",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "months"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "thisMonth",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "lastMonth",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "UserInputAnswer": {
       "properties": {
         "answers": {
@@ -9609,6 +13350,72 @@
       ],
       "type": "object"
     },
+    "VcsCommitParams": {
+      "properties": {
+        "includeUnstaged": {
+          "default": false,
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "push": {
+          "default": false,
+          "type": "boolean"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        }
+      },
+      "required": [
+        "root",
+        "message",
+        "opId"
+      ],
+      "type": "object"
+    },
+    "VcsCreateWorktreeParams": {
+      "description": "`vcs.createWorktree` params: a new `waku/` branch and worktree for a\nproject, in the managed worktree folder.",
+      "properties": {
+        "baseRef": {
+          "description": "Branch or commit to start from; the repository's default branch when\nabsent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branchHint": {
+          "description": "Text the branch and folder names are derived from (a prompt or a\ntitle).",
+          "type": "string"
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "projectId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "threadId": {
+          "description": "The thread the worktree is for, recorded in its name; a fresh id when\nabsent.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "projectId",
+        "branchHint",
+        "opId"
+      ],
+      "type": "object"
+    },
     "VcsFailureKind": {
       "enum": [
         "notARepository",
@@ -9620,6 +13427,152 @@
       ],
       "type": "string",
       "x-waku-open": true
+    },
+    "VcsGenerateCommitMessageParams": {
+      "description": "`vcs.generateCommitMessage` params. The provider instance's binary comes\nfrom settings, never from the request.",
+      "properties": {
+        "includeUnstaged": {
+          "default": false,
+          "type": "boolean"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        },
+        "selection": {
+          "$ref": "#/$defs/ModelSelection"
+        }
+      },
+      "required": [
+        "root",
+        "selection"
+      ],
+      "type": "object"
+    },
+    "VcsRemoveWorktreeParams": {
+      "description": "`vcs.removeWorktree` params. Without `force`, git refuses a worktree\nwith modified or untracked files.",
+      "properties": {
+        "force": {
+          "default": false,
+          "type": "boolean"
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute path of a linked worktree.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "opId"
+      ],
+      "type": "object"
+    },
+    "VcsStageParams": {
+      "description": "`vcs.stage` params: stage (or, with `stage: false`, unstage) `paths`.",
+      "properties": {
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        },
+        "stage": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "root",
+        "paths",
+        "stage",
+        "opId"
+      ],
+      "type": "object"
+    },
+    "VcsStatusItem": {
+      "description": "`vcsStatus` items: the status whenever it changes, at most once per\n[`VCS_STATUS_MIN_INTERVAL_MS`]. Each replaces the previous one.",
+      "oneOf": [
+        {
+          "properties": {
+            "at": {
+              "description": "When it was read, in milliseconds since the Unix epoch.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/$defs/GitStatus"
+            },
+            "type": {
+              "const": "status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "status",
+            "at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "VcsStatusSpec": {
+      "description": "`vcsStatus` spec.",
+      "properties": {
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "type": "object"
+    },
+    "VcsSwitchRefParams": {
+      "description": "`vcs.switchRef` params: check out `name`, creating it first with\n`create`.",
+      "properties": {
+        "create": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "opId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "root": {
+          "$ref": "#/$defs/RootRef"
+        }
+      },
+      "required": [
+        "root",
+        "name",
+        "opId"
+      ],
+      "type": "object"
     },
     "WebSearchResult": {
       "properties": {
@@ -9782,6 +13735,204 @@
           "type": "object"
         }
       ]
+    },
+    "WorktreeCleanupEntry": {
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branchDeleted": {
+          "description": "The `waku/` branch was deleted with the worktree.",
+          "type": "boolean"
+        },
+        "outcome": {
+          "$ref": "#/$defs/CleanupOutcome"
+        },
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/CleanupReason"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadTitle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "outcome",
+        "reason",
+        "branchDeleted"
+      ],
+      "type": "object"
+    },
+    "WorktreeCleanupReport": {
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/WorktreeCleanupEntry"
+          },
+          "type": "array"
+        },
+        "failed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "finishedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "kept": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "omitted": {
+          "description": "Rows beyond the report's bound, counted but not listed.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "removed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "startedAt": {
+          "description": "Milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "trigger": {
+          "$ref": "#/$defs/CleanupTrigger"
+        }
+      },
+      "required": [
+        "trigger",
+        "startedAt",
+        "finishedAt",
+        "entries",
+        "removed",
+        "kept",
+        "failed",
+        "omitted"
+      ],
+      "type": "object"
+    },
+    "WorktreeCleanupSettings": {
+      "description": "Automatic worktree cleanup rules; all off by default.",
+      "properties": {
+        "deletedTasks": {
+          "default": false,
+          "description": "Remove the worktree of a deleted thread.",
+          "type": "boolean"
+        },
+        "finishedAfterDays": {
+          "description": "Remove a worktree this many days after its threads finished.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "inactiveAfterDays": {
+          "description": "Remove a worktree whose threads had no activity for this many days.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "intervalHours": {
+          "default": 24,
+          "description": "Hours between automatic runs, 1–168.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "keepWhen": {
+          "$ref": "#/$defs/WorktreeKeepWhen",
+          "default": "uncommittedChanges"
+        },
+        "merged": {
+          "default": false,
+          "description": "Remove a worktree whose branch was merged into its base.",
+          "type": "boolean"
+        },
+        "removeUnpushedCommits": {
+          "default": false,
+          "description": "Allow removing a worktree whose branch holds commits that exist\nnowhere else (the branch is kept).",
+          "type": "boolean"
+        },
+        "unchanged": {
+          "default": false,
+          "description": "Remove a worktree with no commits beyond its base.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "WorktreeCleanupStatus": {
+      "properties": {
+        "lastReport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorktreeCleanupReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastRunAt": {
+          "description": "Milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nextRunAt": {
+          "description": "When the next automatic run is due, if any rule is enabled.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "running": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "running"
+      ],
+      "type": "object"
+    },
+    "WorktreeKeepWhen": {
+      "enum": [
+        "anyLocalFiles",
+        "uncommittedChanges",
+        "trackedChanges"
+      ],
+      "type": "string",
+      "x-waku-open": true
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -10143,6 +14294,536 @@
         "$ref": "#/$defs/ThreadFindResult"
       },
       "scope": "read"
+    },
+    {
+      "name": "daemon.info",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DaemonInfo"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "daemon.shutdown",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/DaemonShutdownParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Ack"
+      },
+      "scope": "admin"
+    },
+    {
+      "name": "files.tree",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/FilesTreeParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/TreeEntry"
+        },
+        "type": "array"
+      },
+      "scope": "files:read"
+    },
+    {
+      "name": "files.searchEntries",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/FilesSearchEntriesParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/FileEntry"
+        },
+        "type": "array"
+      },
+      "scope": "files:read"
+    },
+    {
+      "name": "files.searchContents",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/FilesSearchContentsParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/ContentHit"
+        },
+        "type": "array"
+      },
+      "scope": "files:read"
+    },
+    {
+      "name": "files.write",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/FilesWriteParams"
+      },
+      "result": {
+        "$ref": "#/$defs/FileRevision"
+      },
+      "scope": "files:write"
+    },
+    {
+      "name": "fs.browse",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/FsBrowseParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Directory"
+      },
+      "scope": "files:read"
+    },
+    {
+      "name": "composer.slashCommands",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ComposerSlashCommandsParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/SlashCommand"
+        },
+        "type": "array"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "skills.list",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/SkillsListParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SkillsCatalog"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "skills.setEnabled",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/SkillsSetEnabledParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Ack"
+      },
+      "scope": "settings:write"
+    },
+    {
+      "name": "skills.trash",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/SkillsTrashParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Ack"
+      },
+      "scope": "settings:write"
+    },
+    {
+      "name": "drafts.get",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DraftsSnapshot"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "drafts.apply",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/DraftsApplyParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DraftsRevision"
+      },
+      "scope": "operate"
+    },
+    {
+      "name": "blobs.put",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/BlobsPutParams"
+      },
+      "result": {
+        "$ref": "#/$defs/BlobPut"
+      },
+      "scope": "operate"
+    },
+    {
+      "name": "blobs.stat",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/BlobsStatParams"
+      },
+      "result": {
+        "$ref": "#/$defs/BlobStat"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "attachments.import",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/AttachmentsImportParams"
+      },
+      "result": {
+        "$ref": "#/$defs/StoredAttachment"
+      },
+      "scope": "operate"
+    },
+    {
+      "name": "attachments.importPath",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/AttachmentsImportPathParams"
+      },
+      "result": {
+        "$ref": "#/$defs/StoredAttachment"
+      },
+      "scope": "operate"
+    },
+    {
+      "name": "vcs.status",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/RootParams"
+      },
+      "result": {
+        "$ref": "#/$defs/GitStatus"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "vcs.refs",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/RootParams"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BranchSnapshot"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "scope": "read"
+    },
+    {
+      "name": "vcs.switchRef",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/VcsSwitchRefParams"
+      },
+      "result": {
+        "$ref": "#/$defs/BranchSnapshot"
+      },
+      "scope": "vcs:write"
+    },
+    {
+      "name": "vcs.worktrees",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/RootParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/GitWorktree"
+        },
+        "type": "array"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "vcs.createWorktree",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/VcsCreateWorktreeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/CreatedWorktree"
+      },
+      "scope": "vcs:write"
+    },
+    {
+      "name": "vcs.removeWorktree",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/VcsRemoveWorktreeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Ack"
+      },
+      "scope": "vcs:write"
+    },
+    {
+      "name": "vcs.commitPreview",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/RootParams"
+      },
+      "result": {
+        "$ref": "#/$defs/CommitSnapshot"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "vcs.stage",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/VcsStageParams"
+      },
+      "result": {
+        "$ref": "#/$defs/GitStatus"
+      },
+      "scope": "vcs:write"
+    },
+    {
+      "name": "vcs.generateCommitMessage",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/VcsGenerateCommitMessageParams"
+      },
+      "result": {
+        "$ref": "#/$defs/CommitMessage"
+      },
+      "scope": "operate"
+    },
+    {
+      "name": "vcs.commit",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/VcsCommitParams"
+      },
+      "result": {
+        "$ref": "#/$defs/CommitResult"
+      },
+      "scope": "vcs:write"
+    },
+    {
+      "name": "vcs.push",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/RootOpParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Ack"
+      },
+      "scope": "vcs:write"
+    },
+    {
+      "name": "vcs.pull",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/RootOpParams"
+      },
+      "result": {
+        "$ref": "#/$defs/PullResult"
+      },
+      "scope": "vcs:write"
+    },
+    {
+      "name": "review.diff",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ReviewDiffParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ReviewDiff"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "terminal.open",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/TerminalOpenParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TerminalOpened"
+      },
+      "scope": "terminal"
+    },
+    {
+      "name": "terminal.resize",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/TerminalResizeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Ack"
+      },
+      "scope": "terminal"
+    },
+    {
+      "name": "terminal.clear",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/TerminalParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Ack"
+      },
+      "scope": "terminal"
+    },
+    {
+      "name": "terminal.restart",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/TerminalParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TerminalGeneration"
+      },
+      "scope": "terminal"
+    },
+    {
+      "name": "terminal.close",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/TerminalParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Ack"
+      },
+      "scope": "terminal"
+    },
+    {
+      "name": "providers.list",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/ProviderStatus"
+        },
+        "type": "array"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "providers.probe",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ProvidersProbeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProviderProbeResult"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "providers.models",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ProvidersModelsParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProviderModels"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "providers.planUsage",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/InstanceParams"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PlanUsage"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "scope": "read"
+    },
+    {
+      "name": "providerSessions.list",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ProviderSessionsListParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/ProviderSessionSummary"
+        },
+        "type": "array"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "usage.history",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/UsageHistoryParams"
+      },
+      "result": {
+        "$ref": "#/$defs/UsageHistory"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "settings.update",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/SettingsUpdateParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SettingsSnapshot"
+      },
+      "scope": "settings:write"
+    },
+    {
+      "name": "storage.worktreeCleanupStatus",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/NoParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorktreeCleanupStatus"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "storage.runWorktreeCleanup",
+      "opId": true,
+      "params": {
+        "$ref": "#/$defs/StorageRunCleanupParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorktreeCleanupReport"
+      },
+      "scope": "settings:write"
+    },
+    {
+      "name": "computerUse.permissions",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ComputerUsePermissionsParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ComputerPermissions"
+      },
+      "scope": "read"
     }
   ],
   "protocol": {
@@ -10232,6 +14913,66 @@
       "scope": "read",
       "spec": {
         "$ref": "#/$defs/CommandOutputSpec"
+      }
+    },
+    {
+      "cursor": "revision",
+      "data": false,
+      "item": {
+        "$ref": "#/$defs/DraftsItem"
+      },
+      "name": "drafts",
+      "scope": "read",
+      "spec": {
+        "$ref": "#/$defs/DraftsSpec"
+      }
+    },
+    {
+      "cursor": "revision",
+      "data": false,
+      "item": {
+        "$ref": "#/$defs/ProvidersItem"
+      },
+      "name": "providers",
+      "scope": "read",
+      "spec": {
+        "$ref": "#/$defs/ProvidersSpec"
+      }
+    },
+    {
+      "cursor": "offset",
+      "data": true,
+      "item": {
+        "$ref": "#/$defs/TerminalItem"
+      },
+      "name": "terminal",
+      "scope": "read",
+      "spec": {
+        "$ref": "#/$defs/TerminalSpec"
+      }
+    },
+    {
+      "cursor": "none",
+      "data": false,
+      "item": {
+        "$ref": "#/$defs/TerminalListItem"
+      },
+      "name": "terminalList",
+      "scope": "read",
+      "spec": {
+        "$ref": "#/$defs/TerminalListSpec"
+      }
+    },
+    {
+      "cursor": "none",
+      "data": false,
+      "item": {
+        "$ref": "#/$defs/VcsStatusItem"
+      },
+      "name": "vcsStatus",
+      "scope": "read",
+      "spec": {
+        "$ref": "#/$defs/VcsStatusSpec"
       }
     }
   ],

@@ -6,7 +6,7 @@
 // frames either way. MessagePack (binary MSG frames) is available for
 // native-like clients and tests.
 
-import { encodeMsgFrame, FrameError, parseFrame, type Frame } from "./frame";
+import { encodeDataFrame, encodeMsgFrame, FrameError, parseFrame, type Frame } from "./frame";
 import * as msgpack from "./msgpack";
 import {
   HELLO_DEADLINE_MS,
@@ -119,9 +119,20 @@ function decodeIncoming(encoding: Encoding, data: unknown): Incoming | null {
   return { kind: "message", value: msgpack.decode(frame.body) };
 }
 
+/** `blobs.put` options. */
+export interface UploadOptions {
+  mime: string;
+  name?: string;
+  /** Lowercase hex; lets the daemon skip a blob it already holds. */
+  sha256?: string;
+}
+
 export class Subscription<S extends StreamName> {
   private currentChannel = 0;
   private currentCursor: T.StreamCursor | undefined;
+  /** DATA bytes still to come that replay retained output (a terminal's
+   * `attached`/`reset`); they do not advance the offset cursor. */
+  private replayLeft = 0;
   private ended = false;
 
   /** @internal */
@@ -154,6 +165,22 @@ export class Subscription<S extends StreamName> {
     this.client.unsubscribeChannel(this.currentChannel);
   }
 
+  /** Send DATA on this subscription's channel: an interactive terminal's
+   * input. */
+  sendData(bytes: Uint8Array): void {
+    if (this.ended) return;
+    this.client.sendData(this.currentChannel, false, bytes);
+  }
+
+  /** @internal DATA arrived: an offset cursor moves past the replay. */
+  advance(bytes: number): void {
+    const live = Math.max(0, bytes - this.replayLeft);
+    this.replayLeft = Math.max(0, this.replayLeft - bytes);
+    if (live > 0 && this.currentCursor?.type === "offset") {
+      this.currentCursor = { ...this.currentCursor, offset: this.currentCursor.offset + live };
+    }
+  }
+
   /** @internal */
   open(after: T.StreamCursor | undefined): void {
     this.currentCursor = after ?? this.currentCursor;
@@ -166,12 +193,29 @@ export class Subscription<S extends StreamName> {
   /** @internal */
   deliver(raw: unknown): void {
     const item = itemNormalizers[this.stream](raw) as StreamItemOf<S>;
-    const record = item as { type?: string; cursor?: T.StreamCursor; revision?: unknown; seq?: unknown };
+    const record = item as {
+      type?: string;
+      cursor?: T.StreamCursor;
+      revision?: unknown;
+      seq?: unknown;
+      generation?: unknown;
+      offset?: unknown;
+      replay?: unknown;
+    };
     // Unknown items still advance nothing they do not carry, but they are
     // delivered so the caller can count them (RFC 0003 §4).
     const kind = STREAMS[this.stream].cursor;
     if ((record.type === "synchronized" || record.type === "snapshot") && record.cursor) {
       this.currentCursor = record.cursor;
+    } else if (
+      kind === "offset" &&
+      (record.type === "attached" || record.type === "reset") &&
+      typeof record.generation === "string" &&
+      typeof record.offset === "number"
+    ) {
+      // A terminal: live output after `replay` bytes moves the offset.
+      this.currentCursor = { type: "offset", generation: record.generation, offset: record.offset };
+      this.replayLeft = typeof record.replay === "number" ? record.replay : 0;
     } else if (kind === "revision" && typeof record.revision === "number") {
       this.currentCursor = { type: "revision", revision: record.revision };
     } else if (kind === "sequence" && typeof record.seq === "number" && this.currentCursor?.type === "sequence") {
@@ -201,6 +245,8 @@ export class V8Client {
   private nextNonce = 1;
   private readonly pending = new Map<number, PendingCall>();
   private readonly channels = new Map<number, Subscription<StreamName>>();
+  /** Channels of uploads in progress; they share the channel space. */
+  private readonly uploads = new Set<number>();
   private lastSent = Date.now();
   private lastReceived = Date.now();
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -311,6 +357,84 @@ export class V8Client {
     return subscription;
   }
 
+  /**
+   * Upload `bytes` as a blob (`blobs.put`, RFC 0003 §5.6): the call, then the
+   * bytes as DATA on a fresh channel with `FIN` on the last chunk. A reply
+   * that arrives early (deduplicated, or refused) stops the transfer.
+   */
+  async uploadBlob(bytes: Uint8Array, options: UploadOptions): Promise<T.BlobPut> {
+    const channel = this.allocateChannel();
+    this.uploads.add(channel);
+    try {
+      let answered = false;
+      const params: MethodParams<"blobs.put"> = { channel, size: bytes.length, mime: options.mime };
+      if (options.name !== undefined) params.name = options.name;
+      if (options.sha256 !== undefined) params.sha256 = options.sha256;
+      const reply = this.call("blobs.put", params).finally(() => {
+        answered = true;
+      });
+      // Let an immediate (deduplicated) reply land before sending anything.
+      await Promise.resolve();
+      const chunk = Math.max(1, this.welcome.limits.maxDataChunkBytes);
+      if (bytes.length === 0) this.sendData(channel, true, bytes);
+      for (let start = 0; start < bytes.length; start += chunk) {
+        if (answered) {
+          this.sendData(channel, true, new Uint8Array());
+          break;
+        }
+        const end = Math.min(bytes.length, start + chunk);
+        this.sendData(channel, end === bytes.length, bytes.subarray(start, end));
+        // Yield between chunks so a large upload does not starve replies.
+        if (end < bytes.length) await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      return await reply;
+    } finally {
+      this.uploads.delete(channel);
+    }
+  }
+
+  /** Download a blob, or with `path` a file inside an attachment. */
+  downloadBlob(reference: string, path?: string): Promise<{ meta: T.BlobDownloadItem; bytes: Uint8Array }> {
+    return new Promise((resolve, reject) => {
+      let meta: T.BlobDownloadItem | undefined;
+      const parts: Uint8Array[] = [];
+      const spec: StreamSpecOf<"blobDownload"> = { reference };
+      if (path !== undefined) spec.path = path;
+      this.subscribe("blobDownload", spec, {
+        item: (item) => {
+          meta = item;
+        },
+        data: (bytes) => {
+          parts.push(bytes.slice());
+        },
+        end: (end) => {
+          if (end.reason.type !== "completed" || !meta) {
+            reject(
+              end.reason.type === "error"
+                ? new CallError(end.reason.error)
+                : new Error(`the download ended: ${end.reason.type}`),
+            );
+            return;
+          }
+          const bytes = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+          let offset = 0;
+          for (const part of parts) {
+            bytes.set(part, offset);
+            offset += part.length;
+          }
+          resolve({ meta, bytes });
+        },
+      });
+    });
+  }
+
+  /** @internal Send DATA on `channel`. */
+  sendData(channel: number, fin: boolean, bytes: Uint8Array): void {
+    if (this.closedWith) return;
+    this.lastSent = Date.now();
+    this.socket.send(encodeDataFrame(channel, fin, bytes));
+  }
+
   close(): void {
     if (this.closedWith) return;
     this.send({ type: "goodbye", code: "shuttingDown", message: "client closed" });
@@ -325,14 +449,19 @@ export class V8Client {
     after: T.StreamCursor | undefined,
     window: number | undefined,
   ): number {
-    let channel = this.nextChannelId;
-    while (this.channels.has(channel)) channel = channel >= 0xffffffff ? 1 : channel + 1;
-    this.nextChannelId = channel >= 0xffffffff ? 1 : channel + 1;
+    const channel = this.allocateChannel();
     this.channels.set(channel, subscription);
     const message: Record<string, unknown> = { type: "subscribe", channel, stream };
     if (after) message.after = after;
     if (window !== undefined) message.window = window;
     this.send(message);
+    return channel;
+  }
+
+  private allocateChannel(): number {
+    let channel = this.nextChannelId;
+    while (this.channels.has(channel) || this.uploads.has(channel)) channel = channel >= 0xffffffff ? 1 : channel + 1;
+    this.nextChannelId = channel >= 0xffffffff ? 1 : channel + 1;
     return channel;
   }
 
@@ -388,6 +517,7 @@ export class V8Client {
     if (incoming.kind === "data") {
       const subscription = this.channels.get(incoming.channel);
       if (!subscription) return;
+      subscription.advance(incoming.body.length);
       subscription.handlers.data?.(incoming.body, incoming.fin);
       if (incoming.body.length > 0) this.send({ type: "credit", channel: incoming.channel, bytes: incoming.body.length });
       return;

@@ -355,6 +355,7 @@ fn blob_downloads_stay_within_their_credit() {
         BlobDownloadSpec {
             reference: BLOB.into(),
             offset: None,
+            path: None,
         },
         SubscribeOptions {
             after: None,
@@ -412,6 +413,7 @@ fn blob_downloads_stay_within_their_credit() {
         BlobDownloadSpec {
             reference: BLOB.into(),
             offset: Some(blob.len() as u64 - 10),
+            path: None,
         },
         SubscribeOptions::default(),
     );
@@ -427,6 +429,7 @@ fn blob_downloads_stay_within_their_credit() {
         BlobDownloadSpec {
             reference: "waku-blob:missing.txt".into(),
             offset: None,
+            path: None,
         },
         SubscribeOptions::default(),
     );

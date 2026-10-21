@@ -1,0 +1,1 @@
+{"type":"call","id":14,"method":"files.searchContents","params":{"root":{"type":"thread","threadId":"7e8ead00-0000-4000-8000-000000000004"},"query":"fn \\w+","regex":true,"caseSensitive":true}}

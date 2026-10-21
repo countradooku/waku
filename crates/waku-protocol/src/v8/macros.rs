@@ -179,6 +179,14 @@ macro_rules! methods {
                 }
             }
 
+            /// The idempotency key of a mutating method (RFC 0003 §2.3).
+            pub fn op_id(&self) -> Option<uuid::Uuid> {
+                match self {
+                    $( Self::$variant(params) => methods!(@op_id_of params $($flag)?), )*
+                    Self::Unknown { .. } => None,
+                }
+            }
+
             /// The scope the method requires, before payload-dependent
             /// additions.
             pub fn scope(&self) -> Option<$crate::v8::Scope> {
@@ -277,6 +285,11 @@ macro_rules! methods {
     };
     (@op_id op_id) => { true };
     (@op_id) => { false };
+    (@op_id_of $params:ident op_id) => { Some($crate::v8::api::OpIdParams::op_id($params)) };
+    (@op_id_of $params:ident) => {{
+        let _ = $params;
+        None
+    }};
 }
 
 /// Declares the streams. Each line is

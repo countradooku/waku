@@ -215,14 +215,31 @@ pub trait Backend: Send + Sync + 'static {
 
 #[derive(Clone)]
 pub struct EventSink {
-    session_id: Uuid,
-    runtime_id: Uuid,
-    hub: Arc<Hub>,
+    target: SinkTarget,
+}
+
+#[derive(Clone)]
+enum SinkTarget {
+    /// A runtime's events on the legacy hub.
+    Hub {
+        session_id: Uuid,
+        runtime_id: Uuid,
+        hub: Arc<Hub>,
+    },
+    /// Events handed to a v8 owner instead (the terminals of v8 clients).
+    Listener(Arc<dyn Fn(WireDriverEvent) + Send + Sync>),
 }
 
 impl EventSink {
+    /// A sink whose events go to `listener` instead of the legacy hub.
+    pub(crate) fn listener(listener: impl Fn(WireDriverEvent) + Send + Sync + 'static) -> Self {
+        Self {
+            target: SinkTarget::Listener(Arc::new(listener)),
+        }
+    }
+
     pub fn send(&self, event: WireDriverEvent) -> anyhow::Result<()> {
-        self.hub.emit(self.session_id, self.runtime_id, event, true);
+        self.emit(event, true);
         Ok(())
     }
 
@@ -231,9 +248,19 @@ impl EventSink {
     /// is currently attached; replaying raw chunks into a fresh emulator would
     /// also retain an unbounded terminal transcript in daemon memory.
     pub fn send_ephemeral(&self, event: WireDriverEvent) -> anyhow::Result<()> {
-        self.hub
-            .emit(self.session_id, self.runtime_id, event, false);
+        self.emit(event, false);
         Ok(())
+    }
+
+    fn emit(&self, event: WireDriverEvent, replayable: bool) {
+        match &self.target {
+            SinkTarget::Hub {
+                session_id,
+                runtime_id,
+                hub,
+            } => hub.emit(*session_id, *runtime_id, event, replayable),
+            SinkTarget::Listener(listener) => listener(event),
+        }
     }
 }
 
@@ -461,9 +488,11 @@ struct RequestDispatcher {
 impl Hub {
     fn event_sink(self: &Arc<Self>, session_id: Uuid, runtime_id: Uuid) -> EventSink {
         EventSink {
-            session_id,
-            runtime_id,
-            hub: self.clone(),
+            target: SinkTarget::Hub {
+                session_id,
+                runtime_id,
+                hub: self.clone(),
+            },
         }
     }
 
@@ -1080,7 +1109,8 @@ pub fn serve_listeners(
             shutdown.clone(),
         )
         .with_environment_id(options.environment_id)
-        .with_orchestration(options.orchestration.clone()),
+        .with_orchestration(options.orchestration.clone())
+        .with_allow_shutdown(options.allow_shutdown),
     );
     let dispatcher = Arc::new(RequestDispatcher::new(
         backend.clone(),

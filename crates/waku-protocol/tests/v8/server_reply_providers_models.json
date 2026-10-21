@@ -1,0 +1,1 @@
+{"type":"reply","id":47,"ok":{"models":[{"id":"gpt-5","name":"GPT-5","isDefault":true,"reasoningEfforts":[{"id":"high","label":"High","description":"Thinks longer"}],"defaultReasoningEffort":"high","serviceTiers":[],"contextWindows":[]}],"agentPresets":[{"id":"code","name":"Code","isDefault":true,"isCustom":false}],"source":"cached"}}

@@ -1,0 +1,1 @@
+{"type":"call","id":25,"method":"attachments.import","params":{"name":"notes","kind":"directory","parts":[{"relativePath":"a.txt","blob":"waku-blob:00f1e2d3c4b5a697.png"}],"opId":"0b1d0000-0000-4000-8000-000000000010"}}
