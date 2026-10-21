@@ -27,6 +27,10 @@ use super::{
 };
 use crate::timeline::TimedEvent;
 
+/// What `system/init` reports as the session's slash commands, as Claude
+/// Code lists its built-in and project commands.
+pub const SLASH_COMMANDS: [&str; 3] = ["compact", "context", "fake-review"];
+
 /// Above T3's supported floor (2.1.280) and every manifest `minVersion`.
 pub const VERSION: &str = "2.1.300";
 
@@ -232,6 +236,9 @@ pub fn serve(config: FakeConfig, flags: Flags, input: Receiver<Value>, output: O
                     let _ = output.send(&echo);
                 }
                 num_turns += 1;
+                if let Ok(cwd) = std::env::current_dir() {
+                    super::scripted::apply_writes(&prompt, &cwd);
+                }
                 let timeline = config.timeline_for(&prompt);
                 output.log("note", &json!({"replay": timeline.name}));
                 let mut mapper = ClaudeTurn::new(
@@ -246,7 +253,7 @@ pub fn serve(config: FakeConfig, flags: Flags, input: Receiver<Value>, output: O
                     "cwd": std::env::current_dir().map(|cwd| cwd.display().to_string()).unwrap_or_default(),
                     "tools": ["Bash", "Read", "Edit", "Grep", "Glob"], "mcp_servers": [],
                     "model": model, "permissionMode": permission_mode,
-                    "slash_commands": [], "apiKeySource": "ANTHROPIC_API_KEY",
+                    "slash_commands": SLASH_COMMANDS, "apiKeySource": "ANTHROPIC_API_KEY",
                     "claude_code_version": VERSION, "output_style": "default",
                     "agents": [], "skills": [], "plugins": [],
                     "uuid": Uuid::new_v4().to_string(),

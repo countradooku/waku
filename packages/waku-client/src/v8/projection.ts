@@ -258,6 +258,13 @@ export function mergeHistoryPage(state: ThreadState, page: T.HistoryPage): void 
   for (const run of page.runs ?? []) {
     if (!state.runs.has(run.id)) state.runs.set(run.id, run);
   }
+  // The paged-in runs' checkpoints, so they can be rewound to or diffed.
+  for (const scope of page.checkpointScopes ?? []) {
+    if (!state.checkpointScopes.has(scope.id)) state.checkpointScopes.set(scope.id, scope);
+  }
+  for (const checkpoint of page.checkpoints ?? []) {
+    if (!state.checkpoints.has(checkpoint.id)) state.checkpoints.set(checkpoint.id, checkpoint);
+  }
   state.history = page.next;
   state.hasMoreHistory = page.next !== undefined;
 }

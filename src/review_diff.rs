@@ -22,10 +22,16 @@ const MAX_RENDERED_DIFF_LINES: usize = 50_000;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Source {
-    LastTurn {
-        session_id: Uuid,
-        turn_id: Uuid,
+    /// One run of a thread (`threads.turnDiff`); `turn_count` is its
+    /// ordinal, for the label.
+    Turn {
+        thread_id: Uuid,
+        run_id: Uuid,
         turn_count: usize,
+    },
+    /// Every live run of a thread together (`threads.fullDiff`).
+    AllTurns {
+        thread_id: Uuid,
     },
     #[default]
     Uncommitted,
@@ -330,12 +336,12 @@ pub fn from_file_changes(changes: &[crate::model::ActivityFileChange]) -> Snapsh
     parse(Source::default(), &numstat, &patch, false)
 }
 
-/// The `review.diff` source for a desktop source; `None` for a turn, which
-/// is not a working-tree comparison.
+/// The `review.diff` source for a desktop source; `None` for a turn or the
+/// whole thread, which compare checkpoints, not the working tree.
 pub fn v8_source(source: Source) -> Option<waku_client::v8::ReviewDiffSource> {
     use waku_client::v8::ReviewDiffSource as Wire;
     Some(match source {
-        Source::LastTurn { .. } => return None,
+        Source::Turn { .. } | Source::AllTurns { .. } => return None,
         Source::Uncommitted => Wire::Uncommitted,
         Source::Unstaged => Wire::Unstaged,
         Source::Staged => Wire::Staged,
@@ -347,53 +353,32 @@ pub fn v8_source(source: Source) -> Option<waku_client::v8::ReviewDiffSource> {
 /// Collect and parse the diff `source` names in `root`. Blocks: run it on
 /// the background executor.
 ///
-/// Working-tree sources are `review.diff` over protocol v8. A turn's diff
-/// still reads the checkpoint refs the v7 session layer captures, through
-/// `legacy` (that layer's connection); it moves to `threads.turnDiff` when
-/// the session layer does (#55).
+/// Working-tree sources are `review.diff`; a turn is `threads.turnDiff`
+/// (its turn-start checkpoint to the one it ended with) and the whole
+/// thread `threads.fullDiff`.
 pub fn collect(
     daemon_v8: &waku_client::surfaces::DaemonV8,
-    legacy: Option<&waku_client::WorkspaceClient>,
     root: &Path,
     source: Source,
     ignore_whitespace: bool,
 ) -> anyhow::Result<Snapshot> {
-    if let Some(wire) = v8_source(source) {
-        let diff =
-            waku_client::surfaces::vcs::review_diff(daemon_v8, root, wire, ignore_whitespace)?;
-        return Ok(parse_collected(
-            source,
-            &diff.numstat,
-            &diff.patch,
-            diff.complete_context,
-        ));
-    }
-    let Source::LastTurn {
-        session_id,
-        turn_id,
-        turn_count,
-    } = source
-    else {
-        unreachable!("every other source is a working-tree comparison");
+    use waku_client::surfaces::vcs;
+    let diff = match source {
+        Source::Turn {
+            thread_id, run_id, ..
+        } => vcs::turn_diff(daemon_v8, thread_id, run_id, ignore_whitespace)?,
+        Source::AllTurns { thread_id } => vcs::full_diff(daemon_v8, thread_id, ignore_whitespace)?,
+        _ => {
+            let wire = v8_source(source).expect("a working-tree source");
+            vcs::review_diff(daemon_v8, root, wire, ignore_whitespace)?
+        }
     };
-    let legacy = legacy.ok_or_else(|| anyhow::anyhow!("turn diffs need the session connection"))?;
-    match legacy.request(waku_client::WorkspaceOperation::CollectReviewDiff {
-        cwd: root.to_path_buf(),
-        source: waku_client::workspace::ReviewDiffSource::LastTurn {
-            session_id,
-            turn_id,
-            turn_count,
-        },
-        ignore_whitespace,
-    })? {
-        waku_client::WorkspaceResult::ReviewDiff { data } => Ok(parse_collected(
-            source,
-            &data.numstat,
-            &data.patch,
-            data.complete_context,
-        )),
-        _ => anyhow::bail!("the daemon returned an invalid diff response"),
-    }
+    Ok(parse_collected(
+        source,
+        &diff.numstat,
+        &diff.patch,
+        diff.complete_context,
+    ))
 }
 
 fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> Snapshot {
@@ -868,10 +853,16 @@ mod tests {
         assert_eq!(v8_source(Source::Committed), Some(Wire::Committed));
         assert_eq!(v8_source(Source::Branch), Some(Wire::Branch));
         assert_eq!(
-            v8_source(Source::LastTurn {
-                session_id: Uuid::nil(),
-                turn_id: Uuid::nil(),
+            v8_source(Source::Turn {
+                thread_id: Uuid::nil(),
+                run_id: Uuid::nil(),
                 turn_count: 1,
+            }),
+            None
+        );
+        assert_eq!(
+            v8_source(Source::AllTurns {
+                thread_id: Uuid::nil()
             }),
             None
         );

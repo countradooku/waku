@@ -171,6 +171,12 @@ pub trait DriverSession: Send + Sync {
             operation: "stop_background_work",
         })
     }
+    /// Re-report the background work the provider still runs, and what of
+    /// the reported work ended, as `BackgroundWorkUpdated` events. Drivers
+    /// that report every change as it happens have nothing to do.
+    async fn refresh_background_work(&self) -> DriverResult<()> {
+        Ok(())
+    }
     async fn stop_subagent(&self, _subagent: SubagentRef) -> DriverResult<SubagentStopOutcome> {
         Err(DriverError::Unsupported {
             operation: "stop_subagent",

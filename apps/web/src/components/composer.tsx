@@ -55,6 +55,7 @@ import {
   isResumeSubmission,
   parseGoalSubmission,
   replaceComposerTrigger,
+  mergeSessionCommands,
   sortComposerCommands,
   toggledFastServiceTier,
   type ComposerAutocompleteRow,
@@ -227,7 +228,9 @@ export function Composer({
     : task?.worktreePath
       ? task.branch ?? task.worktreePath.split('/').filter(Boolean).at(-1) ?? t('workspace.new_worktree')
       : t('workspace.local')
-  const availableCommands = sortComposerCommands(composerCommands.data ?? [])
+  const availableCommands = sortComposerCommands(
+    mergeSessionCommands(composerCommands.data ?? [], task?.sessionCommands ?? []),
+  )
   const autocompleteTrigger = inputFocused ? detectComposerTrigger(prompt, cursor) : null
   const autocompleteKey = autocompleteTrigger
     ? `${autocompleteTrigger.kind}:${autocompleteTrigger.start}:${autocompleteTrigger.end}:${autocompleteTrigger.query}`

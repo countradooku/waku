@@ -25,6 +25,12 @@ pub(super) fn decide_client(
             subagent_id,
             ..
         } => stop_subagent(draft, *run_id, *subagent_id),
+        Command::BackgroundWorkStop {
+            task_id,
+            provider_thread_id,
+            ..
+        } => stop_background_work(draft, task_id, *provider_thread_id),
+        Command::BackgroundWorkRefresh { .. } => refresh_background_work(draft),
         Command::CheckpointRollback {
             scope_id,
             checkpoint_id,
@@ -261,5 +267,108 @@ fn rollback(
         restore_files,
         request_id: request_id.clone(),
     });
+    Ok(())
+}
+
+/// The thread's provider threads, with this decision's writes.
+fn provider_threads(draft: &Draft<'_>) -> Vec<ProviderThread> {
+    let mut ids = draft
+        .base
+        .provider_threads
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.into_iter()
+        .filter_map(|id| draft.provider_thread(id).cloned())
+        .collect()
+}
+
+/// The provider thread's session, while it is open.
+fn open_session(draft: &Draft<'_>, provider_thread: &ProviderThread) -> Option<ProviderSessionId> {
+    let id = provider_thread.provider_session_id?;
+    let session = draft.provider_session(id)?;
+    (session.detached_at.is_none()
+        && !matches!(
+            session.status,
+            SessionStatus::Stopped | SessionStatus::Error
+        ))
+    .then_some(id)
+}
+
+/// Stops a background process or monitor through its session. Without an
+/// open session nothing can still run it, so the task is dropped at once.
+fn stop_background_work(
+    draft: &mut Draft<'_>,
+    task_id: &str,
+    provider_thread_id: Option<ProviderThreadId>,
+) -> Result<(), CommandError> {
+    let mut holder = provider_threads(draft)
+        .into_iter()
+        .filter(|provider_thread| provider_thread_id.is_none_or(|id| id == provider_thread.id))
+        .find(|provider_thread| {
+            provider_thread
+                .pending_background_tasks
+                .iter()
+                .any(|task| task.task_id == task_id)
+        })
+        .ok_or_else(|| CommandError::not_found("background task", task_id))?;
+    if holder
+        .pending_background_tasks
+        .iter()
+        .any(|task| task.task_id == task_id && task.kind == PendingTaskKind::Subagent)
+    {
+        return Err(CommandError::invalid(
+            "task_id",
+            "the task is a subagent; stop it with subagent.stop",
+        ));
+    }
+    match open_session(draft, &holder) {
+        Some(provider_session_id) => draft.effect(Effect::BackgroundWorkStop {
+            provider_session_id,
+            provider_thread_id: holder.id,
+            task_id: task_id.to_owned(),
+        }),
+        None => {
+            holder
+                .pending_background_tasks
+                .retain(|task| task.task_id != task_id);
+            holder.updated_at = draft.now;
+            draft.put_provider_thread(holder);
+        }
+    }
+    Ok(())
+}
+
+/// Asks every open session of the thread (the active provider thread's, and
+/// any holding background work) which work still runs; work held by a
+/// provider thread without an open session is dropped.
+fn refresh_background_work(draft: &mut Draft<'_>) -> Result<(), CommandError> {
+    let active = draft.thread.active_provider_thread_id;
+    let mut sessions: Vec<ProviderSessionId> = Vec::new();
+    for mut provider_thread in provider_threads(draft) {
+        let holds_work = !provider_thread.pending_background_tasks.is_empty();
+        if !holds_work && Some(provider_thread.id) != active {
+            continue;
+        }
+        match open_session(draft, &provider_thread) {
+            Some(session) => {
+                if !sessions.contains(&session) {
+                    sessions.push(session);
+                }
+            }
+            None if holds_work => {
+                provider_thread.pending_background_tasks.clear();
+                provider_thread.updated_at = draft.now;
+                draft.put_provider_thread(provider_thread);
+            }
+            None => {}
+        }
+    }
+    for provider_session_id in sessions {
+        draft.effect(Effect::BackgroundWorkRefresh {
+            provider_session_id,
+        });
+    }
     Ok(())
 }

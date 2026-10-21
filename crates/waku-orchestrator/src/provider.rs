@@ -180,6 +180,12 @@ pub enum AdapterEvent {
     BackgroundWorkUpdated {
         work: BackgroundWorkItem,
     },
+    /// The slash commands the session offers, replacing the previous list
+    /// (ACP's `available_commands_update`, Claude's `system/init`). Stored on
+    /// the envelope's provider session.
+    AvailableCommandsUpdated {
+        commands: Vec<SessionCommand>,
+    },
     /// The provider-persisted goal of the active provider thread (Waku addition).
     GoalUpdated {
         goal: Option<ThreadGoal>,
@@ -208,6 +214,7 @@ impl AdapterEvent {
             Self::RuntimeRequestUpdated { .. } => "runtime_request_updated",
             Self::PlanUpdated { .. } => "plan_updated",
             Self::BackgroundWorkUpdated { .. } => "background_work_updated",
+            Self::AvailableCommandsUpdated { .. } => "available_commands_updated",
             Self::GoalUpdated { .. } => "goal_updated",
             Self::AccountUsageUpdated { .. } => "account_usage_updated",
             Self::TurnTerminal { .. } => "turn_terminal",

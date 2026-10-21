@@ -850,6 +850,7 @@ background.no_work: バックグラウンドの作業はありません
 background.no_work_description: 長時間実行されるコマンドとサブエージェントがここに表示されます。
 background.view: 表示
 background.stop: 停止
+background.refresh: バックグラウンド作業を更新
 background.stop_named: "%{name} を停止"
 background.stop_all: すべて停止
 background.stop_not_running: プロセスはすでに停止しています。
@@ -935,6 +936,7 @@ diff.no_changes_description: このソースにはレビューするファイル
 diff.filter_files: ファイルを絞り込む…
 diff.source_last_turn: 前回のターン
 diff.source_turn: ターン %{turn}
+diff.source_all_turns: すべてのターン
 diff.source_uncommitted: 未コミット
 diff.source_unstaged: 未ステージ
 diff.source_staged: ステージ済み

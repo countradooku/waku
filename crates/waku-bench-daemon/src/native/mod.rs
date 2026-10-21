@@ -21,6 +21,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod scripted;
 
 use std::collections::HashMap;
 use std::io::{BufRead as _, BufReader, Write as _};

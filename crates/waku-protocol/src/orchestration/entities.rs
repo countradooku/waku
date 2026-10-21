@@ -600,6 +600,22 @@ pub struct ProviderSession {
     pub detached_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detach_reason: Option<String>,
+    /// Slash commands the live session reported (ACP's
+    /// `available_commands_update`, Claude's `system/init`), replaced whole
+    /// on every report. Clients merge them with `composer.slashCommands`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_commands: Vec<SessionCommand>,
+}
+
+/// A slash command a provider session reported.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCommand {
+    /// Without the leading `/`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 open_enum! {
@@ -645,6 +661,10 @@ pub struct PendingBackgroundTask {
     pub parent_task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_thread_id: Option<ThreadId>,
+    /// The command turn item whose output the process streams: subscribe to
+    /// `commandOutput{threadId, itemId}` for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<TurnItemId>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]

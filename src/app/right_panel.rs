@@ -2122,7 +2122,7 @@ impl Waku {
     }
 
     pub(super) fn open_turn_diff(&mut self, turn_id: Uuid, cx: &mut Context<Self>) {
-        let Some((session_id, turn_count)) = self.selected_session().and_then(|session| {
+        let Some((thread_id, turn_count)) = self.selected_session().and_then(|session| {
             session
                 .turns
                 .iter()
@@ -2131,9 +2131,9 @@ impl Waku {
         }) else {
             return;
         };
-        self.right_panel_diff_source = ReviewDiffSource::LastTurn {
-            session_id,
-            turn_id,
+        self.right_panel_diff_source = ReviewDiffSource::Turn {
+            thread_id,
+            run_id: turn_id,
             turn_count,
         };
         self.right_panel_diff_selection.clear();
@@ -3662,6 +3662,13 @@ impl Waku {
         let selected = self.right_panel_diff_source;
         let ignore_whitespace = self.right_panel_diff_ignore_whitespace;
         let latest_turn = self.latest_review_turn_source();
+        // The whole thread, once any turn has a checkpoint to diff.
+        let all_turns_source = latest_turn.and_then(|source| match source {
+            ReviewDiffSource::Turn { thread_id, .. } => {
+                Some(ReviewDiffSource::AllTurns { thread_id })
+            }
+            _ => None,
+        });
         let source_label = self.review_diff_source_label(selected);
         let weak = cx.entity().downgrade();
         let handle = self.menu_handle("right-panel-diff-source", cx);
@@ -3686,6 +3693,19 @@ impl Waku {
                     })
                     .selected(latest_turn == Some(selected))
                     .disabled(latest_turn.is_none()),
+                );
+                let all_turns = all_turns_source;
+                let all_turns_weak = weak.clone();
+                items.push(
+                    MenuItem::new(tr!("diff.source_all_turns"), move |_, cx| {
+                        if let Some(source) = all_turns {
+                            let _ = all_turns_weak.update(cx, |this, cx| {
+                                this.set_right_panel_diff_source(source, cx)
+                            });
+                        }
+                    })
+                    .selected(all_turns.is_some() && all_turns == Some(selected))
+                    .disabled(all_turns.is_none()),
                 );
                 items.push(MenuItem::Separator);
                 for (choice, label) in [
@@ -4576,23 +4596,22 @@ impl Waku {
                         .as_ref()
                         .is_some_and(|checkpoint| checkpoint.status == CheckpointStatus::Ready)
             })
-            .map(|turn| ReviewDiffSource::LastTurn {
-                session_id: session.id,
-                turn_id: turn.id,
+            .map(|turn| ReviewDiffSource::Turn {
+                thread_id: session.id,
+                run_id: turn.id,
                 turn_count: turn.turn_count,
             })
     }
 
     fn review_diff_source_label(&self, source: ReviewDiffSource) -> String {
         match source {
-            ReviewDiffSource::LastTurn { .. }
-                if self.latest_review_turn_source() == Some(source) =>
-            {
+            ReviewDiffSource::Turn { .. } if self.latest_review_turn_source() == Some(source) => {
                 tr!("diff.source_last_turn")
             }
-            ReviewDiffSource::LastTurn { turn_count, .. } => {
+            ReviewDiffSource::Turn { turn_count, .. } => {
                 tr!("diff.source_turn", turn = turn_count)
             }
+            ReviewDiffSource::AllTurns { .. } => tr!("diff.source_all_turns"),
             ReviewDiffSource::Uncommitted => tr!("diff.source_uncommitted"),
             ReviewDiffSource::Unstaged => tr!("diff.source_unstaged"),
             ReviewDiffSource::Staged => tr!("diff.source_staged"),
@@ -4665,11 +4684,6 @@ impl Waku {
         cx.notify();
 
         let daemon_v8 = self.daemon_v8.clone();
-        // A turn's diff reads the session's checkpoint refs, which the v7
-        // session layer still captures; it moves to `threads.turnDiff` with
-        // that layer (#55). Every other source is `review.diff`.
-        let legacy_workspace = matches!(source, ReviewDiffSource::LastTurn { .. })
-            .then(|| waku_client::WorkspaceClient::new(self.daemon.client()));
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
@@ -4678,7 +4692,6 @@ impl Waku {
                     async move {
                         crate::review_diff::collect(
                             &daemon_v8,
-                            legacy_workspace.as_ref(),
                             &project_path,
                             source,
                             ignore_whitespace,

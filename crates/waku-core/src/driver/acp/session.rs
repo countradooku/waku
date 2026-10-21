@@ -1033,7 +1033,19 @@ impl Shared {
                     })
                     .unwrap_or_default();
                 if !commands.is_empty() {
+                    let reported = commands
+                        .iter()
+                        .map(|command| SessionCommand {
+                            name: command.name.clone(),
+                            description: Some(command.description.clone())
+                                .filter(|description| !description.is_empty()),
+                        })
+                        .collect();
                     self.legacy(DriverEvent::AvailableCommands(commands));
+                    self.emit(vec![AdapterEvent::AvailableCommandsUpdated {
+                        commands: reported,
+                    }])
+                    .await;
                 }
                 return;
             }

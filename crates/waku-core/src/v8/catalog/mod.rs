@@ -36,6 +36,7 @@ pub(crate) use files::file_revision;
 pub(crate) use providers::ProvidersBus;
 pub(crate) use terminal::{TerminalHub, TerminalInput};
 pub(crate) use vcs::VcsBus;
+pub(crate) use vcs::build_review_diff;
 
 /// Shared state of the catalog, one per daemon.
 pub(crate) struct Catalog {

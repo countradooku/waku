@@ -284,6 +284,14 @@ impl ThreadState {
         for run in page.runs {
             self.runs.entry(run.id).or_insert(run);
         }
+        // The page's runs' checkpoints, so a paged-in run can be rewound
+        // or diffed.
+        for scope in page.checkpoint_scopes {
+            self.checkpoint_scopes.entry(scope.id).or_insert(scope);
+        }
+        for checkpoint in page.checkpoints {
+            self.checkpoints.entry(checkpoint.id).or_insert(checkpoint);
+        }
         self.has_more_history = page.next.is_some();
         self.history = page.next;
     }
@@ -659,6 +667,8 @@ mod tests {
         state.merge_history_page(HistoryPage {
             items: vec![older.clone(), stale],
             runs: Vec::new(),
+            checkpoint_scopes: Vec::new(),
+            checkpoints: Vec::new(),
             next: Some("h1.next".into()),
         });
         assert_eq!(state.ordered_turn_items()[0], &older);
@@ -668,6 +678,8 @@ mod tests {
         state.merge_history_page(HistoryPage {
             items: Vec::new(),
             runs: Vec::new(),
+            checkpoint_scopes: Vec::new(),
+            checkpoints: Vec::new(),
             next: None,
         });
         assert!(!state.has_more_history);

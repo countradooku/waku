@@ -44,6 +44,14 @@ export interface Methods {
     params: T.ThreadFindParams;
     result: T.ThreadFindResult;
   };
+  "threads.turnDiff": {
+    params: T.TurnDiffParams;
+    result: T.ReviewDiff;
+  };
+  "threads.fullDiff": {
+    params: T.FullDiffParams;
+    result: T.ReviewDiff;
+  };
   "daemon.info": {
     params: T.NoParams;
     result: T.DaemonInfo;
@@ -248,6 +256,8 @@ export const METHODS: { readonly [M in MethodName]: MethodInfo } = {
   "threads.archived": { scope: "read", opId: false },
   "threads.search": { scope: "read", opId: false },
   "threads.find": { scope: "read", opId: false },
+  "threads.turnDiff": { scope: "read", opId: false },
+  "threads.fullDiff": { scope: "read", opId: false },
   "daemon.info": { scope: "read", opId: false },
   "daemon.shutdown": { scope: "admin", opId: false },
   "files.tree": { scope: "files:read", opId: false },

@@ -301,6 +301,51 @@ pub fn create_project(project_id: Uuid, path: PathBuf, name: String) -> Command 
     }
 }
 
+/// `project.create_scratch`: a project in a fresh folder of its own under
+/// the daemon's projectless root, for a task without a project.
+pub fn create_scratch_project(project_id: Uuid, prompt: Option<String>) -> Command {
+    Command::ProjectCreateScratch {
+        project_id: ProjectId(project_id),
+        name: None,
+        prompt: prompt.filter(|prompt| !prompt.trim().is_empty()),
+    }
+}
+
+/// Stops the background work a view item's `control_id` names: a subagent
+/// (`subagent.stop`) or a process or monitor (`background_work.stop`).
+pub fn stop_background_work(
+    thread_id: Uuid,
+    kind: model::BackgroundWorkKind,
+    control_id: &str,
+) -> Option<Command> {
+    Some(
+        match crate::thread_view::background_control(kind, control_id)? {
+            crate::thread_view::BackgroundControl::Subagent { run_id, node_id } => {
+                Command::SubagentStop {
+                    thread_id: ThreadId(thread_id),
+                    run_id,
+                    subagent_id: node_id,
+                }
+            }
+            crate::thread_view::BackgroundControl::Process {
+                provider_thread_id,
+                task_id,
+            } => Command::BackgroundWorkStop {
+                thread_id: ThreadId(thread_id),
+                task_id,
+                provider_thread_id: Some(provider_thread_id),
+            },
+        },
+    )
+}
+
+/// `background_work.refresh`: the live session re-reports its work.
+pub fn refresh_background_work(thread_id: Uuid) -> Command {
+    Command::BackgroundWorkRefresh {
+        thread_id: ThreadId(thread_id),
+    }
+}
+
 pub fn remove_project(project_id: Uuid) -> Command {
     Command::ProjectRemove {
         project_id: ProjectId(project_id),
@@ -496,5 +541,48 @@ mod tests {
         );
         assert!(respond_approval(Uuid::nil(), "not-a-uuid", "x").is_none());
         assert!(rename(Uuid::nil(), "   ").is_none());
+    }
+
+    #[test]
+    fn background_work_stops_by_kind_and_scratch_projects_carry_the_prompt() {
+        let thread = Uuid::from_u128(1);
+        let owner = Uuid::from_u128(2);
+        let node = Uuid::from_u128(3);
+        assert_eq!(
+            stop_background_work(
+                thread,
+                model::BackgroundWorkKind::Subagent,
+                &format!("{owner}/{node}")
+            ),
+            Some(Command::SubagentStop {
+                thread_id: ThreadId(thread),
+                run_id: RunId(owner),
+                subagent_id: NodeId(node),
+            })
+        );
+        assert_eq!(
+            stop_background_work(
+                thread,
+                model::BackgroundWorkKind::Process,
+                &format!("{owner}/proc/7")
+            ),
+            Some(Command::BackgroundWorkStop {
+                thread_id: ThreadId(thread),
+                task_id: "proc/7".into(),
+                provider_thread_id: Some(ProviderThreadId(owner)),
+            })
+        );
+        assert_eq!(
+            stop_background_work(thread, model::BackgroundWorkKind::Monitor, "garbage"),
+            None
+        );
+        assert_eq!(
+            create_scratch_project(owner, Some("  ".into())),
+            Command::ProjectCreateScratch {
+                project_id: ProjectId(owner),
+                name: None,
+                prompt: None,
+            }
+        );
     }
 }

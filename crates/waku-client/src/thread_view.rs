@@ -81,9 +81,9 @@ pub struct ThreadView {
     pub transcript_blocks: SharedVec<TranscriptBlock>,
     pub turns: Vec<AgentTurn>,
     pub queued_messages: Vec<QueuedMessage>,
-    /// Slash commands the live provider session reported. Protocol v8 does
-    /// not carry them yet (#55), so this stays empty and the composer falls
-    /// back to `composer.slashCommands`.
+    /// Slash commands the thread's open provider session reported
+    /// (`ProviderSession.availableCommands`); the composer merges them with
+    /// `composer.slashCommands`.
     pub available_commands: Vec<model::ReportedCommand>,
     pub pending_permission: Option<PendingPermission>,
     pub pending_user_input: Option<PendingUserInput>,
@@ -94,8 +94,11 @@ pub struct ThreadView {
     /// The live session accepts a message into a running turn (natively or
     /// by restarting it).
     pub can_steer: bool,
-    /// Rewind points: the checkpoint that ends each completed run.
+    /// The checkpoint that ends each completed run.
     pub run_checkpoints: Vec<RunCheckpoint>,
+    /// Rewind points: the checkpoint each run started from (its turn start,
+    /// captured before the provider turn), keyed by the run's ordinal.
+    pub turn_starts: Vec<RunCheckpoint>,
     pub rollback: Option<RollbackState>,
     /// The failure of the newest run, when it failed.
     pub last_error: Option<String>,
@@ -175,6 +178,7 @@ impl ThreadView {
             active_run_id: None,
             can_steer: false,
             run_checkpoints: Vec::new(),
+            turn_starts: Vec::new(),
             rollback: None,
             last_error: None,
             background_work: Vec::new(),
@@ -235,6 +239,7 @@ impl ThreadView {
             active_run_id: None,
             can_steer: false,
             run_checkpoints: Vec::new(),
+            turn_starts: Vec::new(),
             rollback: thread.rollback.clone(),
             last_error: None,
             background_work: Vec::new(),
@@ -281,12 +286,19 @@ impl ThreadView {
     }
 
     /// The checkpoint to roll back to so that run `ordinal` and everything
-    /// after it disappear: the one the previous run ended with.
+    /// after it disappear: the one the run started from (for the first run,
+    /// the state before anything ran), else the one the previous run ended
+    /// with.
     pub fn rewind_point(&self, ordinal: u32) -> Option<RunCheckpoint> {
-        self.run_checkpoints
+        self.turn_starts
             .iter()
-            .filter(|checkpoint| checkpoint.ordinal < ordinal && checkpoint.ready)
-            .max_by_key(|checkpoint| checkpoint.ordinal)
+            .find(|checkpoint| checkpoint.ordinal == ordinal && checkpoint.ready)
+            .or_else(|| {
+                self.run_checkpoints
+                    .iter()
+                    .filter(|checkpoint| checkpoint.ordinal < ordinal && checkpoint.ready)
+                    .max_by_key(|checkpoint| checkpoint.ordinal)
+            })
             .copied()
     }
 
@@ -430,6 +442,15 @@ impl ViewCache {
                 .checkpoint_id
                 .and_then(|id| state.checkpoints.get(&id))
                 .map(|checkpoint| legacy_checkpoint(checkpoint, ordinal));
+            if let Some(start) = turn_start(state, run) {
+                view.turn_starts.push(RunCheckpoint {
+                    run_id: run.id,
+                    ordinal,
+                    scope_id: start.scope_id,
+                    checkpoint_id: start.id,
+                    ready: true,
+                });
+            }
             if let Some(checkpoint) = run.checkpoint_id.and_then(|id| state.checkpoints.get(&id)) {
                 view.run_checkpoints.push(RunCheckpoint {
                     run_id: run.id,
@@ -490,6 +511,7 @@ impl ViewCache {
                 && (session.capabilities.turns.active_steering
                     || session.capabilities.turns.steering_by_interrupt_restart)
         });
+        view.available_commands = session_commands(state, &thread.model_selection.instance);
         if let Some(provider_thread) = thread
             .active_provider_thread_id
             .and_then(|id| state.provider_threads.get(&id))
@@ -508,16 +530,13 @@ impl ViewCache {
                     PendingTaskKind::Monitor => model::BackgroundWorkKind::Monitor,
                     _ => model::BackgroundWorkKind::Process,
                 };
-                let mut item = model::BackgroundWorkItem::new(
+                view.background_work.push(process_work(
+                    provider_thread.id,
+                    task,
                     kind,
-                    task.task_id.clone(),
-                    task.description
-                        .clone()
-                        .unwrap_or_else(|| task.task_id.clone()),
-                    model::BackgroundWorkStatus::Running,
-                );
-                item.background = true;
-                view.background_work.push(item);
+                    state,
+                    extras.outputs,
+                ));
             }
             view.context_usage =
                 provider_thread
@@ -658,6 +677,137 @@ impl ViewCache {
         view.transcript_blocks = shared;
         Some(view)
     }
+}
+
+/// The ready checkpoint `run` started from: ordinal 0 of its root scope,
+/// captured before its provider turn (the daemon's `checkpoints::turn_start`).
+fn turn_start<'a>(state: &'a ThreadState, run: &Run) -> Option<&'a Checkpoint> {
+    state.checkpoints.values().find(|checkpoint| {
+        checkpoint.run_id == Some(run.id)
+            && Some(checkpoint.id) != run.checkpoint_id
+            && checkpoint.ordinal_within_scope == 0
+            && checkpoint.app_run_ordinal.is_some()
+            && checkpoint.status == CheckpointStatus::Ready
+            && state
+                .checkpoint_scopes
+                .get(&checkpoint.scope_id)
+                .is_none_or(|scope| scope.kind == ScopeKind::RootRun)
+    })
+}
+
+/// The slash commands the thread's open sessions of its provider instance
+/// reported, newest session first, one per name.
+fn session_commands(
+    state: &ThreadState,
+    instance: &ProviderInstanceId,
+) -> Vec<model::ReportedCommand> {
+    let mut sessions = state
+        .provider_sessions
+        .values()
+        .filter(|session| {
+            session.detached_at.is_none()
+                && &session.provider_instance_id == instance
+                && !matches!(
+                    session.status,
+                    waku_protocol::orchestration::SessionStatus::Stopped
+                        | waku_protocol::orchestration::SessionStatus::Error
+                )
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by_key(|session| std::cmp::Reverse((session.updated_at, session.id)));
+    let mut seen = std::collections::HashSet::new();
+    let mut commands = Vec::new();
+    for command in sessions
+        .into_iter()
+        .flat_map(|session| &session.available_commands)
+    {
+        if seen.insert(command.name.clone()) {
+            commands.push(model::ReportedCommand {
+                name: command.name.clone(),
+                description: command.description.clone().unwrap_or_default(),
+            });
+        }
+    }
+    commands
+}
+
+/// What a background-work item's `control_id` stops.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BackgroundControl {
+    /// `subagent.stop`.
+    Subagent { run_id: RunId, node_id: NodeId },
+    /// `background_work.stop`.
+    Process {
+        provider_thread_id: ProviderThreadId,
+        task_id: String,
+    },
+}
+
+/// Parses the `control_id` a view gave a background-work item of `kind`:
+/// `<run>/<node>` for a subagent, `<provider thread>/<task>` for a process
+/// or monitor.
+pub fn background_control(
+    kind: model::BackgroundWorkKind,
+    control_id: &str,
+) -> Option<BackgroundControl> {
+    let (owner, rest) = control_id.split_once('/')?;
+    let owner = owner.parse::<Uuid>().ok()?;
+    match kind {
+        model::BackgroundWorkKind::Subagent => Some(BackgroundControl::Subagent {
+            run_id: RunId(owner),
+            node_id: NodeId(rest.parse().ok()?),
+        }),
+        model::BackgroundWorkKind::Process | model::BackgroundWorkKind::Monitor => {
+            (!rest.is_empty()).then(|| BackgroundControl::Process {
+                provider_thread_id: ProviderThreadId(owner),
+                task_id: rest.to_owned(),
+            })
+        }
+    }
+}
+
+/// A process or monitor a provider thread reports: stoppable through
+/// `background_work.stop`, its output from the `commandOutput` stream of the
+/// command item that started it (while watched).
+fn process_work(
+    provider_thread_id: ProviderThreadId,
+    task: &PendingBackgroundTask,
+    kind: model::BackgroundWorkKind,
+    state: &ThreadState,
+    outputs: Option<&HashMap<TurnItemId, CommandOutputState>>,
+) -> model::BackgroundWorkItem {
+    let status = match kind {
+        model::BackgroundWorkKind::Monitor => model::BackgroundWorkStatus::Monitoring,
+        _ => model::BackgroundWorkStatus::Running,
+    };
+    let mut item = model::BackgroundWorkItem::new(
+        kind,
+        task.task_id.clone(),
+        task.description
+            .clone()
+            .unwrap_or_else(|| task.task_id.clone()),
+        status,
+    );
+    item.background = true;
+    item.can_stop = true;
+    item.control_id = Some(format!("{provider_thread_id}/{}", task.task_id));
+    item.command = task.description.clone();
+    if let Some(item_id) = task.item_id {
+        item.origin_activity_id = Some(item_id.0.to_string());
+        if let Some(started) = state
+            .turn_items
+            .get(&item_id)
+            .and_then(|turn_item| turn_item.started_at)
+        {
+            item.started_at_ms = started.max(0) as u64;
+        }
+        if let Some(output) = outputs.and_then(|outputs| outputs.get(&item_id)) {
+            item.output = Some(output.text.clone());
+            item.output_truncated = output.truncated;
+            item.exit_code = output.exit_code;
+        }
+    }
+    item
 }
 
 fn extra_key(full: bool, output: Option<&CommandOutputState>) -> u64 {

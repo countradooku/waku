@@ -1140,6 +1140,8 @@ pub struct Waku {
     /// when the resident transport reconnects.
     background_work: HashMap<Uuid, BackgroundWorkRegistry>,
     last_background_work_tick: Instant,
+    /// The process whose output the open background-work surface streams.
+    background_output_watch: Option<Uuid>,
     /// First Escape press for the current turn. A matching second press stops
     /// the response; otherwise this returns to the ordinary Stop icon after a
     /// short timeout.
@@ -2602,6 +2604,7 @@ impl Waku {
                 event_wake_tx,
                 background_work: HashMap::new(),
                 last_background_work_tick: Instant::now(),
+                background_output_watch: None,
                 escape_stop_confirmation: EscapeStopConfirmation::default(),
                 activities_expanded: HashMap::new(),
                 expanded_activity_items: HashMap::new(),

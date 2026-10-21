@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
+use waku_orchestrator::checkpoints::{self, CheckpointRange, RangeError};
 use waku_orchestrator::search::{SearchSource as Source, SearchThreadsQuery, ThreadFindQuery};
 use waku_orchestrator::streams::coalesce::ToolCoalescer;
 use waku_orchestrator::streams::shell::{
@@ -47,19 +48,20 @@ use waku_orchestrator::streams::wire::{externalize_item_images, project_event};
 use waku_orchestrator::streams::{LiveDelta, LiveStreams};
 use waku_orchestrator::{CommandError, DispatchError, Orchestrator};
 use waku_protocol::orchestration::{
-    Actor, CommandEnvelope, CreationSource, DomainEvent, Project, Sequence, StoredEvent, ThreadId,
-    TurnItemKind,
+    Actor, Command, CommandEnvelope, CreationSource, DomainEvent, Project, ProjectId, RunId,
+    Sequence, StoredEvent, ThreadId, TurnItemKind,
 };
 use waku_protocol::v8::orchestration::{
     ArchivedPage, ArchivedParams, CommandOutputItem, CommandOutputSpec, DispatchParams,
-    DispatchResult, FindHit, FindSnippet, HistoryPage, HistoryPageParams, MAX_FIND_ITEMS_AROUND,
-    MAX_FIND_WINDOW, MAX_SEARCH_RESULTS, SearchSource, ShellItem, ShellSpec, ThreadFindParams,
-    ThreadFindResult, ThreadItem, ThreadSearchHit, ThreadSearchParams, ThreadSnapshot,
-    ThreadSnapshotParams, ThreadSpec, TurnItemParams, command_scopes,
+    DispatchResult, FindHit, FindSnippet, FullDiffParams, HistoryPage, HistoryPageParams,
+    MAX_FIND_ITEMS_AROUND, MAX_FIND_WINDOW, MAX_SEARCH_RESULTS, SearchSource, ShellItem, ShellSpec,
+    ThreadFindParams, ThreadFindResult, ThreadItem, ThreadSearchHit, ThreadSearchParams,
+    ThreadSnapshot, ThreadSnapshotParams, ThreadSpec, TurnDiffParams, TurnItemParams,
+    command_scopes,
 };
 use waku_protocol::v8::{
     ClientKind, Encoding, EndReason, Error, ErrorCode, ErrorDetails, Method, MethodResult,
-    StreamCursor, codec,
+    ReviewDiff, ReviewDiffSource, StreamCursor, codec,
 };
 
 use super::V8Context;
@@ -458,6 +460,42 @@ fn creation_source(kind: &ClientKind) -> CreationSource {
     }
 }
 
+/// `project.create_scratch` as the `project.create` it stands for: a fresh
+/// folder under the projectless root (`<root>/<date>/<slug>`, named from the
+/// prompt), recorded as a project. A retry of a command whose project
+/// already exists reuses that project's folder, so it creates nothing and
+/// hits the first dispatch's receipt.
+fn scratch_project(
+    orchestrator: &Orchestrator,
+    project_id: ProjectId,
+    name: Option<String>,
+    prompt: Option<String>,
+) -> Result<Command, Error> {
+    let name = name
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| waku_protocol::model::Project::PROJECTLESS_NAME.to_owned());
+    let path = match orchestrator.project(project_id) {
+        Some(existing) => existing.path,
+        None => {
+            crate::projectless::create_workspace(prompt.as_deref())
+                .map_err(|error| {
+                    Error::new(
+                        ErrorCode::Io,
+                        format!("could not create a folder for the task: {error}"),
+                    )
+                })?
+                .cwd
+        }
+    };
+    Ok(Command::ProjectCreate {
+        project_id,
+        name,
+        path,
+        order_key: None,
+    })
+}
+
 /// `orchestration.dispatch`, with read-your-writes on `conn`.
 pub(crate) async fn dispatch(
     conn: &Arc<Conn>,
@@ -475,6 +513,21 @@ pub(crate) async fn dispatch(
             .with_details(ErrorDetails::MissingScope { required: scope }));
         }
     }
+    let command = match command {
+        Command::ProjectCreateScratch {
+            project_id,
+            name,
+            prompt,
+        } => {
+            let resolving = orchestration.clone();
+            tokio::task::spawn_blocking(move || {
+                scratch_project(&resolving.orchestrator, project_id, name, prompt)
+            })
+            .await
+            .map_err(|_| Error::new(ErrorCode::Internal, "the dispatch failed"))??
+        }
+        command => command,
+    };
     let envelope = CommandEnvelope {
         command_id: params.command_id,
         issued_by: Actor::User,
@@ -525,12 +578,87 @@ pub(crate) fn handle(context: &V8Context, method: Method) -> Option<Result<Metho
         }
         Method::ThreadsSearch(params) => search(context, params).map(MethodResult::ThreadsSearch),
         Method::ThreadsFind(params) => find(context, params).map(MethodResult::ThreadsFind),
+        Method::ThreadsTurnDiff(params) => {
+            turn_diff(context, params).map(MethodResult::ThreadsTurnDiff)
+        }
+        Method::ThreadsFullDiff(params) => {
+            full_diff(context, params).map(MethodResult::ThreadsFullDiff)
+        }
         Method::OrchestrationDispatch(_) => Err(Error::new(
             ErrorCode::Internal,
             "orchestration.dispatch is served by the connection",
         )),
         _ => return None,
     })
+}
+
+fn range_error(error: RangeError, run_id: Option<RunId>) -> Error {
+    match error {
+        RangeError::RunNotFound => Error::new(ErrorCode::NotFound, error.to_string()).with_details(
+            ErrorDetails::NotFound {
+                resource: "run".into(),
+                id: run_id.map(|id| id.to_string()).unwrap_or_default(),
+            },
+        ),
+        RangeError::NotCaptured | RangeError::StartUnavailable | RangeError::NoTurns => {
+            Error::new(ErrorCode::Conflict, error.to_string())
+        }
+    }
+}
+
+/// The diff of a checkpoint range, in the `review.diff` shape.
+fn checkpoint_diff(
+    context: &V8Context,
+    source: ReviewDiffSource,
+    range: &CheckpointRange<'_>,
+    ignore_whitespace: bool,
+) -> Result<ReviewDiff, Error> {
+    let diff = crate::workspace::collect_ref_diff(
+        range.cwd,
+        &range.from.git_ref,
+        &range.to.git_ref,
+        ignore_whitespace,
+    )
+    .map_err(|error| Error::new(ErrorCode::Vcs, format!("{error:#}")))?;
+    super::catalog::build_review_diff(
+        context,
+        source,
+        diff.numstat,
+        diff.patch,
+        diff.complete_context,
+    )
+}
+
+/// `threads.turnDiff`: what one run changed, from its turn-start checkpoint
+/// to the one it ended with.
+fn turn_diff(context: &V8Context, params: TurnDiffParams) -> Result<ReviewDiff, Error> {
+    let projection = orchestrator(context)?
+        .thread(params.thread_id)
+        .map_err(|_| thread_not_found(params.thread_id))?;
+    let range = checkpoints::turn_range(&projection, params.run_id)
+        .map_err(|error| range_error(error, Some(params.run_id)))?;
+    checkpoint_diff(
+        context,
+        ReviewDiffSource::Turn {
+            run_id: params.run_id,
+        },
+        &range,
+        params.ignore_whitespace,
+    )
+}
+
+/// `threads.fullDiff`: what the thread's live runs changed together.
+fn full_diff(context: &V8Context, params: FullDiffParams) -> Result<ReviewDiff, Error> {
+    let projection = orchestrator(context)?
+        .thread(params.thread_id)
+        .map_err(|_| thread_not_found(params.thread_id))?;
+    let range = checkpoints::thread_range(&projection).map_err(|error| range_error(error, None))?;
+    checkpoint_diff(
+        context,
+        ReviewDiffSource::Thread,
+        &range,
+        params.ignore_whitespace,
+    )
 }
 
 fn snapshot(context: &V8Context, params: ThreadSnapshotParams) -> Result<ThreadSnapshot, Error> {

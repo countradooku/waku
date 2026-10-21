@@ -267,7 +267,19 @@ fn handle(
                 .collect::<Vec<_>>()
                 .join("\n");
             let started_at = now_secs();
-            if let Some(schema) = params
+            let cwd = session.lock().cwd.clone();
+            super::scripted::apply_writes(&prompt, std::path::Path::new(&cwd));
+            let background = super::scripted::background_command(&prompt);
+            if params.get("outputSchema").is_none_or(Value::is_null) {
+                super::scripted::codex_turn_started(&thread_id, &turn_id);
+            }
+            if let Some(command) = background {
+                let (output, thread_id, turn_id) =
+                    (output.clone(), thread_id.clone(), turn_id.clone());
+                *deferred = Some(Box::new(move |_| {
+                    super::scripted::codex_background_turn(&output, &thread_id, &turn_id, &command);
+                }));
+            } else if let Some(schema) = params
                 .get("outputSchema")
                 .filter(|schema| !schema.is_null())
             {
@@ -306,6 +318,12 @@ fn handle(
             Ok(json!({
                 "turn": {"id": turn_id, "items": [], "status": "inProgress", "startedAt": started_at}
             }))
+        }
+        "thread/turns/list" => Ok(super::scripted::codex_turns_list(params)),
+        "thread/revert" => Ok(super::scripted::codex_revert(params)),
+        "thread/backgroundTerminals/list" => Ok(super::scripted::codex_list(params)),
+        "thread/backgroundTerminals/terminate" => {
+            Ok(super::scripted::codex_terminate(output, params))
         }
         "turn/interrupt" => {
             turns.cancel();

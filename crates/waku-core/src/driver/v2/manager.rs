@@ -179,6 +179,10 @@ struct Live {
     /// The streaming items of this session: their text so far and
     /// `stream_rev`, for live deltas.
     streams: Mutex<HashMap<TurnItemId, StreamText>>,
+    /// Whether the session is bound to its provider thread. Slash commands
+    /// a session reports before that are persisted right after the bind, so
+    /// they land in a stable order (the bind records the provider thread).
+    commands_bound: Mutex<bool>,
     last_activity: AtomicI64,
     closed: AtomicBool,
     shutdown: Shutdown,
@@ -434,6 +438,7 @@ impl ProviderSessionManager {
             last_error: None,
             detached_at: None,
             detach_reason: None,
+            available_commands: Vec::new(),
         };
         let live = Arc::new(Live {
             thread_id,
@@ -448,6 +453,7 @@ impl ProviderSessionManager {
             current_run: Mutex::new(None),
             child_turns: Mutex::new(HashSet::new()),
             streams: Mutex::new(HashMap::new()),
+            commands_bound: Mutex::new(false),
             last_activity: AtomicI64::new(now),
             closed: AtomicBool::new(false),
             shutdown,
@@ -550,6 +556,22 @@ impl ProviderSessionManager {
             },
         ));
         *live.bound.lock() = Some(reference.clone());
+        let commands = {
+            let mut bound = live.commands_bound.lock();
+            let first = !*bound;
+            *bound = true;
+            first
+                .then(|| live.entity.lock().available_commands.clone())
+                .filter(|commands| !commands.is_empty())
+        };
+        if let Some(commands) = commands {
+            self.ingest(IngestEnvelope::for_thread(
+                live.thread_id,
+                live.provider_session_id,
+                live.generation,
+                AdapterEvent::AvailableCommandsUpdated { commands },
+            ));
+        }
         Ok(reference)
     }
 
@@ -606,6 +628,23 @@ impl ProviderSessionManager {
                     .command_output(live.thread_id, item, &chunk, replace);
             }
             AdapterEvent::AccountUsageUpdated { .. } => {}
+            AdapterEvent::AvailableCommandsUpdated { commands } => {
+                // The manager's session row carries them from now on, so a
+                // later status update does not drop them; before the bind
+                // they wait for it (`bind_thread`).
+                let bound = {
+                    let bound = live.commands_bound.lock();
+                    live.entity.lock().available_commands.clone_from(&commands);
+                    *bound
+                };
+                if bound {
+                    self.persist(
+                        live,
+                        vec![AdapterEvent::AvailableCommandsUpdated { commands }],
+                    )
+                    .await;
+                }
+            }
             AdapterEvent::TurnTerminal { terminal } => {
                 let pending = throttle.flush();
                 self.persist(live, pending).await;
@@ -633,6 +672,13 @@ impl ProviderSessionManager {
             }
             other => {
                 let mut other = self.merge_bound_thread(live, other);
+                if let AdapterEvent::SessionUpdated { session } = &mut other
+                    && session.available_commands.is_empty()
+                {
+                    session
+                        .available_commands
+                        .clone_from(&live.entity.lock().available_commands);
+                }
                 if let AdapterEvent::TurnItemUpdated { item } = &mut other {
                     self.publish_text(live, item);
                     self.store_output(item);
@@ -956,6 +1002,26 @@ impl ProviderSessionManager {
             Effect::ProviderRuntimeContinue { source_run_id, .. } => {
                 self.continue_after_restart(thread_id, *source_run_id)
             }
+            Effect::BackgroundWorkStop {
+                provider_session_id,
+                provider_thread_id,
+                task_id,
+            } => {
+                self.stop_background_work(
+                    thread_id,
+                    *provider_session_id,
+                    *provider_thread_id,
+                    task_id,
+                    cx,
+                )
+                .await
+            }
+            Effect::BackgroundWorkRefresh {
+                provider_session_id,
+            } => {
+                self.refresh_background_work(thread_id, *provider_session_id, cx)
+                    .await
+            }
             // Delegated tasks are Phase 3; there is nothing to stop yet.
             Effect::DelegatedTasksStop { .. } => Ok(()),
             other => Err(EffectError::Permanent(format!(
@@ -963,6 +1029,92 @@ impl ProviderSessionManager {
                 other.effect_type().as_str()
             ))),
         }
+    }
+
+    /// `background_work.stop`: asks the live session to stop the process,
+    /// then settles the task, so a driver that reports nothing more still
+    /// clears it. A session that is gone ran nothing: the task settles too.
+    async fn stop_background_work(
+        &self,
+        thread_id: ThreadId,
+        provider_session_id: ProviderSessionId,
+        provider_thread_id: ProviderThreadId,
+        task_id: &str,
+        cx: &EffectContext<'_>,
+    ) -> Result<(), EffectError> {
+        let settle = |outcome| {
+            cx.report(
+                1,
+                InternalCommand::BackgroundWorkSettle {
+                    thread_id,
+                    provider_thread_id,
+                    task_id: task_id.to_owned(),
+                    outcome,
+                },
+            )
+        };
+        let Some(live) = self
+            .by_session(provider_session_id)
+            .filter(|live| live.thread_id == thread_id)
+        else {
+            return settle(waku_orchestrator::command::BackgroundOutcome::Cancelled);
+        };
+        match live
+            .session
+            .stop_background_work(BackgroundWorkRef {
+                provider_thread_id,
+                task_id: task_id.to_owned(),
+            })
+            .await
+        {
+            Ok(()) => settle(waku_orchestrator::command::BackgroundOutcome::Cancelled),
+            Err(error) => Err(EffectError::Permanent(error.to_string())),
+        }
+    }
+
+    /// `background_work.refresh`: the live session re-reports the work it
+    /// still runs (and what ended); a session that is gone ran nothing, so
+    /// every task of the thread's provider threads it served settles.
+    async fn refresh_background_work(
+        &self,
+        thread_id: ThreadId,
+        provider_session_id: ProviderSessionId,
+        cx: &EffectContext<'_>,
+    ) -> Result<(), EffectError> {
+        if let Some(live) = self
+            .by_session(provider_session_id)
+            .filter(|live| live.thread_id == thread_id)
+        {
+            return live
+                .session
+                .refresh_background_work()
+                .await
+                .map_err(|error| EffectError::Permanent(error.to_string()));
+        }
+        let projection = self
+            .deps
+            .orchestrator
+            .thread(thread_id)
+            .map_err(retryable)?;
+        let mut n = 0u8;
+        for provider_thread in projection.provider_threads.values() {
+            if provider_thread.provider_session_id != Some(provider_session_id) {
+                continue;
+            }
+            for task in &provider_thread.pending_background_tasks {
+                n = n.saturating_add(1);
+                cx.report(
+                    n,
+                    InternalCommand::BackgroundWorkSettle {
+                        thread_id,
+                        provider_thread_id: provider_thread.id,
+                        task_id: task.task_id.clone(),
+                        outcome: waku_orchestrator::command::BackgroundOutcome::Cancelled,
+                    },
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// `provider_runtime.continue` (#59): dispatches the `ContinueRun` the

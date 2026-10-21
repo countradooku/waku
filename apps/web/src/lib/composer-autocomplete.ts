@@ -1,7 +1,7 @@
 // Composer `/` and `@` completion over the v8 catalog (`composer.slashCommands`,
 // `files.searchEntries`).
 
-import type { FileEntry, ModelOption, SlashCommand } from '@waku/client/v8'
+import type { FileEntry, ModelOption, SessionCommand, SlashCommand } from '@waku/client/v8'
 import { fuzzyScore } from '@waku/client/fuzzy-search'
 
 export const COMPOSER_AUTOCOMPLETE_CAP = 64
@@ -34,6 +34,34 @@ export function detectComposerTrigger(text: string, cursor: number): ComposerTri
   const token = text.slice(tokenStart, end)
   if (!token.startsWith('@')) return null
   return { kind: 'file', query: token.slice(1), start: tokenStart, end }
+}
+
+/** The scope of a command only the live provider session reported. */
+export const SESSION_COMMAND_SCOPE = 'session'
+
+/**
+ * The catalog's slash commands (`composer.slashCommands`) with the ones the
+ * live session reported (`ProviderSession.availableCommands`), one per name.
+ * A catalog entry wins, and takes the session's description when it has none.
+ */
+export function mergeSessionCommands(
+  catalog: readonly SlashCommand[],
+  session: readonly SessionCommand[],
+): SlashCommand[] {
+  const merged = [...catalog]
+  const byName = new Map(merged.map((command, index) => [command.name, index]))
+  for (const command of session) {
+    const name = command.name.replace(/^\//u, '').trim()
+    if (!name) continue
+    const index = byName.get(name)
+    if (index === undefined) {
+      byName.set(name, merged.length)
+      merged.push({ name, description: command.description ?? '', scope: SESSION_COMMAND_SCOPE })
+    } else if (!merged[index]!.description.trim() && command.description) {
+      merged[index] = { ...merged[index]!, description: command.description }
+    }
+  }
+  return merged
 }
 
 /** Slash commands in menu order: built-ins first, then project, user and skills. */

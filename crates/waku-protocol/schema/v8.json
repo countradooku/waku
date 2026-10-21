@@ -1868,6 +1868,38 @@
           "type": "object"
         },
         {
+          "description": "A project in a fresh folder of its own under the daemon's projectless\nroot, for a task that has no project (one folder per task). The\ndaemon creates the folder and records it as `project.create`; a retry\nwith the same command id finds the project it made.",
+          "properties": {
+            "name": {
+              "description": "The sidebar name; \"No project\" when absent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "prompt": {
+              "description": "Names the folder (its slug), like the first prompt would.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "project.create_scratch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "projectId"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "importedNativeThread": {
               "anyOf": [
@@ -2701,6 +2733,54 @@
             "threadId",
             "runId",
             "subagentId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Stop a background process or monitor a provider thread reports in\n`pendingBackgroundTasks` (subagents use `subagent.stop`).",
+          "properties": {
+            "providerThreadId": {
+              "description": "The provider thread that holds the task; any of the thread's\nwhen absent.",
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "background_work.stop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId",
+            "taskId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Ask the live session which background work still runs and drop what\nit no longer reports (without a live session, nothing runs).",
+          "properties": {
+            "threadId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "background_work.refresh",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "threadId"
           ],
           "type": "object"
         },
@@ -5565,6 +5645,22 @@
       },
       "type": "object"
     },
+    "FullDiffParams": {
+      "description": "`threads.fullDiff` params: what the thread's live runs changed, from the\nfirst one's turn-start checkpoint to the last completed one's checkpoint.",
+      "properties": {
+        "ignoreWhitespace": {
+          "type": "boolean"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
     "GitStatus": {
       "properties": {
         "ahead": {
@@ -5832,6 +5928,19 @@
     "HistoryPage": {
       "description": "Older turn items, bounded like the snapshot window, with the runs they\nbelong to. `next` continues further back.",
       "properties": {
+        "checkpointScopes": {
+          "description": "The checkpoint scopes and checkpoints of `runs`, so a client can\nrewind to (or diff) a run it paged in.",
+          "items": {
+            "$ref": "#/$defs/CheckpointScope"
+          },
+          "type": "array"
+        },
+        "checkpoints": {
+          "items": {
+            "$ref": "#/$defs/Checkpoint"
+          },
+          "type": "array"
+        },
         "items": {
           "description": "Wire-projected, ascending by `position`.",
           "items": {
@@ -6541,6 +6650,14 @@
             "null"
           ]
         },
+        "itemId": {
+          "description": "The command turn item whose output the process streams: subscribe to\n`commandOutput{threadId, itemId}` for it.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/PendingTaskKind"
         },
@@ -7145,6 +7262,13 @@
     },
     "ProviderSession": {
       "properties": {
+        "availableCommands": {
+          "description": "Slash commands the live session reported (ACP's\n`available_commands_update`, Claude's `system/init`), replaced whole\non every report. Clients merge them with `composer.slashCommands`.",
+          "items": {
+            "$ref": "#/$defs/SessionCommand"
+          },
+          "type": "array"
+        },
         "capabilities": {
           "$ref": "#/$defs/Capabilities",
           "default": {
@@ -8079,8 +8203,39 @@
       "type": "object"
     },
     "ReviewDiffSource": {
-      "description": "Which changes `review.diff` compares. The last turn of a thread is\n`threads.turnDiff`.",
+      "description": "Which changes a [`ReviewDiff`] compares. `review.diff` takes the working\ntree sources; `turn` and `thread` are the sources of `threads.turnDiff`\nand `threads.fullDiff` (checkpoint to checkpoint), which `review.diff`\nrefuses.",
       "oneOf": [
+        {
+          "description": "One run: its turn-start checkpoint to the checkpoint it ended with.",
+          "properties": {
+            "runId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "turn",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The whole thread: the first live run's turn-start checkpoint to the\nlast completed run's checkpoint.",
+          "properties": {
+            "type": {
+              "const": "thread",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
         {
           "description": "Working tree and index against `HEAD`, untracked files included.",
           "properties": {
@@ -9052,6 +9207,25 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    },
+    "SessionCommand": {
+      "description": "A slash command a provider session reported.",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Without the leading `/`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
       "type": "object"
     },
     "SessionInfo": {
@@ -11977,6 +12151,27 @@
       },
       "type": "object"
     },
+    "TurnDiffParams": {
+      "description": "`threads.turnDiff` params: what run `runId` changed, from the checkpoint\ncaptured before it started to the one it ended with.",
+      "properties": {
+        "ignoreWhitespace": {
+          "type": "boolean"
+        },
+        "runId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "runId"
+      ],
+      "type": "object"
+    },
     "TurnItem": {
       "description": "One display row of a thread.",
       "properties": {
@@ -13992,6 +14187,10 @@
       "scope": "operate"
     },
     {
+      "name": "project.create_scratch",
+      "scope": "operate"
+    },
+    {
       "name": "thread.create",
       "scope": "operate"
     },
@@ -14121,6 +14320,14 @@
     },
     {
       "name": "subagent.stop",
+      "scope": "operate"
+    },
+    {
+      "name": "background_work.stop",
+      "scope": "operate"
+    },
+    {
+      "name": "background_work.refresh",
       "scope": "operate"
     },
     {
@@ -14330,6 +14537,28 @@
       },
       "result": {
         "$ref": "#/$defs/ThreadFindResult"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "threads.turnDiff",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/TurnDiffParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ReviewDiff"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "threads.fullDiff",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/FullDiffParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ReviewDiff"
       },
       "scope": "read"
     },

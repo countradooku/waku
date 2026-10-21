@@ -302,6 +302,8 @@ fn orchestration_samples() -> Vec<(&'static str, Sample)> {
                 MethodResult::ThreadsHistoryPage(HistoryPage {
                     items: vec![command_item()],
                     runs: vec![run()],
+                    checkpoint_scopes: Vec::new(),
+                    checkpoints: Vec::new(),
                     next: None,
                 }),
             ))),

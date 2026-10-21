@@ -1653,6 +1653,8 @@ background.view:
   en: View
 background.stop:
   en: Stop
+background.refresh:
+  en: Refresh Background Work
 background.stop_named:
   en: Stop %{name}
 background.stop_all:
@@ -1822,6 +1824,8 @@ diff.source_last_turn:
   en: Last Turn
 diff.source_turn:
   en: Turn %{turn}
+diff.source_all_turns:
+  en: All Turns
 diff.source_uncommitted:
   en: Uncommitted
 diff.source_unstaged:

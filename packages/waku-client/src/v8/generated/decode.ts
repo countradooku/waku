@@ -160,6 +160,9 @@ export function normalizeCommand(value: any): T.Command {
     case "project.remove": {
       return value;
     }
+    case "project.create_scratch": {
+      return value;
+    }
     case "thread.create": {
       if (value["workspace"] != null) value["workspace"] = normalizeWorkspaceStrategy(value["workspace"]);
       return value;
@@ -260,6 +263,12 @@ export function normalizeCommand(value: any): T.Command {
       return value;
     }
     case "subagent.stop": {
+      return value;
+    }
+    case "background_work.stop": {
+      return value;
+    }
+    case "background_work.refresh": {
       return value;
     }
     case "checkpoint.rollback": {
@@ -700,6 +709,12 @@ export function normalizeReviewDiffParams(value: any): T.ReviewDiffParams {
 
 export function normalizeReviewDiffSource(value: any): T.ReviewDiffSource {
   switch (value?.type) {
+    case "turn": {
+      return value;
+    }
+    case "thread": {
+      return value;
+    }
     case "uncommitted": {
       return value;
     }
@@ -1270,6 +1285,8 @@ export const resultNormalizers: { readonly [M in MethodName]: (value: any) => Me
   "threads.archived": (value: any) => normalizeArchivedPage(value),
   "threads.search": (value: any) => value,
   "threads.find": (value: any) => normalizeThreadFindResult(value),
+  "threads.turnDiff": (value: any) => normalizeReviewDiff(value),
+  "threads.fullDiff": (value: any) => normalizeReviewDiff(value),
   "daemon.info": (value: any) => value,
   "daemon.shutdown": (value: any) => value,
   "files.tree": (value: any) => value,

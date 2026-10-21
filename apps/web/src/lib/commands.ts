@@ -144,4 +144,5 @@ export const commandIds = {
   createThread: (threadId: string) => `thread.create:${threadId}`,
   dispatchMessage: (messageId: string) => `message.dispatch:${messageId}`,
   createProject: (projectId: string) => `project.create:${projectId}`,
+  createScratchProject: (projectId: string) => `project.create_scratch:${projectId}`,
 }

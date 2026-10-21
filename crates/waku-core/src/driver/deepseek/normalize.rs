@@ -1155,6 +1155,7 @@ impl Normalizer {
                         description: Some(label.to_owned()),
                         parent_task_id: None,
                         child_thread_id: None,
+                        item_id: None,
                     },
                     live,
                 },

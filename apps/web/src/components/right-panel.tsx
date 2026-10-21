@@ -26,6 +26,7 @@ import type { CodeDiffSurfaceHandle, DiffSurfaceFile } from '@/components/code-s
 import {
   collectWorkspaceDiff,
   daemonKeys,
+  diffSourceKey,
   listWorkspaceTree,
   readWorkspaceTextFile,
   rootKey,
@@ -33,10 +34,11 @@ import {
   type DiffSource,
   type TextFile,
 } from '@/lib/daemon-api'
+import { useCommandOutput } from '@/hooks/use-daemon-stores'
 import { requireConnection, useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
 import { usePrimaryShortcut } from '@/lib/platform'
-import { reviewDiffSourceLabel } from '@/lib/review-diff'
+import { diffSourceChoices, reviewDiffSourceLabel, reviewTurns } from '@/lib/review-diff'
 import {
   mergeReviewDiffFiles,
   openFileInPanel,
@@ -414,6 +416,7 @@ export function RightPanel({
               diffSource={diffSource}
               panelWidth={fittedPanelWidth}
               root={root}
+              runs={task?.runs}
               onDiffSourceChange={setDiffSource}
             />
           )}
@@ -427,6 +430,7 @@ export function RightPanel({
           )}
           {tab.surface === 'backgroundWork' && tab.backgroundWorkId && (
             <BackgroundWorkPanel
+              active={active && open && tab.id === activeTab?.id}
               task={task}
               workId={tab.backgroundWorkId}
               onTitle={(title) => updateTab(tab.id, { title })}
@@ -956,13 +960,16 @@ function TreeRow({
 
 function ChangesPanel({
   root,
-  diffSource,
+  diffSource: requestedSource,
   panelWidth,
+  runs,
   onDiffSourceChange,
 }: {
   root: T.RootRef
   diffSource: DiffSource
   panelWidth: number
+  /** The task's runs, whose turns it can review; absent for a new task. */
+  runs?: Task['runs']
   onDiffSourceChange: (source: DiffSource) => void
 }) {
   const { t } = useI18n()
@@ -979,9 +986,15 @@ function ChangesPanel({
   const key = rootKey(root)
   const maxTreeWidth = Math.max(140, Math.min(360, panelWidth - 140))
   const fittedTreeWidth = clamp(treeWidth, 140, maxTreeWidth)
-  const sourceLabel = reviewDiffSourceLabel(diffSource, t)
+  const turns = runs ? reviewTurns(runs) : undefined
+  // Turns belong to a task; a new task reviews its working tree.
+  const diffSource: DiffSource = turns || typeof requestedSource === 'string' ? requestedSource : 'uncommitted'
+  const sourceKey = diffSourceKey(diffSource)
+  const sourceLabel = reviewDiffSourceLabel(diffSource, t, turns)
+  // The whole thread's diff grows with every completed turn.
+  const latestTurn = typeof diffSource !== 'string' && diffSource.type === 'thread' ? turns?.at(-1)?.runId : undefined
   const diff = useQuery({
-    queryKey: [...daemonKeys.workspaceDiff(config?.address ?? 'disconnected', key, diffSource), ignoreWhitespace],
+    queryKey: [...daemonKeys.workspaceDiff(config?.address ?? 'disconnected', key, diffSource), ignoreWhitespace, latestTurn],
     queryFn: () => collectWorkspaceDiff(requireConnection(connection), root, diffSource, ignoreWhitespace),
     enabled: phase === 'connected' && Boolean(connection && config),
   })
@@ -1000,7 +1013,7 @@ function ChangesPanel({
     setSelectedFile(null)
     setExpandedPaths(new Set())
     setFilter('')
-  }, [diffSource])
+  }, [sourceKey])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -1059,41 +1072,17 @@ function ChangesPanel({
   }, [focusDiffTreeIndex, toggleDiffDirectory, treeRows])
 
   const stats = parseNumstat(diff.data?.numstat ?? '')
-  const selectSource = (source: DiffSource) => {
-    if (diffSource !== source) onDiffSourceChange(source)
-  }
   const sourceItems = [
-    {
-      id: 'uncommitted',
-      label: t('diff.source_uncommitted'),
-      selected: diffSource === 'uncommitted',
-      onSelect: () => selectSource('uncommitted'),
-    },
-    {
-      id: 'unstaged',
-      label: t('diff.source_unstaged'),
-      selected: diffSource === 'unstaged',
-      onSelect: () => selectSource('unstaged'),
-    },
-    {
-      id: 'staged',
-      label: t('diff.source_staged'),
-      selected: diffSource === 'staged',
-      onSelect: () => selectSource('staged'),
-    },
-    {
-      id: 'committed',
-      label: t('diff.source_committed'),
-      separatorBefore: true,
-      selected: diffSource === 'committed',
-      onSelect: () => selectSource('committed'),
-    },
-    {
-      id: 'branch',
-      label: t('diff.source_branch'),
-      selected: diffSource === 'branch',
-      onSelect: () => selectSource('branch'),
-    },
+    ...diffSourceChoices(diffSource, turns, t).map((choice) => ({
+      id: choice.id,
+      label: choice.label,
+      selected: choice.selected,
+      disabled: choice.disabled,
+      separatorBefore: choice.separatorBefore,
+      onSelect: () => {
+        if (choice.source && !choice.selected) onDiffSourceChange(choice.source)
+      },
+    })),
     {
       id: 'ignore-whitespace',
       label: t('diff.ignore_whitespace'),
@@ -1213,7 +1202,7 @@ function ChangesPanel({
         <ControlMenu
           items={sourceItems}
           label={sourceLabel}
-          menuClassName="w-44"
+          menuClassName="max-h-[min(440px,70vh)] w-44 overflow-y-auto"
           placement="below"
           triggerClassName="h-7 max-w-44 bg-background px-2"
         />
@@ -1312,18 +1301,33 @@ function fileName(path: string): string {
 }
 
 function BackgroundWorkPanel({
+  active,
   task,
   workId,
   onTitle,
 }: {
+  /** The tab is shown: only then does a process's output stream. */
+  active: boolean
   task?: Task
   workId: string
   onTitle: (title: string) => void
 }) {
   const { t } = useI18n()
-  const { stopSubagent } = useTaskActions()
+  const { stopBackgroundWork, refreshBackgroundWork } = useTaskActions()
   const reportedTitle = useRef<string | null>(null)
-  const item = task?.backgroundWork.find((candidate) => candidate.id === workId)
+  const [stopRequested, setStopRequested] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const current = task?.backgroundWork.find((candidate) => candidate.id === workId)
+  // A process leaves the provider's pending list once it ends; keep showing
+  // it, and its stored output, instead of a blank panel.
+  const lastSeen = useRef<BackgroundWorkItem | undefined>(undefined)
+  if (current) lastSeen.current = current
+  const ended = !current && lastSeen.current?.kind !== 'subagent' ? lastSeen.current : undefined
+  const item: BackgroundWorkItem | undefined = current ?? (ended
+    ? { ...ended, status: stopRequested ? 'stopped' : 'completed', canStop: false }
+    : undefined)
+  const streamsOutput = item !== undefined && item.kind !== 'subagent' && item.itemId !== undefined
+  const commandOutput = useCommandOutput(task?.id, item?.itemId, active && streamsOutput)
 
   useEffect(() => {
     if (!item?.title) return
@@ -1344,14 +1348,30 @@ function BackgroundWorkPanel({
     )
   }
 
-  const stoppable = isStoppableBackgroundStatus(item.status) && item.canStop && item.runId
+  const stoppable = isStoppableBackgroundStatus(item.status)
+    && item.canStop
+    && (item.kind !== 'subagent' || item.runId !== undefined)
+  const stop = () => {
+    setStopRequested(true)
+    void stopBackgroundWork(task.id, item).catch((error) => {
+      setStopRequested(false)
+      toast.error(errorMessage(error))
+    })
+  }
+  const refresh = () => {
+    setRefreshing(true)
+    void refreshBackgroundWork(task.id)
+      .catch((error) => toast.error(errorMessage(error)))
+      .finally(() => setRefreshing(false))
+  }
   const metadata = [
     [t('background.model'), item.model],
     [t('background.latest_update'), item.kind === 'subagent' ? undefined : item.detail],
+    [t('background.exit_code'), commandOutput?.exitCode === undefined ? undefined : String(commandOutput.exitCode)],
   ].filter((entry): entry is [string, string] => Boolean(entry[1]))
   const output = item.kind === 'subagent'
     ? [item.detail, item.output].filter(Boolean).join('\n\n')
-    : item.output
+    : commandOutput?.text || item.output
   return (
     <div className="min-h-0 flex-1 overflow-auto p-3">
       <div className="overflow-hidden rounded-[9px] border bg-card">
@@ -1361,7 +1381,7 @@ function BackgroundWorkPanel({
             <div className="truncate text-[12px] font-medium">{item.title}</div>
             <div className="mt-1 flex items-center gap-1.5 text-[10px] text-[var(--text-tertiary)]">
               <BackgroundStatusIcon status={item.status} />
-              <span>{backgroundStatusLabel(item.status, t)}</span>
+              <span>{backgroundStatusLabel(stopRequested && stoppable ? 'stopping' : item.status, t)}</span>
               {item.startedAt !== undefined && (
                 <>
                   <span>·</span>
@@ -1370,13 +1390,25 @@ function BackgroundWorkPanel({
               )}
             </div>
           </div>
+          {item.kind !== 'subagent' && (
+            <Button
+              aria-label={t('common.refresh')}
+              disabled={refreshing}
+              size="icon-sm"
+              title={t('common.refresh')}
+              variant="ghost"
+              onClick={refresh}
+            >
+              <WakuIcon className={cn('size-3.5', refreshing && 'motion-safe:animate-spin')} name="rotateCw" />
+            </Button>
+          )}
           {stoppable && (
             <Button
               className="h-[26px] gap-1.5 px-[9px] text-[10.5px] hover:bg-destructive/10"
+              disabled={stopRequested}
               size="sm"
               variant="outline"
-              onClick={() => void stopSubagent(task.id, item.runId!, item.id)
-                .catch((error) => toast.error(errorMessage(error)))}
+              onClick={stop}
             >
               <WakuIcon className="size-[11px] text-destructive" name="stopFilled" />
               {t('background.stop')}
@@ -1392,6 +1424,7 @@ function BackgroundWorkPanel({
         <div className="border-t p-2.5">
           <div className="mb-[5px] flex items-center justify-between text-[9.5px] text-[var(--text-tertiary)]">
             <span>{t('background.output')}</span>
+            {commandOutput?.truncated && <span>{t('background.output_truncated')}</span>}
           </div>
           <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--inset)] p-2 font-mono text-[10.5px] leading-[15px] text-[var(--text-secondary)]">
             {stripAnsi(output || t('background.no_output'))}
@@ -1725,7 +1758,7 @@ function isStoppableBackgroundStatus(status: BackgroundWorkStatus) {
   return status === 'pending' || status === 'running'
 }
 
-function backgroundStatusLabel(status: BackgroundWorkStatus, t: Translator) {
+function backgroundStatusLabel(status: BackgroundWorkStatus | 'stopping', t: Translator) {
   return t(`background.status.${status === 'pending' ? 'starting' : status}`)
 }
 

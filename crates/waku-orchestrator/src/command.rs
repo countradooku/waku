@@ -78,6 +78,9 @@ pub enum InternalCommand {
         thread_id: ThreadId,
         run_id: Option<RunId>,
         scope_id: CheckpointScopeId,
+        /// The run's turn-start checkpoint (`checkpoint.capture` with
+        /// `turn_start`), not the one that ends it.
+        turn_start: bool,
         result: Result<CapturedCheckpoint, String>,
     },
     CheckpointRollbackApplied {

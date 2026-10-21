@@ -4,6 +4,7 @@
 
 mod common;
 
+mod checkpoints;
 mod crash;
 mod effects;
 mod feed;

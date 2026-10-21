@@ -238,6 +238,7 @@ fn the_first_message_starts_a_run_with_ordinal_one_and_a_title() {
     assert_eq!(
         effects,
         [
+            EffectType::CheckpointCapture,
             EffectType::ProviderTurnStart,
             EffectType::ThreadTitleGenerate
         ]
@@ -291,7 +292,13 @@ fn a_busy_thread_queues_and_the_queue_advances_when_the_run_ends() {
     assert_eq!(runs[&third.id].status, RunStatus::Queued);
     assert!(matches!(
         decision.effects.as_slice(),
-        [Effect::ProviderTurnStart { run_id, .. }] if *run_id == second.id
+        [
+            Effect::CheckpointCapture {
+                turn_start: true,
+                ..
+            },
+            Effect::ProviderTurnStart { run_id, .. }
+        ] if *run_id == second.id
     ));
     // The queued user message became a row in run 2's block.
     assert!(fixture.thread().hot_items.values().any(|item| item.position

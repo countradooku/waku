@@ -76,6 +76,7 @@ impl Fixture {
                 last_error: None,
                 detached_at: None,
                 detach_reason: None,
+                available_commands: Vec::new(),
             }),
             DomainEvent::ProviderThreadUpdated(ProviderThread {
                 provider_session_id: Some(id(SESSION)),
@@ -93,6 +94,7 @@ impl Fixture {
                     description: Some("npm run dev".into()),
                     parent_task_id: None,
                     child_thread_id: None,
+                    item_id: None,
                 }],
                 ..provider_thread.clone()
             }),
@@ -342,7 +344,13 @@ fn the_continuation_is_a_new_run_with_a_resumed_row_and_runs_once() {
     assert!(message.text.contains("npm run dev"));
     assert!(matches!(
         decision.effects.as_slice(),
-        [Effect::ProviderTurnStart { run_id, .. }] if *run_id == continued.id
+        [
+            Effect::CheckpointCapture {
+                turn_start: true,
+                ..
+            },
+            Effect::ProviderTurnStart { run_id, .. }
+        ] if *run_id == continued.id
     ));
 
     // The resumed row opens the block, before the system message.
@@ -595,7 +603,13 @@ fn a_held_queue_stays_held_and_an_idle_queue_is_released() {
     let decision = fixture.recover();
     assert!(matches!(
         decision.effects.as_slice(),
-        [Effect::ProviderTurnStart { run_id, .. }] if *run_id == second
+        [
+            Effect::CheckpointCapture {
+                turn_start: true,
+                ..
+            },
+            Effect::ProviderTurnStart { run_id, .. }
+        ] if *run_id == second
     ));
 }
 

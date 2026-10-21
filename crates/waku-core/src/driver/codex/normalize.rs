@@ -104,6 +104,8 @@ struct PendingRequest {
 
 struct Terminal {
     item: String,
+    /// The app id of the command item the process streams its output to.
+    item_id: TurnItemId,
     command: String,
     provider_thread_id: ProviderThreadId,
     live: bool,
@@ -372,6 +374,54 @@ impl State {
         self.terminals.values().any(|terminal| terminal.live)
     }
 
+    /// Reconciles the background terminals with
+    /// `thread/backgroundTerminals/list`: every listed process is live
+    /// (re-reported), and a live one the list no longer names has ended.
+    pub fn background_listed(&mut self, shared: &Shared, listed: &[Value]) -> Vec<AdapterEvent> {
+        let Some(provider_thread_id) = self.root.as_ref().map(|root| root.id) else {
+            return Vec::new();
+        };
+        let id_of =
+            |value: Option<&Value>| value.filter(|value| !value.is_null()).map(rpc_id_string);
+        let mut events = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for entry in listed {
+            let Some(process) = id_of(entry.get("processId")) else {
+                continue;
+            };
+            let native = id_of(entry.get("itemId").or_else(|| entry.get("id")))
+                .unwrap_or_else(|| process.clone());
+            let command = entry
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            seen.insert(process.clone());
+            let terminal = self
+                .terminals
+                .entry(process.clone())
+                .or_insert_with(|| Terminal {
+                    item_id: shared.bind(provider_thread_id.0, EntityKind::Item, &native),
+                    item: native,
+                    command,
+                    provider_thread_id,
+                    live: false,
+                });
+            terminal.live = true;
+            events.push(background_event(&process, terminal, true));
+        }
+        let ended = self
+            .terminals
+            .iter()
+            .filter(|(process, terminal)| terminal.live && !seen.contains(*process))
+            .map(|(process, _)| process.clone())
+            .collect::<Vec<_>>();
+        for process in ended {
+            events.extend(self.background_stopped(&process));
+        }
+        events
+    }
+
     pub fn background_stopped(&mut self, process_id: &str) -> Vec<AdapterEvent> {
         match self.terminals.remove(process_id) {
             Some(terminal) if terminal.live => {
@@ -492,6 +542,7 @@ fn background_event(process_id: &str, terminal: &Terminal, live: bool) -> Adapte
                 description: Some(terminal.command.clone()),
                 parent_task_id: Some(terminal.item.clone()),
                 child_thread_id: None,
+                item_id: Some(terminal.item_id),
             },
             live,
         },
@@ -844,6 +895,7 @@ fn notification(shared: &Shared, method: &str, params: &Value) -> Option<Vec<Ada
                 last_error: Some(format!("{name}: {error}")),
                 detached_at: None,
                 detach_reason: None,
+                available_commands: Vec::new(),
             };
             state
                 .coalescer
@@ -1489,6 +1541,7 @@ fn command_item(
         } else {
             state.terminals.entry(process.clone()).or_insert(Terminal {
                 item: native.to_owned(),
+                item_id: shared.bind(cx.provider_thread_id.0, EntityKind::Item, native),
                 command: command.clone(),
                 provider_thread_id: cx.provider_thread_id,
                 live: false,

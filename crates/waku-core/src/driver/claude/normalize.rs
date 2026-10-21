@@ -133,6 +133,8 @@ pub struct Normalizer {
     live_tasks: BTreeSet<String>,
     limit: LimitEvidence,
     last_model: Option<String>,
+    /// The `slash_commands` of the last `system/init`, reported on change.
+    slash_commands: Vec<String>,
     /// Uuid of the last root assistant message: the turn's weak native id
     /// and the thread's resume point.
     pub last_assistant_uuid: Option<String>,
@@ -182,6 +184,7 @@ impl Normalizer {
             live_tasks: BTreeSet::new(),
             limit: LimitEvidence::default(),
             last_model: None,
+            slash_commands: Vec::new(),
             last_assistant_uuid: None,
             coalescer,
         }
@@ -434,6 +437,7 @@ impl Normalizer {
                 if let Some(model) = str_of(frame, "model") {
                     self.last_model = Some(model.to_owned());
                 }
+                self.init_commands(frame, out);
             }
             "task_started" => self.task_started(frame, out),
             "task_progress" => self.task_progress(frame, out),
@@ -503,6 +507,37 @@ impl Normalizer {
         Some(())
     }
 
+    /// `system/init` lists the session's slash commands (names only);
+    /// they are reported when the list changes.
+    fn init_commands(&mut self, frame: &Value, out: &mut Output) {
+        let Some(commands) = frame.get("slash_commands").and_then(Value::as_array) else {
+            return;
+        };
+        let names = commands
+            .iter()
+            .filter_map(|command| {
+                command
+                    .as_str()
+                    .or_else(|| command.get("name").and_then(Value::as_str))
+            })
+            .map(|name| name.trim_start_matches('/').to_owned())
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+        if names == self.slash_commands {
+            return;
+        }
+        self.slash_commands.clone_from(&names);
+        out.events.push(AdapterEvent::AvailableCommandsUpdated {
+            commands: names
+                .into_iter()
+                .map(|name| SessionCommand {
+                    name,
+                    description: None,
+                })
+                .collect(),
+        });
+    }
+
     fn set_live(&mut self, task_id: &str, live: bool, out: &mut Output) {
         let changed = if live {
             self.live_tasks.insert(task_id.to_owned())
@@ -528,6 +563,7 @@ impl Normalizer {
                 description: self.task_descriptions.get(task_id).cloned(),
                 parent_task_id: None,
                 child_thread_id: None,
+                item_id: None,
             },
             live,
         };

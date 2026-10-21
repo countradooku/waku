@@ -548,39 +548,65 @@ impl Waku {
         }
     }
 
-    /// `subagent.stop` of a running subagent (its `control_id` names the
-    /// run and the node).
+    /// Stops running work: `subagent.stop` for a subagent (its
+    /// `control_id` names the run and the node), `background_work.stop` for
+    /// a process or monitor (the provider thread and the task).
     pub(super) fn stop_background_work(
         &mut self,
         session_id: Uuid,
         key: BackgroundWorkKey,
         cx: &mut Context<Self>,
     ) {
-        let control_id = self
+        let command = self
             .background_work
             .get(&session_id)
             .and_then(|registry| registry.items.get(&key))
             .filter(|item| item.status.is_stoppable() && item.can_stop)
-            .and_then(|item| item.control_id.clone());
-        let Some((run_id, node_id)) = control_id.as_deref().and_then(|control| {
-            let (run, node) = control.split_once('/')?;
-            Some((run.parse::<Uuid>().ok()?, node.parse::<Uuid>().ok()?))
-        }) else {
+            .and_then(|item| item.control_id.as_deref())
+            .and_then(|control| {
+                waku_client::commands::stop_background_work(session_id, key.kind, control)
+            });
+        let Some(command) = command else {
             return;
         };
         self.handle_background_work_event(
             session_id,
             BackgroundWorkEvent::StopRequested(key.clone()),
         );
+        self.dispatch(command, ThreadAction::Other);
+        cx.notify();
+    }
+
+    /// `background_work.refresh`: the live session re-reports the work it
+    /// still runs, and work no session runs any more is dropped.
+    pub(super) fn refresh_background_work(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         self.dispatch(
-            Command::SubagentStop {
-                thread_id: waku_protocol::orchestration::ThreadId(session_id),
-                run_id: waku_protocol::orchestration::RunId(run_id),
-                subagent_id: waku_protocol::orchestration::NodeId(node_id),
-            },
+            waku_client::commands::refresh_background_work(session_id),
             ThreadAction::Other,
         );
         cx.notify();
+    }
+
+    /// Streams a process's output (`commandOutput` of the command item that
+    /// started it) while its surface is the one open; the previous one stops.
+    fn watch_background_output(&mut self, session_id: Uuid, key: &BackgroundWorkKey) {
+        let item_id = self
+            .background_work
+            .get(&session_id)
+            .and_then(|registry| registry.items.get(key))
+            .filter(|item| item.key.kind != BackgroundWorkKind::Subagent)
+            .and_then(|item| item.origin_activity_id.as_deref())
+            .and_then(|id| id.parse::<Uuid>().ok());
+        if self.background_output_watch == item_id {
+            return;
+        }
+        if let Some(previous) = self.background_output_watch.take() {
+            self.threads.store.unwatch_output(previous);
+        }
+        if let Some(item_id) = item_id {
+            self.threads.store.watch_output(session_id, item_id);
+            self.background_output_watch = Some(item_id);
+        }
     }
 
     pub(super) fn open_background_work_surface(
@@ -600,6 +626,7 @@ impl Waku {
         if self.state.selected_session != Some(session_id) {
             self.select_session(session_id, cx);
         }
+        self.watch_background_output(session_id, &key);
         self.open_right_panel_surface(RightPanelSurface::BackgroundWork { key, title }, cx);
     }
 
@@ -1068,6 +1095,45 @@ impl Waku {
                     })
             })
         });
+        // Processes and monitors: ask the session what still runs.
+        let refresh = session_id
+            .filter(|_| item.key.kind != BackgroundWorkKind::Subagent)
+            .map(|session_id| {
+                let focus = self.transcript_control_focus("background-surface-refresh", cx);
+                let click_weak = cx.entity().downgrade();
+                let key_weak = cx.entity().downgrade();
+                div()
+                    .id("background-surface-refresh")
+                    .track_focus(&focus)
+                    .tab_index(0)
+                    .size(px(26.0))
+                    .rounded(px(6.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_default()
+                    .hover(|style| style.bg(theme.overlay))
+                    .active(|style| style.bg(theme.overlay_strong))
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .tooltip(Tooltip::text(tr!("background.refresh")))
+                    .child(icon("icons/rotate-cw.svg", 12.0, theme.text_tertiary))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ = click_weak.update(cx, |this, cx| {
+                            this.refresh_background_work(session_id, cx);
+                        });
+                    })
+                    .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            let _ = key_weak.update(cx, |this, cx| {
+                                this.refresh_background_work(session_id, cx);
+                            });
+                            cx.stop_propagation();
+                        }
+                    })
+            });
         let card = div()
             .w_full()
             .flex()
@@ -1122,6 +1188,7 @@ impl Waku {
                                     .child(work_elapsed(item)),
                             ),
                     )
+                    .when_some(refresh, |header, refresh| header.child(refresh))
                     .when_some(stop, |header, stop| header.child(stop)),
             )
             .child(self.render_background_work_detail(

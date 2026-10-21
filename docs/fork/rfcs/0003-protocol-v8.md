@@ -459,6 +459,11 @@ Entity types for threads, runs, nodes, turn items and the rest are defined by RF
 > - `threads.search` takes `{query, projectId?, includeArchived?, limit?}` (`limit` ≤ 200, 50 by default) and returns `Vec<ThreadSearchHit{threadId, projectId, title, source, entityId, position?, snippet, activityAt}>`: one hit per thread, its best match (`source` is `title`, else the latest matching `message`, else the latest matching `plan`; RFC 0001 amendment "Search"), ordered by source and then recency. `entityId` is the matching message, plan or thread id, `position` the matching turn item's (absent for a title).
 > - `threads.find` takes `{threadId, query, anchor?, window?, itemsAround?: {before, after}}` and returns `ThreadFindResult{matches: Vec<FindHit{source, entityId, position}>, truncated, current?, window: Vec<FindSnippet{index, hit, snippet}>, items}`: every match in transcript order (at most 5,000), the current one (the first at or after `anchor`, else the latest), snippets for up to `window` (≤ 50, 17 by default) matches around it, and with `itemsAround` (each side ≤ 50) the wire-projected turn items around the current match, so a client jumps to history it never paged in. It replaces the sketch's `limit` and `ThreadFindHit` list.
 
+> **Changed in #180.**
+> - `threads.turnDiff` takes `{threadId, runId, ignoreWhitespace?}` and `threads.fullDiff` `{threadId, ignoreWhitespace?}`; both return `ReviewDiff` (the `review.diff` shape, patch inline up to 1 MiB, else a blob) whose `source` is the new `ReviewDiffSource` variant `turn{runId}` or `thread` (`review.diff` refuses both). A turn's diff is its turn-start checkpoint to the checkpoint it ended with; the thread's is the first live run's turn start to the last live run's checkpoint (RFC 0001 amendment "Gaps found while moving the clients"). No ready checkpoint (the run is still going, the workspace is not a repository) answers `conflict`; an unknown run `notFound`.
+> - `HistoryPage` adds `checkpointScopes` and `checkpoints` of its runs, so a client can rewind or diff a run it paged in.
+> - `ProviderSession.availableCommands: Vec<SessionCommand{name, description?}>` carries the slash commands the live session reported; clients merge them with `composer.slashCommands`. `PendingBackgroundTask.itemId` names the command item to subscribe to with `commandOutput`.
+
 **Projects**
 
 | Method | Request | Response | Scope | v7 |
@@ -640,6 +645,8 @@ Input is sent as DATA frames on an `interactive` terminal subscription's channel
 | `projectPromoteScratch` | `projectId, path` | `operate` + `files:write` | `MigrateProjectlessWorkspace` |
 | `queuedRunCancel`, `queuedRunReorder`, `queuedRunEdit`, `queuedMessagePromoteToSteer`, `queueResume` | *reserved* (Phase 3) | `operate` | new |
 | `threadSettle`, `threadUnsettle`, `threadSnooze`, `threadUnsnooze`, `providerSwitch`, `threadMergeBack`, `delegatedTask*` | *reserved* (Phases 3–4) | `operate` | new |
+
+> **Changed in #180.** `projectCreateScratch` is `project.create_scratch {projectId, name?, prompt?}` (operate): the daemon creates a fresh folder under its projectless root per call and records it as `project.create`, so every task without a project gets its own folder. `backgroundWorkRefresh` is `background_work.refresh {threadId}`, and `background_work.stop {threadId, taskId, providerThreadId?}` stops a process or monitor (subagents keep `subagent.stop`).
 
 Commands that are internal in T3 (`thread.stop`, `checkpoint.rollback.fail`, and so on) are never accepted from clients. They decode as `Unknown` and are rejected with `badRequest`.
 

@@ -223,6 +223,58 @@ fn load_runs(connection: &Connection, run_ids: &BTreeSet<RunId>) -> StoreResult<
     Ok(runs)
 }
 
+/// The checkpoint scopes and checkpoints of the `included` runs (a run's
+/// root scope holds its turn-start checkpoint and the one it ended with).
+fn run_checkpoints(
+    connection: &Connection,
+    thread_id: &str,
+    included: &HashSet<RunId>,
+) -> StoreResult<(Vec<CheckpointScope>, Vec<Checkpoint>)> {
+    // Pick by run id first, then decode only the included rows.
+    let pick = |sql: &str| -> StoreResult<Vec<String>> {
+        let mut statement = connection.prepare_cached(sql)?;
+        let rows = statement.query_map([thread_id], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut picked = Vec::new();
+        for row in rows {
+            let (run_id, id) = row?;
+            if run_id
+                .and_then(|run_id| run_id.parse().ok().map(RunId))
+                .is_some_and(|run_id| included.contains(&run_id))
+            {
+                picked.push(id);
+            }
+        }
+        Ok(picked)
+    };
+    let mut scopes = Vec::new();
+    for id in pick("SELECT run_id, scope_id FROM p_checkpoint_scopes WHERE thread_id = ?1")? {
+        if let Some(scope) = load_one::<CheckpointScope>(
+            connection,
+            "SELECT payload_json FROM p_checkpoint_scopes WHERE scope_id = ?1",
+            &id,
+            "p_checkpoint_scopes",
+        )? {
+            scopes.push(scope);
+        }
+    }
+    let mut checkpoints = Vec::new();
+    for id in pick("SELECT run_id, checkpoint_id FROM p_checkpoints WHERE thread_id = ?1")? {
+        if let Some(checkpoint) = load_one::<Checkpoint>(
+            connection,
+            "SELECT payload_json FROM p_checkpoints WHERE checkpoint_id = ?1",
+            &id,
+            "p_checkpoints",
+        )? {
+            checkpoints.push(checkpoint);
+        }
+    }
+    scopes.sort_by_key(|scope| scope.id);
+    checkpoints.sort_by_key(|checkpoint| checkpoint.id);
+    Ok((scopes, checkpoints))
+}
+
 /// The control rows of `runs` that a client needs to render them.
 fn run_controls(
     connection: &Connection,
@@ -273,45 +325,9 @@ fn run_controls(
             turns.push(turn);
         }
     }
-    // Scope and checkpoint rows are one per run: pick by run id first, then
-    // decode only the included ones.
-    let pick = |sql: &str| -> StoreResult<Vec<String>> {
-        let mut statement = connection.prepare_cached(sql)?;
-        let rows = statement.query_map([thread_id], |row| {
-            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut picked = Vec::new();
-        for row in rows {
-            let (run_id, id) = row?;
-            if run_id
-                .and_then(|run_id| run_id.parse().ok().map(RunId))
-                .is_some_and(|run_id| included.contains(&run_id))
-            {
-                picked.push(id);
-            }
-        }
-        Ok(picked)
-    };
-    for id in pick("SELECT run_id, scope_id FROM p_checkpoint_scopes WHERE thread_id = ?1")? {
-        if let Some(scope) = load_one::<CheckpointScope>(
-            connection,
-            "SELECT payload_json FROM p_checkpoint_scopes WHERE scope_id = ?1",
-            &id,
-            "p_checkpoint_scopes",
-        )? {
-            projection.checkpoint_scopes.push(scope);
-        }
-    }
-    for id in pick("SELECT run_id, checkpoint_id FROM p_checkpoints WHERE thread_id = ?1")? {
-        if let Some(checkpoint) = load_one::<Checkpoint>(
-            connection,
-            "SELECT payload_json FROM p_checkpoints WHERE checkpoint_id = ?1",
-            &id,
-            "p_checkpoints",
-        )? {
-            projection.checkpoints.push(checkpoint);
-        }
-    }
+    let (scopes, checkpoints) = run_checkpoints(connection, thread_id, &included)?;
+    projection.checkpoint_scopes.extend(scopes);
+    projection.checkpoints.extend(checkpoints);
     let subagents: Vec<Subagent> = {
         let mut statement = connection
             .prepare_cached("SELECT run_id, payload_json FROM p_subagents WHERE thread_id = ?1")?;
@@ -551,9 +567,18 @@ pub fn history_page(
         .flatten();
     let run_ids: BTreeSet<RunId> = window.items.iter().filter_map(|item| item.run_id).collect();
     let runs = load_runs(connection, &run_ids)?;
+    let included = runs.iter().map(|run| run.id).collect::<HashSet<_>>();
+    let (checkpoint_scopes, checkpoints) =
+        run_checkpoints(connection, &thread_id.to_string(), &included)?;
     let mut items = window.items;
     items.reverse();
-    Ok(HistoryPage { items, runs, next })
+    Ok(HistoryPage {
+        items,
+        runs,
+        checkpoint_scopes,
+        checkpoints,
+        next,
+    })
 }
 
 /// One turn item as stored: no wire projection.

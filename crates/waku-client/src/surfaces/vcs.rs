@@ -8,12 +8,13 @@ use uuid::Uuid;
 use super::DaemonV8;
 use super::files::path_root;
 use crate::v8::{
-    BranchSnapshot, CommitResult, CommitSnapshot, GitStatus, ReviewDiffParams, ReviewDiffSource,
-    RootOpParams, RootParams, TextPayload, VcsCommitParams, VcsGenerateCommitMessageParams,
-    VcsStageParams, VcsSwitchRefParams, method,
+    BranchSnapshot, CommitResult, CommitSnapshot, GitStatus, ReviewDiff, ReviewDiffParams,
+    ReviewDiffSource, RootOpParams, RootParams, TextPayload, VcsCommitParams,
+    VcsGenerateCommitMessageParams, VcsStageParams, VcsSwitchRefParams, method,
 };
 use waku_protocol::model::ProviderKind;
-use waku_protocol::orchestration::ModelSelection;
+use waku_protocol::orchestration::{ModelSelection, RunId, ThreadId};
+use waku_protocol::v8::orchestration::{FullDiffParams, TurnDiffParams};
 
 /// The branch a snapshot shows: the current one, else the detached head.
 pub fn display_branch(snapshot: &BranchSnapshot) -> Option<&str> {
@@ -165,6 +166,41 @@ pub fn review_diff(
         source,
         ignore_whitespace,
     })?;
+    collected(daemon, diff)
+}
+
+/// `threads.turnDiff`: what run `run_id` of `thread_id` changed, from its
+/// turn-start checkpoint to the checkpoint it ended with.
+pub fn turn_diff(
+    daemon: &DaemonV8,
+    thread_id: Uuid,
+    run_id: Uuid,
+    ignore_whitespace: bool,
+) -> anyhow::Result<CollectedDiff> {
+    let diff = daemon.call::<method::ThreadsTurnDiff>(TurnDiffParams {
+        thread_id: ThreadId(thread_id),
+        run_id: RunId(run_id),
+        ignore_whitespace,
+    })?;
+    collected(daemon, diff)
+}
+
+/// `threads.fullDiff`: what the thread's live runs changed together.
+pub fn full_diff(
+    daemon: &DaemonV8,
+    thread_id: Uuid,
+    ignore_whitespace: bool,
+) -> anyhow::Result<CollectedDiff> {
+    let diff = daemon.call::<method::ThreadsFullDiff>(FullDiffParams {
+        thread_id: ThreadId(thread_id),
+        ignore_whitespace,
+    })?;
+    collected(daemon, diff)
+}
+
+/// A diff's parts, with a patch too large to come inline downloaded from
+/// the blob store.
+fn collected(daemon: &DaemonV8, diff: ReviewDiff) -> anyhow::Result<CollectedDiff> {
     let patch = match diff.patch {
         TextPayload::Inline { value } => value,
         TextPayload::Blob { reference, .. } => {
