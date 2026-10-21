@@ -3909,6 +3909,51 @@
       ],
       "type": "object"
     },
+    "FindHit": {
+      "description": "One match inside a thread.",
+      "properties": {
+        "entityId": {
+          "type": "string"
+        },
+        "position": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/SearchSource"
+        }
+      },
+      "required": [
+        "source",
+        "entityId",
+        "position"
+      ],
+      "type": "object"
+    },
+    "FindSnippet": {
+      "description": "A match of the navigation window, with its snippet.",
+      "properties": {
+        "hit": {
+          "$ref": "#/$defs/FindHit"
+        },
+        "index": {
+          "description": "Index into [`ThreadFindResult::matches`].",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snippet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "index",
+        "hit",
+        "snippet"
+      ],
+      "type": "object"
+    },
     "ForkOrigin": {
       "oneOf": [
         {
@@ -4307,6 +4352,26 @@
       ],
       "type": "string",
       "x-waku-open": true
+    },
+    "ItemsAround": {
+      "description": "How many turn items `threads.find` loads before and after the current\nmatch, each at most [`MAX_FIND_ITEMS_AROUND`].",
+      "properties": {
+        "after": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "before": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "before",
+        "after"
+      ],
+      "type": "object"
     },
     "JsonText": {
       "description": "Opaque JSON text, never parsed by the protocol layer (RFC 0003 §5.1).\nReplaces `serde_json::Value` wherever provider-native JSON is carried.",
@@ -5082,33 +5147,6 @@
         "orderKey",
         "createdAt",
         "updatedAt"
-      ],
-      "type": "object"
-    },
-    "ProjectInfo": {
-      "description": "A project of the catalog.\n\nTODO(#54): replaced by the orchestration `Project` entity.",
-      "properties": {
-        "createdAt": {
-          "description": "Milliseconds since the Unix epoch.",
-          "format": "int64",
-          "type": "integer"
-        },
-        "id": {
-          "format": "uuid",
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "path": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "name",
-        "path",
-        "createdAt"
       ],
       "type": "object"
     },
@@ -6480,6 +6518,15 @@
       "type": "string",
       "x-waku-open": true
     },
+    "SearchSource": {
+      "enum": [
+        "title",
+        "message",
+        "plan"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
     "SecretStatus": {
       "enum": [
         "pending",
@@ -7576,6 +7623,91 @@
       "type": "string",
       "x-waku-open": true
     },
+    "ThreadFindParams": {
+      "description": "`threads.find` params: every match of `query` inside one thread, loaded\nby any client or not.",
+      "properties": {
+        "anchor": {
+          "description": "The position the reader is at: the current match is the first at or\nafter it. Absent: the latest match.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "itemsAround": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemsAround"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Also load the turn items around the current match, so a client can\njump to history it has not paged in."
+        },
+        "query": {
+          "type": "string"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "window": {
+          "description": "Snippets around the current match, at most [`MAX_FIND_WINDOW`]; 17\nwhen absent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "threadId",
+        "query"
+      ],
+      "type": "object"
+    },
+    "ThreadFindResult": {
+      "description": "`threads.find` result.",
+      "properties": {
+        "current": {
+          "description": "The current match, as an index into `matches`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "items": {
+          "description": "With `itemsAround`: the turn items around the current match,\nwire-projected, ascending by `position`.",
+          "items": {
+            "$ref": "#/$defs/TurnItem"
+          },
+          "type": "array"
+        },
+        "matches": {
+          "description": "Every match in transcript order (at most 5,000).",
+          "items": {
+            "$ref": "#/$defs/FindHit"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "More matches exist than `matches` holds.",
+          "type": "boolean"
+        },
+        "window": {
+          "items": {
+            "$ref": "#/$defs/FindSnippet"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ThreadGoal": {
       "description": "A provider-persisted objective (Codex and Claude `/goal`).",
       "properties": {
@@ -7880,6 +8012,87 @@
         "activity",
         "pendingRequestCount",
         "queuedRunCount"
+      ],
+      "type": "object"
+    },
+    "ThreadSearchHit": {
+      "description": "One thread found by `threads.search`: its best match (the title, else\nthe latest matching message, else the latest matching plan). Results are\nordered by that source, then by recency.",
+      "properties": {
+        "activityAt": {
+          "description": "The thread's last reply, else its last update (epoch milliseconds).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "entityId": {
+          "description": "The message, plan or thread id that matched.",
+          "type": "string"
+        },
+        "position": {
+          "description": "The matching turn item's position; absent for a title match.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "projectId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "snippet": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SearchSource"
+        },
+        "threadId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "projectId",
+        "title",
+        "source",
+        "entityId",
+        "snippet",
+        "activityAt"
+      ],
+      "type": "object"
+    },
+    "ThreadSearchParams": {
+      "description": "`threads.search` params: threads across projects whose title, messages\nor plans hold every word of `query` (as prefixes).",
+      "properties": {
+        "includeArchived": {
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "At most [`MAX_SEARCH_RESULTS`]; 50 when absent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "projectId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
       ],
       "type": "object"
     },
@@ -9834,7 +10047,7 @@
       },
       "result": {
         "items": {
-          "$ref": "#/$defs/ProjectInfo"
+          "$ref": "#/$defs/Project"
         },
         "type": "array"
       },
@@ -9903,6 +10116,31 @@
       },
       "result": {
         "$ref": "#/$defs/ArchivedPage"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "threads.search",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ThreadSearchParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/ThreadSearchHit"
+        },
+        "type": "array"
+      },
+      "scope": "read"
+    },
+    {
+      "name": "threads.find",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ThreadFindParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ThreadFindResult"
       },
       "scope": "read"
     }

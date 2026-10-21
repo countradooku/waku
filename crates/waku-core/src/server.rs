@@ -105,6 +105,13 @@ pub struct ServerOptions {
     /// shutdown control message. Service-managed daemons keep running when an
     /// authenticated client disconnects.
     pub allow_shutdown: bool,
+    /// The event store behind protocol v8's orchestration methods and
+    /// streams. The daemon always serves one ([`crate::daemon_host`]); a
+    /// server without it answers them `unsupported`.
+    pub orchestration: Option<Arc<crate::Orchestration>>,
+    /// This daemon's persistent environment id (RFC 0003 `EnvironmentInfo`);
+    /// a per-process id when absent.
+    pub environment_id: Option<Uuid>,
 }
 
 /// Stops [`serve`]. Triggering it wakes the accept loop and every connection
@@ -1062,11 +1069,6 @@ pub fn serve_listeners(
         .build()
         .context("could not start the Waku daemon runtime")?;
     let hub = Arc::new(Hub::default());
-    // Orchestration over v8 only when asked for (#54); #55 makes it the
-    // source of truth.
-    let orchestration = crate::v8::orchestration::Orchestration::from_env(|| {
-        crate::persistence::StateStore::default_path().with_file_name("state.sqlite")
-    });
     let v8 = Arc::new(
         crate::v8::V8Context::new(
             token.clone(),
@@ -1077,7 +1079,8 @@ pub fn serve_listeners(
             hub.v8_settings.clone(),
             shutdown.clone(),
         )
-        .with_orchestration(orchestration),
+        .with_environment_id(options.environment_id)
+        .with_orchestration(options.orchestration.clone()),
     );
     let dispatcher = Arc::new(RequestDispatcher::new(
         backend.clone(),

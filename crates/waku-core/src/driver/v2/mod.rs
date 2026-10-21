@@ -248,6 +248,44 @@ pub trait OutputSink: Send + Sync {
         chunk: &[u8],
         replace: bool,
     );
+
+    /// The command finished: what its turn item stores as `output` (the
+    /// retained head and tail, RFC 0001 R12), or `None` when the sink kept
+    /// nothing for it.
+    fn finish(
+        &self,
+        _item: orch::TurnItemId,
+        _exit_code: Option<i32>,
+    ) -> Option<waku_orchestrator::streams::StoredOutput> {
+        None
+    }
+}
+
+/// The daemon's output hub: chunks reach `commandOutput` subscribers live,
+/// and a finished command's retained output is stored in its item.
+impl OutputSink for waku_orchestrator::streams::CommandOutputHub {
+    fn command_output(
+        &self,
+        thread_id: ThreadId,
+        item: orch::TurnItemId,
+        chunk: &[u8],
+        replace: bool,
+    ) {
+        let text = String::from_utf8_lossy(chunk);
+        if replace {
+            self.replace(thread_id, item, &text);
+        } else {
+            self.append(thread_id, item, &text);
+        }
+    }
+
+    fn finish(
+        &self,
+        item: orch::TurnItemId,
+        exit_code: Option<i32>,
+    ) -> Option<waku_orchestrator::streams::StoredOutput> {
+        waku_orchestrator::streams::CommandOutputHub::finish(self, item, exit_code)
+    }
 }
 
 /// Drops all output.

@@ -690,6 +690,11 @@ export function normalizeSubscribe(value: any): T.Subscribe {
   return value;
 }
 
+export function normalizeThreadFindResult(value: any): T.ThreadFindResult {
+  if (value["items"] != null) value["items"] = value["items"].map((item: any) => normalizeTurnItem(item));
+  return value;
+}
+
 export function normalizeThreadItem(value: any): T.ThreadItem {
   switch (value?.type) {
     case "snapshot": {
@@ -899,6 +904,8 @@ export const resultNormalizers: { readonly [M in MethodName]: (value: any) => Me
   "threads.historyPage": (value: any) => normalizeHistoryPage(value),
   "threads.turnItem": (value: any) => normalizeTurnItem(value),
   "threads.archived": (value: any) => normalizeArchivedPage(value),
+  "threads.search": (value: any) => value,
+  "threads.find": (value: any) => normalizeThreadFindResult(value),
 };
 
 /** Normalizes one item by the stream of its subscription. */

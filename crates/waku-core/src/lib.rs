@@ -40,6 +40,7 @@ pub mod composer_complete;
 pub mod computer_use;
 pub mod cursor_session;
 pub mod daemon;
+pub mod daemon_host;
 pub mod deepseek_pool;
 pub mod deepseek_session;
 pub mod driver;
@@ -89,5 +90,5 @@ pub use server::{
     Backend, EventSink, Listeners, ServerOptions, ShutdownSignal, serve, serve_listeners,
 };
 pub use settings::{DaemonSettings, DaemonSettingsStore};
-pub use v8::orchestration::{ORCHESTRATOR_ENV, Orchestration};
+pub use v8::orchestration::Orchestration;
 pub use workspace::{WorkspaceOperation, WorkspaceResult};

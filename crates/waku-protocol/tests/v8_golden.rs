@@ -61,6 +61,18 @@ fn routes() -> Routes {
     }
 }
 
+fn project() -> Project {
+    serde_json::from_value(serde_json::json!({
+        "id": PROJECT,
+        "name": "waku",
+        "path": "/Users/dev/waku",
+        "orderKey": "a0",
+        "createdAt": 1_760_000_000_000_i64,
+        "updatedAt": 1_760_000_000_000_i64,
+    }))
+    .unwrap()
+}
+
 fn settings() -> Settings {
     Settings {
         computer_use_enabled: true,
@@ -164,15 +176,7 @@ fn orchestration_samples() -> Vec<(&'static str, Sample)> {
         pending_request_count: 0,
         queued_run_count: 1,
     };
-    let project: Project = serde_json::from_value(serde_json::json!({
-        "id": PROJECT,
-        "name": "waku",
-        "path": "/Users/dev/waku",
-        "orderKey": "a0",
-        "createdAt": 1_760_000_000_000_i64,
-        "updatedAt": 1_760_000_000_000_i64,
-    }))
-    .unwrap();
+    let project = project();
     let mut projection = ThreadProjection::new(thread());
     projection.runs = vec![run()];
     projection.turn_items = vec![command_item(), answer_item()];
@@ -482,12 +486,7 @@ fn base_samples() -> Vec<(&'static str, Sample)> {
             "server_reply_projects_list",
             Server(ServerMessage::Reply(Reply::ok(
                 2,
-                MethodResult::ProjectsList(vec![ProjectInfo {
-                    id: PROJECT,
-                    name: "waku".into(),
-                    path: "/Users/dev/waku".into(),
-                    created_at: 1_760_000_000_000,
-                }]),
+                MethodResult::ProjectsList(vec![project()]),
             ))),
         ),
         (

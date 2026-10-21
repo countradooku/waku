@@ -1352,6 +1352,8 @@ The sketches above are kept as written; where the code differs, this list is the
 - **Degradation as implemented.** A fork without `threads.fork` (or without `fork_from_turn` for a mid-thread fork) queues a portable transcript for the target thread's first turn (`ContextKind::SyntheticUser`, newest text kept within `handoff_budget`). A rollback without `threads.rollback` closes the session, marks the provider thread `Closed` (so the next run opens a fresh one) and queues a checkpoint-summary handoff of the runs up to the target. Both handoffs are held in memory by the manager until the next turn; Phase 3 persists them as `ContextHandoff` rows.
 - A steer the provider rejects (the turn settled first) is logged; promoting the message to a queued run is Phase 3 queue editing.
 
+- **Registry and live channels (#55).** `DriverRegistry` clones share one table, so the daemon can replace every instance when its settings change while the manager and `decide` read the same set; `get` returns the entry by value. `ManagerDeps` gains `deltas: Option<Arc<DeltaBus>>`, and `OutputSink` gains `finish(item, exit_code) -> Option<StoredOutput>` (the daemon's sink is the output hub), so the manager publishes live text deltas with `stream_rev` and stores capped command output (RFC 0001 amendment "The daemon as host").
+
 ### `V1Bridge` (#44)
 
 - `V1Bridge::start(driver, instance, DriverStartOptions, DriverEventSender, transports, runtime)` opens the session (resuming `provider_cursor` when given) and serves `DriverControl`. Commands go to one actor task in order; `apply_options`, `rollback` and `fork` wait for its reply. It inverts the table above; subagent and background-work events are not mapped back yet (no port needs them on the bridge before #71).

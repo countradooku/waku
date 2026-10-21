@@ -44,9 +44,14 @@ fn trim_resident_transcripts(state: &mut PersistedState, pinned: &HashSet<Uuid>)
     state.trim_idle_transcripts(pinned, RESIDENT_TRANSCRIPT_WINDOW);
 }
 
+/// Called with the new settings after a client changed them.
+pub type SettingsListener = Box<dyn Fn(&crate::DaemonSettings) + Send + Sync>;
+
 pub struct WakuBackend {
     sessions: Mutex<HashMap<Uuid, (Uuid, DriverHandle)>>,
-    terminals: Mutex<HashMap<Uuid, (Uuid, Arc<crate::terminal::DaemonTerminal>)>>,
+    /// Shared with the orchestrator's cleanup port, which closes a thread's
+    /// terminals when it is archived, deleted or settled.
+    terminals: Arc<crate::orchestrator_ports::TerminalMap>,
     #[cfg(all(test, unix))]
     terminal_shell: Option<alacritty_terminal::tty::Shell>,
     settings: DaemonSettingsStore,
@@ -60,6 +65,7 @@ pub struct WakuBackend {
     usage_rates_dir: std::path::PathBuf,
     default_cwd: std::path::PathBuf,
     worktree_cleanup: Arc<WorktreeCleanup>,
+    settings_listener: Mutex<Option<SettingsListener>>,
 }
 
 impl WakuBackend {
@@ -86,7 +92,7 @@ impl WakuBackend {
         ));
         Ok(Self {
             sessions: Mutex::new(HashMap::new()),
-            terminals: Mutex::new(HashMap::new()),
+            terminals: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(all(test, unix))]
             terminal_shell: None,
             settings,
@@ -100,7 +106,34 @@ impl WakuBackend {
             usage_rates_dir,
             default_cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             worktree_cleanup,
+            settings_listener: Mutex::new(None),
         })
+    }
+
+    /// The directory the daemon keeps its data in: the task store's, which
+    /// also holds `state.sqlite`, `attachments/` and the settings.
+    pub fn data_dir(&self) -> PathBuf {
+        self.task_store
+            .path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_owned()
+    }
+
+    /// The daemon settings as they are now.
+    pub fn daemon_settings(&self) -> crate::DaemonSettings {
+        self.settings.get()
+    }
+
+    /// The open terminals, for the orchestrator's cleanup port.
+    pub fn terminal_map(&self) -> Arc<crate::orchestrator_ports::TerminalMap> {
+        self.terminals.clone()
+    }
+
+    /// Runs `listener` after every settings change (the orchestrator host
+    /// re-registers provider instances). Replaces an earlier listener.
+    pub fn on_settings_changed(&self, listener: SettingsListener) {
+        *self.settings_listener.lock() = Some(listener);
     }
 
     #[cfg(all(test, unix))]
@@ -277,6 +310,9 @@ impl Backend for WakuBackend {
                 self.settings.replace(settings)?;
                 if storage_changed {
                     self.worktree_cleanup.wake_scheduler();
+                }
+                if let Some(listener) = &*self.settings_listener.lock() {
+                    listener(&self.settings.get());
                 }
                 Ok(ResponsePayload::Ack)
             }
@@ -2083,7 +2119,8 @@ fn handle_driver_command(
     Ok(ResponsePayload::Ack)
 }
 
-fn ensure_shell_environment() {
+/// Loads the login shell's environment once (provider CLIs run with it).
+pub(crate) fn ensure_shell_environment() {
     static REFRESHED: OnceLock<()> = OnceLock::new();
     REFRESHED.get_or_init(|| {
         crate::command_env::refresh_from_default_shell();

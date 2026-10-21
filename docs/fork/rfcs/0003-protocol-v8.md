@@ -453,7 +453,11 @@ Entity types for threads, runs, nodes, turn items and the rest are defined by RF
 > - `threads.turnItem` returns the stored `TurnItem` without `Payload`: storage already caps the large bodies (command output 256 KiB, R12), so an item fits a message; a larger one is answered `payloadTooLarge` by the connection. Images inside dynamic-tool output are moved to the blob store first and appear as `waku-blob:` references, never data URLs.
 > - `threads.archived` takes `{cursor?, limit?, projectId?}` (archived most recently first, `limit` ≤ 200 and 200 by default).
 > - `threads.snapshot` takes `compactTurnItems` like the `thread` stream.
-> - Until #55 makes the orchestrator the daemon's source of truth, the daemon serves these methods and streams only when `WAKU_V8_ORCHESTRATOR` is set (`1` for `state.sqlite` next to the task store, or a path); otherwise they answer (or end with) `unsupported`, and the legacy protocol is unchanged either way.
+> - Since #55 the orchestrator is the daemon's source of truth and the daemon always serves these methods and streams (the `WAKU_V8_ORCHESTRATOR` gate is gone). A server composed without one (the bench daemon, legacy-protocol tests) answers them, and ends the streams, with `unsupported`.
+
+> **Changed in #55.**
+> - `threads.search` takes `{query, projectId?, includeArchived?, limit?}` (`limit` ≤ 200, 50 by default) and returns `Vec<ThreadSearchHit{threadId, projectId, title, source, entityId, position?, snippet, activityAt}>`: one hit per thread, its best match (`source` is `title`, else the latest matching `message`, else the latest matching `plan`; RFC 0001 amendment "Search"), ordered by source and then recency. `entityId` is the matching message, plan or thread id, `position` the matching turn item's (absent for a title).
+> - `threads.find` takes `{threadId, query, anchor?, window?, itemsAround?: {before, after}}` and returns `ThreadFindResult{matches: Vec<FindHit{source, entityId, position}>, truncated, current?, window: Vec<FindSnippet{index, hit, snippet}>, items}`: every match in transcript order (at most 5,000), the current one (the first at or after `anchor`, else the latest), snippets for up to `window` (≤ 50, 17 by default) matches around it, and with `itemsAround` (each side ≤ 50) the wire-projected turn items around the current match, so a client jumps to history it never paged in. It replaces the sketch's `limit` and `ThreadFindHit` list.
 
 **Projects**
 

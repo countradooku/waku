@@ -5,12 +5,10 @@ use std::path::{Component, Path, PathBuf};
 use sha2::{Digest as _, Sha256};
 use waku_protocol::v8::{
     Error, ErrorCode, ErrorDetails, FileContent, FilesReadParams, MAX_INLINE_TEXT_BYTES, Method,
-    MethodResult, ProjectInfo, RootRef, SettingsSnapshot,
+    MethodResult, RootRef, SettingsSnapshot,
 };
 
 use super::V8Context;
-use crate::model::Project;
-use crate::protocol::{Command, ResponsePayload};
 
 /// Bytes inspected to tell text from binary.
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
@@ -27,15 +25,17 @@ pub(crate) fn handle(context: &V8Context, method: Method) -> Result<MethodResult
                 settings: state.settings.clone(),
             }))
         }
-        Method::ProjectsList(_) => Ok(MethodResult::ProjectsList(
-            projects(context)?.iter().map(project_info).collect(),
-        )),
+        Method::ProjectsList(_) => {
+            super::orchestration::projects(context).map(MethodResult::ProjectsList)
+        }
         Method::FilesRead(params) => files_read(context, params).map(MethodResult::FilesRead),
         method @ (Method::OrchestrationDispatch(_)
         | Method::ThreadsSnapshot(_)
         | Method::ThreadsHistoryPage(_)
         | Method::ThreadsTurnItem(_)
-        | Method::ThreadsArchived(_)) => {
+        | Method::ThreadsArchived(_)
+        | Method::ThreadsSearch(_)
+        | Method::ThreadsFind(_)) => {
             super::orchestration::handle(context, method).expect("an orchestration method")
         }
         Method::Unknown { name } => Err(Error::new(
@@ -47,33 +47,6 @@ pub(crate) fn handle(context: &V8Context, method: Method) -> Result<MethodResult
 
 fn internal(error: anyhow::Error) -> Error {
     Error::new(ErrorCode::Internal, format!("{error:#}"))
-}
-
-/// TODO(#54): the orchestrator's project entities; until then the legacy
-/// task state.
-fn projects(context: &V8Context) -> Result<Vec<Project>, Error> {
-    match context
-        .backend
-        .call(Command::LoadTaskState)
-        .map_err(internal)?
-    {
-        ResponsePayload::TaskState { projects, .. } => Ok(projects),
-        _ => Err(Error::new(
-            ErrorCode::Internal,
-            "unexpected task state response",
-        )),
-    }
-}
-
-fn project_info(project: &Project) -> ProjectInfo {
-    ProjectInfo {
-        id: project.id,
-        name: project.name.clone(),
-        path: project.path.to_string_lossy().into_owned(),
-        created_at: i64::try_from(project.created_at)
-            .unwrap_or(i64::MAX / 1000)
-            .saturating_mul(1000),
-    }
 }
 
 fn root_path(context: &V8Context, root: &RootRef) -> Result<PathBuf, Error> {
@@ -92,9 +65,9 @@ fn root_path(context: &V8Context, root: &RootRef) -> Result<PathBuf, Error> {
             }
             Ok(path)
         }
-        RootRef::Project { project_id } => projects(context)?
+        RootRef::Project { project_id } => super::orchestration::projects(context)?
             .into_iter()
-            .find(|project| project.id == *project_id)
+            .find(|project| project.id.0 == *project_id)
             .map(|project| project.path)
             .ok_or_else(|| {
                 Error::new(ErrorCode::NotFound, "no such project").with_details(

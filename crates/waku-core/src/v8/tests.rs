@@ -22,7 +22,6 @@ use waku_protocol::v8::{
 };
 
 use super::{BackendHandle, SettingsBus, V8Context, settings_revision, wire_settings};
-use crate::model::Project;
 use crate::protocol::{Command, Request, ResponsePayload};
 use crate::server::{
     Backend, EventSink, Listeners, ServerOptions, ShutdownSignal, serve_listeners,
@@ -34,7 +33,6 @@ const BLOB: &str = "waku-blob:abc.txt";
 
 struct TestBackend {
     settings: Mutex<DaemonSettings>,
-    project_root: PathBuf,
     blob: Vec<u8>,
 }
 
@@ -48,17 +46,6 @@ impl Backend for TestBackend {
                 *self.settings.lock() = settings;
                 Ok(ResponsePayload::Ack)
             }
-            Command::LoadTaskState => Ok(ResponsePayload::TaskState {
-                projects: vec![Project {
-                    id: project_id(),
-                    name: "demo".into(),
-                    path: self.project_root.clone(),
-                    created_at: 1_700_000_000,
-                }],
-                sessions: Vec::new(),
-                default_cwd: PathBuf::from("/"),
-                projectless_root: None,
-            }),
             Command::ReadBlob { reference } if reference == BLOB => Ok(ResponsePayload::BlobData {
                 bytes: self.blob.clone(),
             }),
@@ -76,12 +63,43 @@ fn blob_bytes() -> Vec<u8> {
     (0..600_000u32).map(|index| (index % 251) as u8).collect()
 }
 
-fn backend(root: &Path) -> Arc<TestBackend> {
+fn backend() -> Arc<TestBackend> {
     Arc::new(TestBackend {
         settings: Mutex::new(DaemonSettings::default()),
-        project_root: root.join("project"),
         blob: blob_bytes(),
     })
+}
+
+/// An orchestrator in `root` holding one project, `demo`, at
+/// `root/project`.
+fn orchestration(root: &Path) -> Arc<crate::Orchestration> {
+    use waku_protocol::orchestration::{
+        Actor, Command as OrchestrationCommand, CommandEnvelope, CommandId, CreationSource,
+        ProjectId,
+    };
+    let orchestrator = waku_orchestrator::Orchestrator::open(
+        waku_orchestrator::OrchestratorConfig::new(root.join("state.sqlite")),
+        waku_orchestrator::Dependencies {
+            clock: Arc::new(waku_orchestrator::ManualClock::new(1_700_000_000_000)),
+            ids: Box::new(waku_orchestrator::SequentialIds::default()),
+            capabilities: Arc::new(waku_orchestrator::NoCapabilities),
+        },
+    )
+    .unwrap();
+    orchestrator
+        .dispatch(CommandEnvelope {
+            command_id: CommandId::new("project-demo").unwrap(),
+            issued_by: Actor::User,
+            source: CreationSource::Desktop,
+            command: OrchestrationCommand::ProjectCreate {
+                project_id: ProjectId(project_id()),
+                name: "demo".into(),
+                path: root.join("project"),
+                order_key: None,
+            },
+        })
+        .unwrap();
+    crate::Orchestration::new(orchestrator, Default::default())
 }
 
 /// A daemon on a fresh local socket and a loopback TCP port.
@@ -107,7 +125,8 @@ impl Daemon {
         let address = tcp.local_addr().unwrap();
         let shutdown = ShutdownSignal::new();
         let server_shutdown = shutdown.clone();
-        let backend = backend(&root);
+        let backend = backend();
+        let orchestration = orchestration(&root);
         let server = std::thread::spawn(move || {
             serve_listeners(
                 Listeners {
@@ -117,9 +136,13 @@ impl Daemon {
                 TOKEN.into(),
                 backend,
                 server_shutdown,
-                ServerOptions::default(),
+                ServerOptions {
+                    orchestration: Some(orchestration.clone()),
+                    ..ServerOptions::default()
+                },
             )
             .unwrap();
+            orchestration.shutdown();
         });
         Self {
             root,
@@ -191,7 +214,8 @@ fn v8_methods_run_on_the_local_socket_beside_the_legacy_protocol() {
 
     let projects = client.call::<method::ProjectsList>(NoParams {}).unwrap();
     assert_eq!(projects.len(), 1);
-    assert_eq!(projects[0].id, project_id());
+    assert_eq!(projects[0].id.0, project_id());
+    assert_eq!(projects[0].name, "demo");
     assert_eq!(projects[0].created_at, 1_700_000_000_000);
 
     let project = RootRef::Project {
@@ -568,10 +592,9 @@ fn handshakes_are_refused_with_a_reason() {
 }
 
 fn test_context(limits: waku_protocol::v8::Limits, hello_deadline: Duration) -> Arc<V8Context> {
-    let root = std::env::temp_dir();
     let mut context = V8Context::new(
         TOKEN.into(),
-        BackendHandle::new(backend(&root), crate::server::test_event_sink()),
+        BackendHandle::new(backend(), crate::server::test_event_sink()),
         SettingsBus::default(),
         ShutdownSignal::new(),
     );
