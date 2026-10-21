@@ -2,10 +2,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use sha2::{Digest as _, Sha256};
 use waku_protocol::v8::{
-    Error, ErrorCode, ErrorDetails, FileContent, FilesReadParams, MAX_INLINE_TEXT_BYTES, Method,
-    MethodResult, ProjectInfo, RootRef, SettingsSnapshot,
+    Error, ErrorCode, ErrorDetails, FileContent, FilesReadParams, MAX_BLOB_BYTES,
+    MAX_INLINE_TEXT_BYTES, Method, MethodResult, ProjectInfo, RootRef, SettingsSnapshot,
 };
 
 use super::V8Context;
@@ -15,7 +14,12 @@ use crate::protocol::{Command, ResponsePayload};
 /// Bytes inspected to tell text from binary.
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
-pub(crate) fn handle(context: &V8Context, method: Method) -> Result<MethodResult, Error> {
+/// `local` is whether the call came over the local socket.
+pub(crate) fn handle(
+    context: &V8Context,
+    local: bool,
+    method: Method,
+) -> Result<MethodResult, Error> {
     match method {
         Method::SettingsGet(_) => {
             let state = context
@@ -42,6 +46,7 @@ pub(crate) fn handle(context: &V8Context, method: Method) -> Result<MethodResult
             ErrorCode::UnknownMethod,
             format!("unknown method {name}"),
         )),
+        method => super::catalog::handle(context, local, method),
     }
 }
 
@@ -51,7 +56,7 @@ fn internal(error: anyhow::Error) -> Error {
 
 /// TODO(#54): the orchestrator's project entities; until then the legacy
 /// task state.
-fn projects(context: &V8Context) -> Result<Vec<Project>, Error> {
+pub(crate) fn projects(context: &V8Context) -> Result<Vec<Project>, Error> {
     match context
         .backend
         .call(Command::LoadTaskState)
@@ -76,7 +81,14 @@ fn project_info(project: &Project) -> ProjectInfo {
     }
 }
 
-fn root_path(context: &V8Context, root: &RootRef) -> Result<PathBuf, Error> {
+pub(crate) fn project_not_found(project_id: uuid::Uuid) -> Error {
+    Error::new(ErrorCode::NotFound, "no such project").with_details(ErrorDetails::NotFound {
+        resource: "project".into(),
+        id: project_id.to_string(),
+    })
+}
+
+pub(crate) fn root_path(context: &V8Context, root: &RootRef) -> Result<PathBuf, Error> {
     match root {
         RootRef::Path { path } => {
             let path = PathBuf::from(path);
@@ -96,14 +108,7 @@ fn root_path(context: &V8Context, root: &RootRef) -> Result<PathBuf, Error> {
             .into_iter()
             .find(|project| project.id == *project_id)
             .map(|project| project.path)
-            .ok_or_else(|| {
-                Error::new(ErrorCode::NotFound, "no such project").with_details(
-                    ErrorDetails::NotFound {
-                        resource: "project".into(),
-                        id: project_id.to_string(),
-                    },
-                )
-            }),
+            .ok_or_else(|| project_not_found(*project_id)),
         RootRef::Thread { thread_id } => super::orchestration::thread_root(
             context,
             waku_protocol::orchestration::ThreadId(*thread_id),
@@ -113,7 +118,7 @@ fn root_path(context: &V8Context, root: &RootRef) -> Result<PathBuf, Error> {
 }
 
 /// `root` joined with a relative, `/`-separated path that cannot leave it.
-fn resolve(root: &Path, relative: &str) -> Result<PathBuf, Error> {
+pub(crate) fn resolve(root: &Path, relative: &str) -> Result<PathBuf, Error> {
     let relative = Path::new(relative);
     let valid = !relative.as_os_str().is_empty()
         && relative
@@ -144,6 +149,14 @@ fn io_error(error: &std::io::Error, path: &str) -> Error {
     Error::new(ErrorCode::Io, format!("{path}: {error}"))
 }
 
+fn too_large(path: &str, size: u64, limit: u64) -> Error {
+    Error::new(
+        ErrorCode::PayloadTooLarge,
+        format!("{path} is {size} bytes"),
+    )
+    .with_details(ErrorDetails::Limit { limit })
+}
+
 fn files_read(context: &V8Context, params: FilesReadParams) -> Result<FileContent, Error> {
     let root = root_path(context, &params.root)?;
     let path = resolve(&root, &params.path)?;
@@ -155,21 +168,35 @@ fn files_read(context: &V8Context, params: FilesReadParams) -> Result<FileConten
         ));
     }
     let size = metadata.len();
-    let cap = params.max_bytes.map_or(MAX_INLINE_TEXT_BYTES, |max| {
-        u64::from(max).min(MAX_INLINE_TEXT_BYTES)
-    });
-    if size > cap {
-        // TODO(#53): larger files go through the blob store as `blob`.
-        return Err(Error::new(
-            ErrorCode::PayloadTooLarge,
-            format!("{} is {size} bytes", params.path),
-        )
-        .with_details(ErrorDetails::Limit { limit: cap }));
+    if let Some(max) = params.max_bytes
+        && size > u64::from(max)
+    {
+        return Err(too_large(&params.path, size, u64::from(max)));
+    }
+    if size > MAX_BLOB_BYTES {
+        return Err(too_large(&params.path, size, MAX_BLOB_BYTES));
     }
     let bytes = std::fs::read(&path).map_err(|error| io_error(&error, &params.path))?;
-    let revision = format!("sha256:{:x}", Sha256::digest(&bytes));
+    let revision = super::catalog::file_revision(&bytes);
     let size = bytes.len() as u64;
-    let binary = bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0);
+    let binary = bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0)
+        || std::str::from_utf8(&bytes).is_err();
+    if size > MAX_INLINE_TEXT_BYTES {
+        // Too large for a message: the client downloads it.
+        let mime = if binary {
+            "application/octet-stream"
+        } else {
+            "text/plain"
+        };
+        let reference = super::catalog::store_blob(context, mime, bytes)?.0;
+        return Ok(FileContent {
+            text: None,
+            blob: Some(reference),
+            binary,
+            size,
+            revision,
+        });
+    }
     let text = if binary {
         None
     } else {
