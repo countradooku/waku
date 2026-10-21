@@ -138,6 +138,9 @@ pub fn parse_allowed_origins(text: &str) -> anyhow::Result<Vec<String>> {
 pub struct DaemonProcess {
     client: DaemonClient,
     child: Child,
+    /// Where and how a protocol v8 connection reaches this daemon: the same
+    /// socket (the preface tells the protocols apart) and token.
+    endpoint: (String, String),
 }
 
 impl DaemonProcess {
@@ -239,7 +242,7 @@ impl DaemonProcess {
                 return Err(error);
             }
         };
-        let client = match DaemonClient::connect(&client_address, token) {
+        let client = match DaemonClient::connect(&client_address, token.clone()) {
             Ok(client) => client,
             Err(error) => {
                 let _ = child.kill();
@@ -247,7 +250,11 @@ impl DaemonProcess {
                 return Err(error);
             }
         };
-        Ok(Self { client, child })
+        Ok(Self {
+            client,
+            child,
+            endpoint: (client_address, token),
+        })
     }
 
     pub fn client(&self) -> DaemonClient {
@@ -505,6 +512,17 @@ impl DaemonSupervisor {
 
     pub fn client(&self) -> DaemonClient {
         self.inner.target.lock().client()
+    }
+
+    /// Open a protocol v8 connection to the current daemon (#55). Fails
+    /// while a managed daemon is restarting; callers retry with backoff.
+    pub fn connect_v8(&self) -> anyhow::Result<crate::V8Client> {
+        let (address, token) = match &*self.inner.target.lock() {
+            DaemonTarget::Local(process) => process.endpoint.clone(),
+            DaemonTarget::Remote { address, token, .. } => (address.clone(), token.clone()),
+            DaemonTarget::Restarting(_) => anyhow::bail!("the Waku daemon is restarting"),
+        };
+        crate::V8Client::connect(&address, token)
     }
 
     /// Subscribe to the active daemon connection. The current client is sent
