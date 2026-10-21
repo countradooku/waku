@@ -30,6 +30,9 @@ use crate::v8::{
 /// to [`MAX_RETRY`].
 const MIN_RETRY: Duration = Duration::from_millis(200);
 const MAX_RETRY: Duration = Duration::from_secs(2);
+/// Input typed while the link is between connections waits up to this
+/// much for the next attach; beyond it, keystrokes are dropped.
+const MAX_PENDING_INPUT: usize = 64 * 1024;
 
 /// What an emulator attached to a daemon terminal must do next.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,8 +160,9 @@ enum Control {
 }
 
 struct LinkShared {
-    /// The interactive subscription input goes out on, while attached.
-    input: Mutex<Option<Arc<Subscription>>>,
+    /// The interactive subscription input goes out on, while attached, and
+    /// the input typed while it was not.
+    input: Mutex<(Option<Arc<Subscription>>, Vec<u8>)>,
     size: Mutex<(u16, u16)>,
     closed: AtomicBool,
 }
@@ -182,7 +186,7 @@ impl TerminalLink {
         sink: impl TerminalSink,
     ) -> anyhow::Result<Self> {
         let shared = Arc::new(LinkShared {
-            input: Mutex::new(None),
+            input: Mutex::new((None, Vec::new())),
             size: Mutex::new((cols, rows)),
             closed: AtomicBool::new(false),
         });
@@ -195,7 +199,8 @@ impl TerminalLink {
         Ok(Self { shared, control })
     }
 
-    /// Send input. Input typed while the daemon is unreachable is dropped.
+    /// Send input. Input typed before the terminal is attached (or while it
+    /// reconnects) is sent once it is, up to a bound.
     pub fn write(&self, data: Vec<u8>) {
         self.writer().write(data);
     }
@@ -232,8 +237,12 @@ impl TerminalWriter {
         if data.is_empty() || self.0.closed.load(Ordering::Acquire) {
             return;
         }
-        if let Some(input) = self.0.input.lock().as_ref() {
-            input.send_data(data);
+        let mut input = self.0.input.lock();
+        let (subscription, pending) = &mut *input;
+        match subscription {
+            Some(subscription) => subscription.send_data(data),
+            None if pending.len() + data.len() <= MAX_PENDING_INPUT => pending.extend(data),
+            None => {}
         }
     }
 }
@@ -384,7 +393,14 @@ fn attach(
             window: None,
         },
     ));
-    *shared.input.lock() = Some(subscription.clone());
+    {
+        let mut input = shared.input.lock();
+        let pending = std::mem::take(&mut input.1);
+        if !pending.is_empty() {
+            subscription.send_data(pending);
+        }
+        input.0 = Some(subscription.clone());
+    }
     let detached = loop {
         let timer = match sink.deadline() {
             Some(deadline) => crossbeam_channel::at(deadline),
@@ -462,7 +478,7 @@ fn attach(
             recv(timer) -> _ => sink.tick(),
         }
     };
-    *shared.input.lock() = None;
+    shared.input.lock().0 = None;
     if !matches!(detached, Detached::Disconnected) {
         subscription.unsubscribe();
     }
