@@ -1,0 +1,1 @@
+{"runtimeMode":"ask","steps":[{"type":"message","text":"[approval] list the files"},{"type":"wait","until":"request_pending"},{"type":"respond","request":"first_pending","option":"once"},{"type":"wait","until":"turn_terminal"}]}

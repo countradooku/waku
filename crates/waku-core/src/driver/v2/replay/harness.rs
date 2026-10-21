@@ -46,6 +46,11 @@ pub struct ScenarioInput {
     /// Merged into the instance's `extra` (driver profile switches).
     #[serde(default)]
     pub instance: Option<serde_json::Value>,
+    /// The main thread's runtime mode (default: full access). Approval
+    /// scenarios of drivers that answer permissions themselves in full access
+    /// run as `ask`.
+    #[serde(default)]
+    pub runtime_mode: Option<RuntimeMode>,
     pub steps: Vec<ScenarioStep>,
 }
 
@@ -687,6 +692,14 @@ impl ReplayHarness {
     pub fn run(&mut self, input: &ScenarioInput) -> Result<ScenarioResult, ReplayError> {
         let mut forks = Vec::new();
         self.settle()?;
+        if let Some(runtime_mode) = input.runtime_mode {
+            let thread_id = self.thread(&None)?;
+            self.dispatch(Command::ThreadSetRuntimeMode {
+                thread_id,
+                runtime_mode,
+            })?;
+            self.settle()?;
+        }
         for step in &input.steps {
             self.step(step, &mut forks)?;
         }

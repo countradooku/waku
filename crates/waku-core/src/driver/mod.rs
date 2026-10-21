@@ -7,11 +7,11 @@ mod claude;
 mod codex;
 mod computer_use;
 mod deepseek;
-mod opencode;
-mod opencode_computer_use;
+pub mod opencode;
 mod pi;
 mod support;
 mod title_refresh;
+mod tool_items;
 pub mod v2;
 
 /// One-shot title generation for the orchestrator's `TitlePort` (RFC 0001).
@@ -235,9 +235,19 @@ pub(crate) fn start_local(
         }
         ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),
         // OpenCode is not a per-workspace server: one adopted background
-        // service carries every workspace, and every Waku task rides its one
-        // event stream.
-        ProviderKind::OpenCode => Arc::new(opencode::OpenCodeDriver::start(options, events)?),
+        // service carries every workspace. Ported to `DriverV2` (#49) and
+        // served through the bridge until the orchestrator cutover.
+        ProviderKind::OpenCode => Arc::new(v2::bridge::V1Bridge::start(
+            Arc::new(opencode::OpenCodeDriver),
+            v2::InstanceConfig::new(
+                "opencode",
+                waku_protocol::orchestration::DriverKind::OpenCode,
+            ),
+            options,
+            events,
+            Arc::new(v2::ProcessTransportFactory),
+            v2::bridge::runtime(),
+        )?),
         // Claude serves a realtime stream of user messages on stdin — the same
         // transport the Agent SDK drives — which is what lets its Supervised
         // mode ask rather than decide alone.

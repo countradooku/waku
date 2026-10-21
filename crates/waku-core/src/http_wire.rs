@@ -15,14 +15,12 @@
 //!
 //! Everything here blocks, so every caller must already be off the UI thread.
 
-use std::io::{BufRead as _, Read, Write};
-use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
-use parking_lot::Mutex;
 use serde_json::Value;
 
 /// Where a request goes, and how it authenticates.
@@ -323,131 +321,6 @@ fn decode_chunked(mut input: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(output)
 }
 
-/// Shuts an open event stream and wakes whoever is reading it.
-///
-/// The socket handle lives here rather than with the reader so a drop during
-/// response setup still cancels: see [`open_event_stream`].
-#[derive(Default)]
-pub(crate) struct StreamControl {
-    cancelled: AtomicBool,
-    socket: Mutex<Option<TcpStream>>,
-}
-
-impl StreamControl {
-    pub(crate) fn attach(&self, stream: &TcpStream) -> std::io::Result<bool> {
-        let socket = stream.try_clone()?;
-        let mut active = self.socket.lock();
-        if self.cancelled.load(Ordering::Acquire) {
-            let _ = socket.shutdown(Shutdown::Both);
-            return Ok(false);
-        }
-        *active = Some(socket);
-        Ok(true)
-    }
-
-    pub(crate) fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        if let Some(socket) = self.socket.lock().take() {
-            let _ = socket.shutdown(Shutdown::Both);
-        }
-    }
-
-    pub(crate) fn clear(&self) {
-        self.socket.lock().take();
-    }
-
-    pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-
-    /// Lets a long-lived reader be restarted after a cancel-driven park.
-    pub(crate) fn reset(&self) {
-        self.cancelled.store(false, Ordering::Release);
-        self.socket.lock().take();
-    }
-}
-
-/// Opens the server-sent event stream and leaves it open.
-///
-/// The shared request helper reads a whole response before returning, which a
-/// stream never finishes doing.
-pub(crate) fn open_event_stream(
-    endpoint: &Endpoint,
-    path: &str,
-    control: &StreamControl,
-) -> anyhow::Result<Option<TcpStream>> {
-    let address = endpoint.address();
-    let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
-        .with_context(|| format!("could not connect to OpenCode on {address}"))?;
-    // Register before reading the response head too. If this driver is dropped
-    // while setup is blocked, cancellation can still close the socket and wake
-    // the reader even though another pooled session keeps the server alive.
-    if !control.attach(&stream)? {
-        return Ok(None);
-    }
-    // Closing a cloned socket does not reliably wake a blocking read on every
-    // Windows TCP stack. Poll during response setup so cancellation has a
-    // platform-independent upper bound even when the server never replies.
-    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
-    let authorization = endpoint
-        .auth
-        .as_deref()
-        .map(|auth| format!("Authorization: {auth}\r\n"))
-        .unwrap_or_default();
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: {address}\r\nAccept: text/event-stream\r\n{authorization}Connection: keep-alive\r\n\r\n"
-    )?;
-    stream.flush()?;
-    // Consume exactly the response head. A BufReader could read ahead into the
-    // first event and lose those buffered bytes when it is dropped here.
-    let mut response_head = Vec::new();
-    let mut byte = [0_u8; 1];
-    loop {
-        match stream.read(&mut byte) {
-            Ok(0) => return Err(anyhow!("OpenCode closed the event stream during setup")),
-            Ok(_) => {
-                response_head.push(byte[0]);
-                if response_head.ends_with(b"\r\n\r\n") || response_head.ends_with(b"\n\n") {
-                    break;
-                }
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                if control.is_cancelled() {
-                    return Ok(None);
-                }
-            }
-            Err(error) => {
-                if control.is_cancelled() {
-                    return Ok(None);
-                }
-                return Err(error.into());
-            }
-        }
-    }
-    // An authenticated server answers 401 with a perfectly well-formed head and
-    // then simply says nothing. Without this check that is indistinguishable
-    // from a healthy stream that happens to be idle, and the reader blocks
-    // until its read timeout instead of reporting the real failure.
-    let head = String::from_utf8_lossy(&response_head);
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|status| status.parse::<u16>().ok())
-        .ok_or_else(|| anyhow!("OpenCode returned an invalid HTTP status"))?;
-    if !(200..300).contains(&status) {
-        bail!("OpenCode refused the event stream with HTTP {status}");
-    }
-    stream.set_read_timeout(None)?;
-    Ok(Some(stream))
-}
-
 /// One parsed server-sent-event frame.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SseFrame {
@@ -462,47 +335,10 @@ pub(crate) enum SseFrame {
     Comment,
 }
 
-/// Reads SSE frames until the stream dies.
-///
-/// `read_timeout` bounds a silent stream; pass `None` to block indefinitely.
-pub(crate) fn read_sse_frames(
-    stream: TcpStream,
-    read_timeout: Option<Duration>,
-) -> anyhow::Result<impl Iterator<Item = anyhow::Result<SseFrame>>> {
-    stream.set_read_timeout(read_timeout)?;
-    let mut reader = std::io::BufReader::new(stream);
-    let mut decoder = SseDecoder::default();
-    let mut finished = false;
-
-    Ok(std::iter::from_fn(move || {
-        if finished {
-            return None;
-        }
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => {
-                    finished = true;
-                    return None;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    finished = true;
-                    return Some(Err(error.into()));
-                }
-            }
-            if let Some(frame) = decoder.push_line(&line) {
-                return Some(Ok(frame));
-            }
-        }
-    }))
-}
-
 /// Incremental server-sent-event framing: feed it one line at a time (a
 /// trailing `\r\n` or `\n` is ignored) and it answers a frame whenever a
-/// blank line dispatches one. Shared by the blocking reader above and the
-/// async transport (`driver::v2::http`).
+/// blank line dispatches one. The async transport (`driver::v2::http`) reads
+/// event streams through it.
 #[derive(Debug, Default)]
 pub(crate) struct SseDecoder {
     event: String,
@@ -564,19 +400,10 @@ mod tests {
     use super::*;
 
     fn frames(input: &str) -> Vec<SseFrame> {
-        // Exercise the parser over a real socket so framing, not a string
-        // helper, is what is under test.
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let payload = input.to_owned();
-        std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            let _ = socket.write_all(payload.as_bytes());
-        });
-        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        read_sse_frames(stream, Some(Duration::from_secs(5)))
-            .unwrap()
-            .map(Result::unwrap)
+        let mut decoder = SseDecoder::default();
+        input
+            .split_inclusive('\n')
+            .filter_map(|line| decoder.push_line(line))
             .collect()
     }
 
@@ -608,38 +435,6 @@ mod tests {
                 data: "{\"_tag\":\"Fail\"}".to_owned(),
             }]
         );
-    }
-
-    #[test]
-    fn cancelling_event_stream_unblocks_response_setup() {
-        use std::net::TcpListener;
-        use std::sync::Arc;
-        use std::sync::mpsc;
-        use std::thread;
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let control = Arc::new(StreamControl::default());
-        let reader_control = Arc::clone(&control);
-        let (done, finished) = mpsc::channel();
-        let reader = thread::spawn(move || {
-            let _ = open_event_stream(&Endpoint::local(port), "/event", &reader_control);
-            done.send(()).unwrap();
-        });
-        let (_peer, _) = listener.accept().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while control.socket.lock().is_none() && std::time::Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-        }
-        assert!(control.socket.lock().is_some());
-
-        control.cancel();
-        finished
-            .recv_timeout(Duration::from_secs(1))
-            .expect("cancellation should unblock the response-head read");
-        reader.join().unwrap();
-        assert!(control.is_cancelled());
-        assert!(control.socket.lock().is_none());
     }
 
     #[test]
