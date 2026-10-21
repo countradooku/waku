@@ -14,8 +14,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::DaemonClient;
-use waku_protocol::{APP_EXECUTABLE_ENV, DAEMON_TOKEN_ENV, DaemonReady, PROTOCOL_VERSION};
+use crate::V8Client;
+use waku_protocol::v8::PROTOCOL_MAJOR;
+use waku_protocol::{APP_EXECUTABLE_ENV, DAEMON_TOKEN_ENV, DaemonReady};
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// How often a development supervisor (`watch_for_rebuilds`, which only
@@ -137,7 +138,7 @@ pub fn parse_allowed_origins(text: &str) -> anyhow::Result<Vec<String>> {
 }
 
 pub struct DaemonProcess {
-    client: DaemonClient,
+    client: V8Client,
     child: Child,
     /// Where the desktop reaches this daemon, and its token: what a second,
     /// protocol v8 connection needs.
@@ -172,7 +173,7 @@ fn launch_decision(running_daemon_answers: bool, keep_running: bool) -> Launch {
 
 /// A daemon that answered on the local socket with the local token.
 struct RunningDaemon {
-    client: DaemonClient,
+    client: V8Client,
     address: String,
     token: String,
 }
@@ -190,7 +191,7 @@ fn probe_running_daemon(socket: &Path, token_path: &Path) -> Option<RunningDaemo
         return None;
     }
     let address = crate::local_endpoint_address(&socket.to_string_lossy());
-    let client = DaemonClient::connect(&address, token.clone()).ok()?;
+    let client = V8Client::connect(&address, token.clone()).ok()?;
     Some(RunningDaemon {
         client,
         address,
@@ -329,13 +330,12 @@ impl DaemonProcess {
                 bail!("timed out waiting for Waku daemon: {error}");
             }
         };
-        if ready.protocol_version != PROTOCOL_VERSION {
+        if ready.protocol_version != u32::from(PROTOCOL_MAJOR) {
             let _ = child.kill();
             let _ = child.wait();
             bail!(
-                "daemon protocol {} does not match desktop protocol {}",
+                "daemon protocol {} does not match desktop protocol {PROTOCOL_MAJOR}",
                 ready.protocol_version,
-                PROTOCOL_VERSION
             );
         }
         let client_address = match ready.socket.as_deref() {
@@ -350,7 +350,7 @@ impl DaemonProcess {
                 return Err(error);
             }
         };
-        let client = match DaemonClient::connect(&client_address, token.clone()) {
+        let client = match V8Client::connect(&client_address, token.clone()) {
             Ok(client) => client,
             Err(error) => {
                 let _ = child.kill();
@@ -366,10 +366,6 @@ impl DaemonProcess {
             owned: !settings.keep_running,
             stopped: false,
         })
-    }
-
-    pub fn client(&self) -> DaemonClient {
-        self.client.clone()
     }
 
     fn has_exited(&mut self) -> bool {
@@ -415,7 +411,13 @@ impl DaemonProcess {
         if std::mem::replace(&mut self.stopped, true) {
             return;
         }
-        self.client.shutdown();
+        // A desktop-owned daemon accepts `daemon.shutdown`; the reply is not
+        // awaited, the child's exit is.
+        let _ = self.client.start::<crate::v8::method::DaemonShutdown>(
+            crate::v8::DaemonShutdownParams {
+                reason: "the desktop stopped its daemon".into(),
+            },
+        );
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         while Instant::now() < deadline {
             match self.child.try_wait() {
@@ -477,7 +479,6 @@ struct SupervisorInner {
     target: Mutex<DaemonTarget>,
     exposure: Mutex<Option<DaemonExposureSettings>>,
     restart: Mutex<()>,
-    client_updates: Mutex<Vec<Sender<DaemonClient>>>,
     running: AtomicBool,
     /// Wakes the monitor thread: the child exited, the connection closed,
     /// a restart needs retrying, or the supervisor is gone.
@@ -493,7 +494,7 @@ impl Drop for SupervisorInner {
 
 impl SupervisorInner {
     /// Wake the monitor when `client`'s connection closes.
-    fn watch_client(&self, client: &DaemonClient) {
+    fn watch_client(&self, client: &V8Client) {
         let wake = self.wake.clone();
         client.on_disconnect(move || {
             let _ = wake.send(());
@@ -507,11 +508,13 @@ impl SupervisorInner {
     }
 }
 
+/// The current daemon and the connection the supervisor watches it by.
 enum DaemonTarget {
     Local(DaemonProcess),
-    Restarting(DaemonClient),
+    /// A managed daemon between two processes.
+    Restarting,
     Remote {
-        client: DaemonClient,
+        client: V8Client,
         address: String,
         token: String,
     },
@@ -520,7 +523,7 @@ enum DaemonTarget {
     /// desktop never stops it; when it goes away and cannot be reached
     /// again, the desktop spawns its own.
     Service {
-        client: DaemonClient,
+        client: V8Client,
         address: String,
         token: String,
     },
@@ -530,18 +533,10 @@ impl DaemonTarget {
     fn endpoint(&self) -> Option<(String, String)> {
         match self {
             Self::Local(process) => Some((process.address.clone(), process.token.clone())),
-            Self::Restarting(_) => None,
+            Self::Restarting => None,
             Self::Remote { address, token, .. } | Self::Service { address, token, .. } => {
                 Some((address.clone(), token.clone()))
             }
-        }
-    }
-
-    fn client(&self) -> DaemonClient {
-        match self {
-            Self::Local(process) => process.client(),
-            Self::Restarting(client) => client.clone(),
-            Self::Remote { client, .. } | Self::Service { client, .. } => client.clone(),
         }
     }
 }
@@ -607,7 +602,7 @@ impl DaemonSupervisor {
     /// Connect to a daemon managed on another host (or by an external local
     /// service manager). Dropping the desktop never shuts this daemon down.
     pub fn connect(address: &str, token: String) -> anyhow::Result<Self> {
-        let client = DaemonClient::connect(address, token.clone())?;
+        let client = V8Client::connect(address, token.clone())?;
         let (supervisor, wake) = Self::from_target(
             DaemonTarget::Remote {
                 client: client.clone(),
@@ -637,36 +632,18 @@ impl DaemonSupervisor {
             target: Mutex::new(target),
             exposure: Mutex::new(exposure),
             restart: Mutex::new(()),
-            client_updates: Mutex::new(Vec::new()),
             running: AtomicBool::new(true),
             wake,
         });
         Ok((Self { inner }, wake_rx))
     }
 
-    pub fn client(&self) -> DaemonClient {
-        self.inner.target.lock().client()
-    }
-
-    /// Subscribe to the active daemon connection. The current client is sent
-    /// immediately, followed by each replacement after a managed restart.
-    pub fn subscribe_clients(&self) -> Receiver<DaemonClient> {
-        let (updates, receiver) = unbounded();
-        // Holding the target lock through registration makes the initial send
-        // atomic with respect to replacement: a subscriber sees either the old
-        // client followed by the new one, or the new client directly.
-        let target = self.inner.target.lock();
-        self.inner.client_updates.lock().push(updates.clone());
-        let _ = updates.send(target.client());
-        receiver
-    }
-
     pub fn is_remote(&self) -> bool {
         self.inner.executable.is_none()
     }
 
-    /// Where the current daemon listens and its token, for a protocol v8
-    /// connection beside this one; `None` while a restart is in progress.
+    /// Where the current daemon listens and its token, for the desktop's own
+    /// connections; `None` while a restart is in progress.
     pub fn endpoint(&self) -> Option<(String, String)> {
         self.inner.target.lock().endpoint()
     }
@@ -792,7 +769,7 @@ fn local_state(
 ) -> Option<LocalState> {
     let (process_exited, connection_closed) = match &mut *inner.target.lock() {
         DaemonTarget::Local(process) => (process.has_exited(), process.client.is_disconnected()),
-        DaemonTarget::Restarting(_) => (true, true),
+        DaemonTarget::Restarting => (true, true),
         DaemonTarget::Remote { .. } | DaemonTarget::Service { .. } => return None,
     };
     let observed_stamp = watch_for_rebuilds
@@ -821,16 +798,11 @@ fn check_daemon(
                 client,
                 address,
                 token,
-            } if client.is_disconnected() => Some((
-                client.clone(),
-                address.clone(),
-                token.clone(),
-                client.last_sequences(),
-            )),
+            } if client.is_disconnected() => Some((client.clone(), address.clone(), token.clone())),
             _ => None,
         }
     };
-    if let Some((disconnected, address, token, resume_from)) = remote_reconnect {
+    if let Some((disconnected, address, token)) = remote_reconnect {
         let _restart = inner.restart.lock();
         let still_current = matches!(
             &*inner.target.lock(),
@@ -840,21 +812,15 @@ fn check_daemon(
         if !still_current {
             return Check::Settled;
         }
-        let Ok(replacement) =
-            DaemonClient::connect_with_resume(&address, token.clone(), resume_from)
-        else {
+        let Ok(replacement) = V8Client::connect(&address, token.clone()) else {
             return Check::Retry;
         };
         inner.watch_client(&replacement);
         *inner.target.lock() = DaemonTarget::Remote {
-            client: replacement.clone(),
+            client: replacement,
             address,
             token,
         };
-        inner
-            .client_updates
-            .lock()
-            .retain(|subscriber| subscriber.send(replacement.clone()).is_ok());
         return Check::Settled;
     }
     let Some(executable) = inner.executable.as_deref() else {
@@ -897,17 +863,12 @@ fn check_daemon(
 /// service manager restarts a crashed daemon), else spawn the desktop's own
 /// daemon. `None` when the target is not a disconnected service.
 fn check_service(inner: &SupervisorInner) -> Option<Check> {
-    let (disconnected, address, token, resume_from) = match &*inner.target.lock() {
+    let (disconnected, address, token) = match &*inner.target.lock() {
         DaemonTarget::Service {
             client,
             address,
             token,
-        } if client.is_disconnected() => (
-            client.clone(),
-            address.clone(),
-            token.clone(),
-            client.last_sequences(),
-        ),
+        } if client.is_disconnected() => (client.clone(), address.clone(), token.clone()),
         _ => return None,
     };
     let _restart = inner.restart.lock();
@@ -918,18 +879,13 @@ fn check_service(inner: &SupervisorInner) -> Option<Check> {
     if !still_current {
         return Some(Check::Settled);
     }
-    if let Ok(replacement) = DaemonClient::connect_with_resume(&address, token.clone(), resume_from)
-    {
+    if let Ok(replacement) = V8Client::connect(&address, token.clone()) {
         inner.watch_client(&replacement);
         *inner.target.lock() = DaemonTarget::Service {
-            client: replacement.clone(),
+            client: replacement,
             address,
             token,
         };
-        inner
-            .client_updates
-            .lock()
-            .retain(|subscriber| subscriber.send(replacement.clone()).is_ok());
         return Some(Check::Settled);
     }
     let (Some(executable), Some(exposure)) =
@@ -958,11 +914,9 @@ fn replace_local_daemon(
                 bail!("the connected daemon is managed outside Waku Desktop")
             }
             // The service is gone; the desktop's own daemon replaces it.
-            DaemonTarget::Restarting(_) | DaemonTarget::Service { .. } => None,
-            DaemonTarget::Local(process) => {
-                let disconnected = process.client();
-                let previous =
-                    std::mem::replace(&mut *target, DaemonTarget::Restarting(disconnected));
+            DaemonTarget::Restarting | DaemonTarget::Service { .. } => None,
+            DaemonTarget::Local(_) => {
+                let previous = std::mem::replace(&mut *target, DaemonTarget::Restarting);
                 match previous {
                     DaemonTarget::Local(process) => Some(process),
                     _ => unreachable!("local daemon target changed while locked"),
@@ -979,12 +933,7 @@ fn replace_local_daemon(
     }
     let replacement = DaemonProcess::spawn_configured(executable, exposure.clone())?;
     inner.watch_process(&replacement);
-    let client = replacement.client();
     *inner.target.lock() = DaemonTarget::Local(replacement);
-    inner
-        .client_updates
-        .lock()
-        .retain(|subscriber| subscriber.send(client.clone()).is_ok());
     Ok(())
 }
 

@@ -8,9 +8,8 @@ readme = "README.md"
 
 [features]
 dev-binary = []
-# Install a `tracing-tracy` subscriber and turn on waku-core's spans. See
-# docs/performance.md.
-profiling = ["waku-core/profiling", "dep:tracing", "dep:tracing-subscriber", "dep:tracing-tracy"]
+# Install a `tracing-tracy` subscriber. See docs/performance.md.
+profiling = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-tracy"]
 
 [[bin]]
 name = "waku-daemon"

@@ -4,7 +4,6 @@
 //! still expanded when an exported thread contains them; Waku no longer
 //! writes them (portable forks are the orchestrator's, RFC 0002 D-6).
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -179,41 +178,6 @@ pub(crate) fn history_from_export(export: &Value) -> anyhow::Result<ProviderSess
         }
     }
     Ok(history)
-}
-
-pub fn provider_session_history(
-    binary: &Path,
-    cwd: &Path,
-    thread_id: &str,
-    visible_turn_limit: usize,
-) -> anyhow::Result<ProviderSessionHistory> {
-    let export = export_thread(binary, cwd, thread_id)?;
-    let mut history = history_from_export(&export)?;
-    let retained = history
-        .turns
-        .iter()
-        .rev()
-        .take(visible_turn_limit)
-        .map(|turn| turn.id)
-        .collect::<HashSet<_>>();
-    history
-        .messages
-        .retain(|message| message.turn_id.is_some_and(|id| retained.contains(&id)));
-    Ok(history)
-}
-
-fn export_thread(binary: &Path, cwd: &Path, thread_id: &str) -> anyhow::Result<Value> {
-    let mut command = crate::command_env::command(binary);
-    let command = command
-        .args(["threads", "export", thread_id])
-        .current_dir(cwd)
-        .stdin(Stdio::null());
-    let output = crate::command_env::output(command).context("failed to export the Amp thread")?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        bail!("Amp could not export thread {thread_id}: {}", detail.trim());
-    }
-    serde_json::from_slice(&output.stdout).context("Amp returned an invalid thread export")
 }
 
 fn logical_messages(export: &Value, pending_context: Option<&str>) -> anyhow::Result<Vec<Value>> {

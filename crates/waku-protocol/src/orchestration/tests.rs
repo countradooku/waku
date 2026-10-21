@@ -446,22 +446,3 @@ fn driver_kind_resolves_legacy_and_instance_tags() {
     );
     assert_eq!(DriverKind::from_tag("nope"), DriverKind::Unknown);
 }
-
-/// The TypeScript side of the forward-compatibility rule: every open union
-/// keeps an `unknown` member a client can skip.
-#[cfg(feature = "ts")]
-#[test]
-fn typescript_declarations_keep_the_unknown_members() {
-    use ts_rs::TS;
-
-    let config = ts_rs::Config::new();
-    let item = TurnItemKind::decl(&config);
-    assert!(item.contains("\"unknown\""), "{item}");
-    let event = DomainEvent::decl(&config);
-    assert!(event.contains("\"unknown\""), "{event}");
-    let status = RunStatus::decl(&config);
-    assert!(
-        status.contains("\"rolled_back\"") && status.contains("\"unknown\""),
-        "{status}"
-    );
-}

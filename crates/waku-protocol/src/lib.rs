@@ -27,12 +27,11 @@ macro_rules! tr {
 }
 
 pub mod attachments;
-pub mod binary_frame;
 pub mod blob;
 pub mod checkpoint;
 pub mod composer;
 pub mod computer_use;
-mod driver_wire;
+pub mod daemon;
 pub mod git;
 pub mod i18n;
 pub mod identity;
@@ -41,7 +40,6 @@ pub mod model_catalog;
 pub mod orchestration;
 pub mod persistence;
 pub mod projectless;
-pub mod provider_session;
 pub mod settings;
 pub mod shared;
 pub mod skills;
@@ -49,38 +47,13 @@ pub mod storage;
 pub mod theme;
 pub mod usage;
 pub mod usage_history;
-/// Protocol v8 (RFC 0003), served beside the legacy protocol on its own
-/// endpoints until the clients move over (#53).
+/// Protocol v8 (RFC 0003), the daemon's only protocol (decision D6).
 pub mod v8;
-pub mod wire_event;
 pub mod workspace;
 
-mod protocol;
-
-/// The `TS` derive on wire types. With the `ts` feature (only
-/// `export_types`, through `bun run protocol:generate` / `protocol:check`)
-/// it is ts-rs; otherwise a stub that accepts the same `#[ts(...)]`
-/// attributes and generates nothing, so the app and daemon never build
-/// ts-rs (#30).
-mod ts {
-    #[cfg(feature = "ts")]
-    pub use ts_rs::TS;
-    #[cfg(not(feature = "ts"))]
-    pub use waku_ts_stub::TS;
-}
-
-pub use driver_wire::{decode_enum, encode_enum, event_from_wire, event_to_wire};
-pub use protocol::{
-    APP_EXECUTABLE_ENV, ClientMessage, Command, DAEMON_ADDRESS_ENV, DAEMON_SOCKET_ENV,
-    DAEMON_TOKEN_ENV, DaemonReady, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, MAX_WIRE_MESSAGE_BYTES,
-    PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome, ResponsePayload, RpcError,
-    SequencedEvent, ServerMessage, TERMINAL_REPLAY_BYTES, TERMINAL_RETAINED_BYTES,
-    TERMINAL_RETAINED_LINES, TerminalSnapshot, WireComputerToolRequest, WireDriverStartOptions,
-    WireSessionOptions,
+pub use daemon::{
+    APP_EXECUTABLE_ENV, DAEMON_ADDRESS_ENV, DAEMON_SOCKET_ENV, DAEMON_TOKEN_ENV, DaemonReady,
+    TERMINAL_REPLAY_BYTES, TERMINAL_RETAINED_BYTES, TERMINAL_RETAINED_LINES,
 };
-/// The legacy (v7) protocol version, under its RFC 0003 name. v8 is
-/// [`v8::PROTOCOL_MAJOR`]; the two never share an endpoint.
-pub const LEGACY_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION;
 pub use settings::DaemonSettings;
-pub use wire_event::WireDriverEvent;
 pub use workspace::{WorkspaceOperation, WorkspaceResult};

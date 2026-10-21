@@ -724,14 +724,12 @@ fn full_turn_item(
             )
         })?;
     // Images in tool output become blob references, never data URLs.
-    externalize_item_images(&mut item, &mut |bytes, mime| match context.backend.call(
-        crate::protocol::Command::StoreBlob {
-            mime_type: mime.to_owned(),
-            bytes: bytes.to_vec(),
-        },
-    ) {
-        Ok(crate::protocol::ResponsePayload::BlobStored { reference, .. }) => Some(reference),
-        _ => None,
+    externalize_item_images(&mut item, &mut |bytes, mime| {
+        context
+            .backend
+            .store_blob(mime, bytes)
+            .ok()
+            .map(|(reference, _)| reference)
     });
     Ok(item)
 }

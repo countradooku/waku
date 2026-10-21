@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use anyhow::anyhow;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::http_wire::{self, Endpoint, encode_path_segment};
 
@@ -44,12 +44,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Server info is on the start path, where a hung probe would eat the whole
 /// start budget, so it gets its own much tighter bound.
 const INFO_TIMEOUT: Duration = Duration::from_secs(2);
-/// A transcript page and a session export both walk stored messages, which for
-/// a long task is far more work than an ordinary request.
-const TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
-/// Forking copies every retained message and part into a new session, and a
-/// long task can legitimately take minutes.
-const FORK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The result of every call in this module.
 pub(crate) type Result<T> = std::result::Result<T, ApiError>;
@@ -134,18 +128,15 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-/// Page order. The server defaults to `desc` on both `/api/session` and
-/// `/message`, so transcript hydration must ask for `asc` explicitly.
+/// Page order. Session lists are read newest first.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Order {
-    Asc,
     Desc,
 }
 
 impl Order {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Asc => "asc",
             Self::Desc => "desc",
         }
     }
@@ -554,12 +545,6 @@ pub(crate) enum MessageInfo {
     Unknown,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub(crate) struct SessionExport {
-    pub info: SessionInfo,
-    pub messages: Vec<MessageInfo>,
-}
-
 /// A one-shot permission reply. There is deliberately no `always`: it would
 /// write a rule into the GLOBAL `/api/permission/saved`, shared with the
 /// user's own terminal, so durable choices stay in driver state.
@@ -800,51 +785,6 @@ pub(crate) fn list_sessions(
     page(response, "session list")
 }
 
-pub(crate) fn list_messages(
-    endpoint: &Endpoint,
-    session: &str,
-    order: Order,
-    limit: Option<usize>,
-    cursor: Option<&str>,
-) -> Result<(Vec<MessageInfo>, Option<String>)> {
-    let path = format!(
-        "/api/session/{}/message{}",
-        encode_path_segment(session),
-        message_list_query(order, limit, cursor)
-    );
-    let response = request(endpoint, "GET", &path, None, TRANSFER_TIMEOUT)?;
-    page(response, "message list")
-}
-
-pub(crate) fn export_session(
-    endpoint: &Endpoint,
-    session: &str,
-    sanitize: bool,
-) -> Result<SessionExport> {
-    let path = format!(
-        "/api/experimental/session/{}/export?sanitize={sanitize}",
-        encode_path_segment(session)
-    );
-    let response = request(endpoint, "GET", &path, None, TRANSFER_TIMEOUT)?;
-    decode(data(response, "session export")?, "session export")
-}
-
-/// Copies the session's history into a new one. `before` names the first
-/// message left out; without it the whole history is copied.
-pub(crate) fn fork(
-    endpoint: &Endpoint,
-    session: &str,
-    before: Option<&str>,
-) -> Result<SessionInfo> {
-    let path = format!("/api/session/{}/fork", encode_path_segment(session));
-    let body = match before {
-        Some(message_id) => json!({ "before": message_id }),
-        None => json!({}),
-    };
-    let response = request(endpoint, "POST", &path, Some(&body), FORK_TIMEOUT)?;
-    decode(data(response, "fork")?, "fork")
-}
-
 pub(crate) fn list_models(endpoint: &Endpoint, directory: Option<&str>) -> Result<Vec<ModelInfo>> {
     catalogue(endpoint, "/api/model", directory, "model catalogue")
 }
@@ -1001,18 +941,6 @@ fn session_list_query(
         query.push("parentID", parent_id);
     }
     // The order is baked into the opaque cursor; sending both is a 400.
-    match cursor {
-        Some(cursor) => query.push("cursor", cursor),
-        None => query.push("order", order.as_str()),
-    }
-    query.finish()
-}
-
-fn message_list_query(order: Order, limit: Option<usize>, cursor: Option<&str>) -> String {
-    let mut query = Query::default();
-    if let Some(limit) = limit {
-        query.push("limit", &limit.to_string());
-    }
     match cursor {
         Some(cursor) => query.push("cursor", cursor),
         None => query.push("order", order.as_str()),
@@ -1177,105 +1105,6 @@ mod tests {
         );
     }
 
-    /// Records every request line and JSON body while answering each request
-    /// with the next canned response, so a test can assert exactly what went
-    /// on the wire.
-    fn recording_server(
-        responses: Vec<String>,
-    ) -> (
-        Endpoint,
-        std::sync::mpsc::Receiver<(String, Value)>,
-        thread::JoinHandle<()>,
-    ) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let endpoint = Endpoint::local(listener.local_addr().unwrap().port());
-        let (sent, received) = std::sync::mpsc::channel();
-        let server = thread::spawn(move || {
-            for response in responses {
-                let (mut socket, _) = listener.accept().unwrap();
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut input = std::io::BufReader::new(&mut socket);
-                let mut request = String::new();
-                input.read_line(&mut request).unwrap();
-                let mut length = 0;
-                loop {
-                    let mut header = String::new();
-                    input.read_line(&mut header).unwrap();
-                    if header == "\r\n" {
-                        break;
-                    }
-                    if let Some((key, value)) = header.split_once(':')
-                        && key.eq_ignore_ascii_case("content-length")
-                    {
-                        length = value.trim().parse().unwrap();
-                    }
-                }
-                let mut body = vec![0; length];
-                input.read_exact(&mut body).unwrap();
-                sent.send((
-                    request,
-                    serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
-                ))
-                .unwrap();
-                socket.write_all(response.as_bytes()).unwrap();
-            }
-        });
-        (endpoint, received, server)
-    }
-
-    fn no_content() -> String {
-        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_owned()
-    }
-
-    fn json_response(value: Value) -> String {
-        let body = value.to_string();
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
-    }
-
-    /// The cold fork and export routes the daemon still calls directly.
-    #[test]
-    fn cold_fork_and_export_use_the_released_routes_and_bodies() {
-        let forked = json!({"data": {
-            "id": "ses_fork",
-            "projectID": "prj",
-            "cost": 0,
-            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
-            "time": {"created": 1.0, "updated": 1.0},
-            "location": {"directory": "/work"},
-        }});
-        let (endpoint, received, server) = recording_server(vec![
-            json_response(forked.clone()),
-            json_response(forked),
-            no_content(),
-        ]);
-        assert_eq!(
-            fork(&endpoint, "ses_a", Some("msg_2")).unwrap().id,
-            "ses_fork"
-        );
-        assert_eq!(fork(&endpoint, "ses_a", None).unwrap().id, "ses_fork");
-        export_session(&endpoint, "ses_a", false).unwrap_err();
-        server.join().unwrap();
-
-        let requests: Vec<_> = received.try_iter().collect();
-        assert_eq!(
-            requests[0],
-            (
-                "POST /api/session/ses_a/fork HTTP/1.1\r\n".to_owned(),
-                json!({"before": "msg_2"})
-            )
-        );
-        assert_eq!(requests[1].1, json!({}), "no boundary copies everything");
-        assert_eq!(
-            requests[2].0,
-            "GET /api/experimental/session/ses_a/export?sanitize=false HTTP/1.1\r\n"
-        );
-    }
-
     #[test]
     fn canned_server_waits_for_complete_request_headers_and_body() {
         let response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
@@ -1320,11 +1149,8 @@ mod tests {
     /// The order is baked into the opaque cursor, so sending both is a 400.
     #[test]
     fn a_cursor_replaces_the_order_parameter() {
-        let query = session_list_query(None, None, Order::Asc, 50, Some("Y3Vyc29y"));
+        let query = session_list_query(None, None, Order::Desc, 50, Some("Y3Vyc29y"));
         assert!(query.contains("cursor=Y3Vyc29y"));
-        assert!(!query.contains("order="));
-        let query = message_list_query(Order::Asc, Some(200), Some("Y3Vyc29y"));
-        assert!(query.contains("limit=200"));
         assert!(!query.contains("order="));
     }
 
@@ -1590,16 +1416,6 @@ mod tests {
         assert!(!list_agents(&endpoint, Some(directory)).unwrap().is_empty());
         let _ = list_commands(&endpoint, Some(directory)).unwrap();
 
-        let (sessions, _) =
-            list_sessions(&endpoint, Some(directory), None, Order::Desc, 5, None).unwrap();
-        if let Some(session) = sessions.first() {
-            let (messages, _) =
-                list_messages(&endpoint, &session.id, Order::Asc, Some(5), None).unwrap();
-            assert!(
-                messages
-                    .iter()
-                    .all(|message| *message != MessageInfo::Unknown)
-            );
-        }
+        list_sessions(&endpoint, Some(directory), None, Order::Desc, 5, None).unwrap();
     }
 }

@@ -18,7 +18,7 @@ macro_rules! open_enum {
         $(#[$meta])*
         #[derive(
             Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord,
-            ::serde::Serialize, ::serde::Deserialize, crate::ts::TS,
+            ::serde::Serialize, ::serde::Deserialize,
         )]
         pub enum $name {
             $( $(#[$vmeta])* #[serde(rename = $text)] $variant, )+
@@ -78,7 +78,7 @@ macro_rules! open_enum {
         $(#[$meta])*
         #[derive(
             Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord,
-            ::serde::Serialize, ::serde::Deserialize, crate::ts::TS,
+            ::serde::Serialize, ::serde::Deserialize,
         )]
         pub enum $name {
             $( $(#[$vmeta])* #[serde(rename = $text)] $variant, )+
@@ -136,7 +136,7 @@ macro_rules! uuid_ids {
             $(#[$meta])*
             #[derive(
                 Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord,
-                ::serde::Serialize, ::serde::Deserialize, crate::ts::TS,
+                ::serde::Serialize, ::serde::Deserialize,
             )]
             #[cfg_attr(feature = "schema", derive(::schemars::JsonSchema))]
             #[serde(transparent)]

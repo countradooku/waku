@@ -279,10 +279,6 @@ impl State {
         self.order_complete = true;
     }
 
-    pub fn active_root_turn(&self) -> Option<String> {
-        self.turns.keys().next().cloned()
-    }
-
     pub fn begin_start(&mut self, req: &TurnStart) -> Result<(), NotReadyReason> {
         if self.starting.is_some() || self.turns.values().any(|turn| turn.run.is_some()) {
             return Err(NotReadyReason::PreviousTurnActive);
@@ -564,9 +560,6 @@ pub(super) async fn read_loop(
             shared.conn.raw_log(FrameDirection::Inbound, &line);
             continue;
         };
-        if let Some(legacy) = &shared.legacy {
-            legacy.observe(&frame);
-        }
         let (events, action) = handle(&shared, &frame);
         shared.emit(events).await;
         if let Some(action) = action {
@@ -580,9 +573,6 @@ pub(super) async fn read_loop(
         process_exit(&mut state, &shared, &status)
     };
     shared.emit(events).await;
-    if let Some(legacy) = &shared.legacy {
-        legacy.exited(&status);
-    }
     // Dropping the last sender ends the session's event stream.
     shared.events.lock().take();
     shared.conn.close().await;
@@ -728,17 +718,10 @@ fn open_root_turn(
     } else if from_start {
         return Vec::new();
     } else {
-        // Codex started this turn itself (a `/goal` continuation). Behind
-        // the bridge it gets a run of its own so the desktop sees it start
-        // and finish, as before; the orchestrator decides its run (#59).
-        let run = shared.legacy.as_ref().map(|_| RunRef {
-            thread_id: shared.thread_id,
-            run_id: RunId(shared.ids.fresh(EntityKind::Node)),
-            attempt_id: RunAttemptId(shared.ids.fresh(EntityKind::Node)),
-            root_node_id: NodeId(shared.ids.fresh(EntityKind::Node)),
-        });
+        // Codex started this turn itself (a `/goal` continuation): the
+        // orchestrator decides its run (#59).
         let ordinal = state.order.len() as u32 + 1;
-        (run, ordinal, false)
+        (None, ordinal, false)
     };
     let turn = OpenTurn {
         run,
@@ -825,18 +808,6 @@ fn notification(shared: &Shared, method: &str, params: &Value) -> Option<Vec<Ada
             state
                 .coalescer
                 .offer(AdapterEvent::GoalUpdated { goal: None })
-        }
-        "thread/name/updated" if is_root(state, thread) && shared.legacy.is_some() => {
-            let root = state.root.as_ref()?;
-            let title = params
-                .get("threadName")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let row = shared.thread_row(root.id, &root.native, None, title);
-            state.coalescer.offer(AdapterEvent::ProviderThreadUpdated {
-                thread: row,
-                retained_native_turn_ids: None,
-            })
         }
         "error" => {
             // Kept for the terminal: `turn/completed` may carry only the

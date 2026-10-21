@@ -2,11 +2,9 @@
 //! `terminalList` streams (the PTY host of #60).
 //!
 //! The PTY, its retained history and its offsets are the backend's
-//! [`DaemonTerminal`](crate::terminal::DaemonTerminal), opened through the
-//! same `OpenTerminal` command as the legacy protocol. A v8 terminal routes
-//! that terminal's events to a broadcast of its own instead of the legacy
-//! hub, and each `terminal` subscription turns them into DATA under the
-//! client's credit:
+//! [`DaemonTerminal`](crate::terminal::DaemonTerminal). A v8 terminal routes
+//! that terminal's events to a broadcast of its own, and each `terminal`
+//! subscription turns them into DATA under the client's credit:
 //!
 //! - output below the attach snapshot's offset is part of the replay and is
 //!   skipped;
@@ -19,20 +17,18 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use base64::Engine as _;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
+use waku_protocol::TERMINAL_REPLAY_BYTES;
 use waku_protocol::v8::{
     Ack, EndReason, Error, StreamCursor, TerminalGeneration, TerminalInfo, TerminalItem,
     TerminalListItem, TerminalListSpec, TerminalOpenParams, TerminalOpened, TerminalParams,
     TerminalResizeParams, TerminalSpec,
 };
-use waku_protocol::{TERMINAL_REPLAY_BYTES, TerminalSnapshot};
 
-use super::{Domain, backend_error, display_path, not_found, now_ms, unexpected};
-use crate::protocol::{Command, ResponsePayload, WireDriverEvent};
-use crate::server::EventSink;
+use super::{Domain, backend_error, display_path, not_found, now_ms};
+use crate::terminal::{TerminalEvent as PtyEvent, TerminalSnapshot};
 use crate::v8::V8Context;
 use crate::v8::connection::{DataChunk, Ended, StreamSink};
 use crate::v8::methods::root_path;
@@ -148,71 +144,43 @@ impl V8Terminal {
     }
 
     /// An event of the backend terminal.
-    fn on_event(&self, event: WireDriverEvent) {
+    fn on_event(&self, event: PtyEvent) {
         let event = match event {
-            WireDriverEvent::TerminalOutput(output) => {
-                let Ok(data) = base64::engine::general_purpose::STANDARD.decode(output.data) else {
-                    return;
-                };
-                TerminalEvent::Output {
-                    offset: output.offset.unwrap_or_default(),
-                    data: data.into(),
-                }
-            }
-            WireDriverEvent::TerminalReset(reset) => {
+            PtyEvent::Output { offset, data } => TerminalEvent::Output {
+                offset,
+                data: data.into(),
+            },
+            PtyEvent::Reset { generation, offset } => {
                 {
                     let mut state = self.state.lock();
-                    if reset.generation != state.generation.0 {
+                    if generation != state.generation.0 {
                         state.exited = false;
                     }
                 }
-                self.generation_id(reset.generation);
-                TerminalEvent::Reset {
-                    generation: reset.generation,
-                    offset: reset.offset,
-                }
+                self.generation_id(generation);
+                TerminalEvent::Reset { generation, offset }
             }
-            WireDriverEvent::TerminalExited => {
+            PtyEvent::Exited => {
                 self.state.lock().exited = true;
                 TerminalEvent::Exited
             }
-            WireDriverEvent::TerminalError(message) => TerminalEvent::Error(message),
-            _ => return,
+            PtyEvent::Error(message) => TerminalEvent::Error(message),
         };
         let _ = self.events.send(event);
     }
 }
 
-/// A sink for backend calls whose events do not matter (they reach the
-/// terminal through the sink it was opened with).
-fn no_events() -> EventSink {
-    EventSink::listener(|_| {})
-}
-
-fn terminal_call(
-    context: &V8Context,
-    id: Uuid,
-    command: Command,
-) -> Result<ResponsePayload, Error> {
-    context
-        .backend
-        .call_as(id, id, command, no_events())
-        .map_err(|error| backend_error(error, Domain::General))
+fn backend<T>(result: anyhow::Result<T>) -> Result<T, Error> {
+    result.map_err(|error| backend_error(error, Domain::General))
 }
 
 fn snapshot(context: &V8Context, id: Uuid, max_replay: usize) -> Result<TerminalSnapshot, Error> {
-    match terminal_call(
-        context,
+    backend(context.backend.attach_terminal(
         id,
-        Command::AttachTerminal {
-            cols: None,
-            rows: None,
-            max_replay_bytes: Some(u32::try_from(max_replay).unwrap_or(u32::MAX)),
-        },
-    )? {
-        ResponsePayload::TerminalAttached { terminal } => Ok(terminal),
-        other => Err(unexpected(&other)),
-    }
+        None,
+        None,
+        Some(u32::try_from(max_replay).unwrap_or(u32::MAX)),
+    ))
 }
 
 pub(super) fn open(
@@ -235,19 +203,13 @@ pub(super) fn open(
         }),
     });
     let listener = terminal.clone();
-    context
-        .backend
-        .call_as(
-            id,
-            id,
-            Command::OpenTerminal {
-                cwd,
-                cols: params.cols,
-                rows: params.rows,
-            },
-            EventSink::listener(move |event| listener.on_event(event)),
-        )
-        .map_err(|error| backend_error(error, Domain::General))?;
+    backend(context.backend.open_terminal(
+        id,
+        &cwd,
+        params.cols,
+        params.rows,
+        Arc::new(move |event| listener.on_event(event)),
+    ))?;
     let hub = &context.catalog.terminals;
     hub.terminals.lock().insert(id, terminal.clone());
     hub.upserted(&terminal);
@@ -260,13 +222,10 @@ pub(super) fn open(
 pub(super) fn resize(context: &V8Context, params: TerminalResizeParams) -> Result<Ack, Error> {
     let hub = &context.catalog.terminals;
     let terminal = hub.get(params.terminal_id)?;
-    terminal_call(
-        context,
-        terminal.id,
-        Command::ResizeTerminal {
-            cols: params.cols,
-            rows: params.rows,
-        },
+    backend(
+        context
+            .backend
+            .resize_terminal(terminal.id, params.cols, params.rows),
     )?;
     // The PTY clamps tiny sizes; report what it has.
     let size = snapshot(context, terminal.id, 0)?;
@@ -285,7 +244,7 @@ pub(super) fn resize(context: &V8Context, params: TerminalResizeParams) -> Resul
 
 pub(super) fn clear(context: &V8Context, params: TerminalParams) -> Result<Ack, Error> {
     let terminal = context.catalog.terminals.get(params.terminal_id)?;
-    terminal_call(context, terminal.id, Command::ClearTerminal)?;
+    backend(context.backend.clear_terminal(terminal.id))?;
     Ok(Ack {})
 }
 
@@ -295,10 +254,7 @@ pub(super) fn restart(
 ) -> Result<TerminalGeneration, Error> {
     let hub = &context.catalog.terminals;
     let terminal = hub.get(params.terminal_id)?;
-    let generation = match terminal_call(context, terminal.id, Command::RestartTerminal)? {
-        ResponsePayload::TerminalAttached { terminal: snapshot } => snapshot.generation,
-        other => return Err(unexpected(&other)),
-    };
+    let generation = backend(context.backend.restart_terminal(terminal.id))?.generation;
     terminal.state.lock().exited = false;
     let generation = terminal.generation_id(generation);
     hub.upserted(&terminal);
@@ -308,7 +264,7 @@ pub(super) fn restart(
 pub(super) fn close(context: &V8Context, params: TerminalParams) -> Result<Ack, Error> {
     let hub = &context.catalog.terminals;
     let terminal = hub.get(params.terminal_id)?;
-    let closed = terminal_call(context, terminal.id, Command::CloseTerminal);
+    let closed = backend(context.backend.close_terminal(terminal.id));
     hub.terminals.lock().remove(&terminal.id);
     let _ = terminal.events.send(TerminalEvent::Closed);
     let _ = hub.list.send(ListEvent::Removed(terminal.id));
@@ -351,7 +307,7 @@ fn spawn_writer(
             }
             let context = context.clone();
             let written = tokio::task::spawn_blocking(move || {
-                terminal_call(&context, id, Command::WriteTerminal { data: chunk.body })
+                backend(context.backend.write_terminal(id, chunk.body))
             })
             .await;
             if !matches!(written, Ok(Ok(_))) {

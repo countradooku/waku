@@ -12,24 +12,16 @@ use waku_protocol::v8::{
     WorktreeKeepWhen,
 };
 
-use super::{Domain, bad_request, call, display_path, provider_kind, seconds_to_ms, unexpected};
+use super::{Domain, bad_request, call, display_path, provider_kind, seconds_to_ms};
 use crate::computer_use::ComputerAppGrant;
-use crate::protocol::{Command, ResponsePayload};
 use crate::v8::{V8Context, settings_revision, wire_settings};
 
 /// How long a shutdown waits so its reply reaches the client first.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
 
 pub(super) fn info(context: &V8Context) -> Result<DaemonInfo, Error> {
-    let (default_cwd, projectless_root) =
-        match call(context, Command::LoadTaskState, Domain::General)? {
-            ResponsePayload::TaskState {
-                default_cwd,
-                projectless_root,
-                ..
-            } => (default_cwd, projectless_root),
-            other => return Err(unexpected(&other)),
-        };
+    let default_cwd = call(context.backend.default_cwd(), Domain::General)?;
+    let projectless_root = crate::projectless::workspace_root();
     Ok(DaemonInfo {
         version: env!("CARGO_PKG_VERSION").into(),
         environment: context.environment.clone(),
@@ -210,15 +202,11 @@ pub(super) fn update_settings(
     if let Some(enabled) = patch.continue_threads_after_restart {
         settings.set_continue_threads_after_restart(enabled);
     }
-    call(
-        context,
-        Command::UpdateSettings { settings },
+    call(context.backend.update_settings(settings), Domain::General)?;
+    let state = call(
+        crate::v8::load_settings(&*context.backend, &context.settings),
         Domain::General,
     )?;
-    let state = context
-        .backend
-        .load_settings(&context.settings)
-        .map_err(|error| super::backend_error(error, Domain::General))?;
     if touches_providers {
         super::providers::settings_changed(context);
     }
@@ -293,22 +281,17 @@ fn report(report: legacy::WorktreeCleanupReport) -> WorktreeCleanupReport {
 }
 
 pub(super) fn cleanup_status(context: &V8Context) -> Result<WorktreeCleanupStatus, Error> {
-    match call(context, Command::GetWorktreeCleanupStatus, Domain::General)? {
-        ResponsePayload::WorktreeCleanupStatus { status } => Ok(WorktreeCleanupStatus {
-            last_run_at: status.last_run_at.map(seconds_to_ms),
-            last_report: status.last_report.map(report),
-            next_run_at: status.next_run_at.map(seconds_to_ms),
-            running: status.running,
-        }),
-        other => Err(unexpected(&other)),
-    }
+    let status = call(context.backend.worktree_cleanup_status(), Domain::General)?;
+    Ok(WorktreeCleanupStatus {
+        last_run_at: status.last_run_at.map(seconds_to_ms),
+        last_report: status.last_report.map(report),
+        next_run_at: status.next_run_at.map(seconds_to_ms),
+        running: status.running,
+    })
 }
 
 pub(super) fn run_cleanup(context: &V8Context) -> Result<WorktreeCleanupReport, Error> {
-    let result = call(context, Command::RunWorktreeCleanup, Domain::Vcs);
+    let result = call(context.backend.run_worktree_cleanup(), Domain::Vcs);
     context.catalog.vcs.changed();
-    match result? {
-        ResponsePayload::WorktreeCleanupReport { report: done } => Ok(report(done)),
-        other => Err(unexpected(&other)),
-    }
+    result.map(report)
 }

@@ -17,13 +17,12 @@ use waku_protocol::v8::{
 
 use super::{
     Domain, absolute_path, bad_request, call, content_revision, display_path, not_found,
-    provider_kind, seconds_to_ms, unexpected, workspace,
+    provider_kind, seconds_to_ms, workspace,
 };
 use crate::persistence::{
-    ComposerDraft as LegacyDraft, ComposerDraftAttachment, ComposerDraftChange,
-    ComposerDraftTarget, ComposerDrafts as LegacyDrafts,
+    ComposerDraft as StoredDraft, ComposerDraftAttachment, ComposerDraftChange,
+    ComposerDraftTarget, ComposerDrafts as StoredDrafts,
 };
-use crate::protocol::{Command, ResponsePayload};
 use crate::v8::V8Context;
 use crate::v8::connection::StreamSink;
 use crate::v8::methods::root_path;
@@ -52,18 +51,18 @@ pub(super) fn slash_commands(
     else {
         return Err(super::internal("unexpected slash command result"));
     };
-    use waku_protocol::composer::CommandScope as Legacy;
+    use waku_protocol::composer::CommandScope as Scope;
     Ok(commands
         .into_iter()
         .map(|command| SlashCommand {
             name: command.name,
             description: command.description,
             scope: match command.scope {
-                Legacy::Project => CommandScope::Project,
-                Legacy::User => CommandScope::User,
-                Legacy::Skill => CommandScope::Skill,
-                Legacy::Builtin => CommandScope::Builtin,
-                Legacy::Waku => CommandScope::Waku,
+                Scope::Project => CommandScope::Project,
+                Scope::User => CommandScope::User,
+                Scope::Skill => CommandScope::Skill,
+                Scope::Builtin => CommandScope::Builtin,
+                Scope::Waku => CommandScope::Waku,
             },
             argument_hint: command.argument_hint,
             template: command.template,
@@ -123,12 +122,10 @@ pub(super) fn skills(
             .map(|project| (project.name, project.path))
             .collect()
     };
-    match call(context, Command::LoadSkills { projects }, Domain::General)? {
-        ResponsePayload::SkillsCatalog { catalog } => Ok(SkillsCatalog {
-            skills: catalog.skills.into_iter().map(wire_skill).collect(),
-        }),
-        other => Err(unexpected(&other)),
-    }
+    let catalog = call(context.backend.skills(projects), Domain::General)?;
+    Ok(SkillsCatalog {
+        skills: catalog.skills.into_iter().map(wire_skill).collect(),
+    })
 }
 
 fn skill_dirs(dirs: &[String]) -> Result<Vec<PathBuf>, Error> {
@@ -141,11 +138,7 @@ pub(super) fn set_skills_enabled(
 ) -> Result<Ack, Error> {
     let dirs = skill_dirs(&params.dirs)?;
     call(
-        context,
-        Command::SetSkillsEnabled {
-            dirs,
-            enabled: params.enabled,
-        },
+        context.backend.set_skills_enabled(dirs, params.enabled),
         Domain::General,
     )?;
     Ok(Ack {})
@@ -153,7 +146,7 @@ pub(super) fn set_skills_enabled(
 
 pub(super) fn trash_skills(context: &V8Context, params: SkillsTrashParams) -> Result<Ack, Error> {
     let dirs = skill_dirs(&params.dirs)?;
-    call(context, Command::TrashSkills { dirs }, Domain::General)?;
+    call(context.backend.trash_skills(dirs), Domain::General)?;
     Ok(Ack {})
 }
 
@@ -176,7 +169,7 @@ impl Default for DraftsBus {
     }
 }
 
-fn wire_draft(draft: LegacyDraft) -> ComposerDraft {
+fn wire_draft(draft: StoredDraft) -> ComposerDraft {
     ComposerDraft {
         text: draft.text,
         attachments: draft
@@ -194,8 +187,8 @@ fn wire_draft(draft: LegacyDraft) -> ComposerDraft {
     }
 }
 
-fn legacy_draft(draft: ComposerDraft) -> LegacyDraft {
-    LegacyDraft {
+fn stored_draft(draft: ComposerDraft) -> StoredDraft {
+    StoredDraft {
         text: draft.text,
         attachments: draft
             .attachments
@@ -212,7 +205,7 @@ fn legacy_draft(draft: ComposerDraft) -> LegacyDraft {
     }
 }
 
-fn wire_drafts(drafts: LegacyDrafts) -> ComposerDrafts {
+fn wire_drafts(drafts: StoredDrafts) -> ComposerDrafts {
     ComposerDrafts {
         new_threads: drafts
             .new_sessions
@@ -227,17 +220,14 @@ fn wire_drafts(drafts: LegacyDrafts) -> ComposerDrafts {
     }
 }
 
-fn stored_drafts(context: &V8Context) -> Result<LegacyDrafts, Error> {
-    match call(context, Command::LoadComposerDrafts, Domain::General)? {
-        ResponsePayload::ComposerDrafts { drafts } => Ok(drafts),
-        other => Err(unexpected(&other)),
-    }
+fn stored_drafts(context: &V8Context) -> Result<StoredDrafts, Error> {
+    call(context.backend.composer_drafts(), Domain::General)
 }
 
 /// The keys of `drafts` that name no live orchestration project or thread
 /// (D6: drafts are keyed by orchestration ids, never legacy session ids):
 /// projects first, then threads.
-fn stale_keys(context: &V8Context, drafts: &LegacyDrafts) -> Result<(Vec<Uuid>, Vec<Uuid>), Error> {
+fn stale_keys(context: &V8Context, drafts: &StoredDrafts) -> Result<(Vec<Uuid>, Vec<Uuid>), Error> {
     let mut projects = Vec::new();
     for &project_id in drafts.new_sessions.keys() {
         if !live_project(context, project_id)? {
@@ -294,14 +284,14 @@ pub(super) fn apply_drafts(
             current: current.to_string(),
         }));
     }
-    let mut legacy = Vec::with_capacity(params.changes.len());
+    let mut stored = Vec::with_capacity(params.changes.len());
     let mut changes = Vec::with_capacity(params.changes.len());
     for change in params.changes {
         // An empty draft is a removal.
         let draft = change
             .draft
             .filter(|draft| !draft.text.is_empty() || !draft.attachments.is_empty());
-        // The storage keeps the legacy names; the keys are orchestration
+        // The stored document names its keys sessions; they are orchestration
         // ids. Only a live project or thread gets a draft; removing one of
         // anything else is a no-op.
         let target = match change.target {
@@ -321,9 +311,9 @@ pub(super) fn apply_drafts(
             }
             DraftTarget::Unknown => return Err(bad_request("changes.target", "unknown target")),
         };
-        legacy.push(ComposerDraftChange {
+        stored.push(ComposerDraftChange {
             target,
-            draft: draft.clone().map(legacy_draft),
+            draft: draft.clone().map(stored_draft),
         });
         changes.push(DraftChange {
             target: change.target,
@@ -333,7 +323,7 @@ pub(super) fn apply_drafts(
     // Prune the drafts of removed projects and deleted threads (and any
     // legacy session ids) on the way.
     let (stale_projects, stale_threads) = stale_keys(context, &stored_drafts(context)?)?;
-    legacy.extend(
+    stored.extend(
         stale_projects
             .into_iter()
             .map(|project_id| ComposerDraftTarget::NewSession { project_id })
@@ -348,8 +338,7 @@ pub(super) fn apply_drafts(
             }),
     );
     call(
-        context,
-        Command::ApplyComposerDraftChanges { changes: legacy },
+        context.backend.apply_composer_draft_changes(stored),
         Domain::General,
     )?;
     let revision = load_drafts(context)?.revision;

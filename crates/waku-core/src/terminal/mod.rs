@@ -13,8 +13,8 @@
 //! tree for the same ConPTY coverage and a blocking reader thread per
 //! terminal.
 //!
-//! Output is broadcast live as ephemeral `terminalOutput` events, each with
-//! its raw byte offset, and a filtered copy is retained ([`history`]) so a
+//! Output is handed live to the terminal's [`TerminalEvents`] sink, each
+//! chunk with its raw byte offset, and a filtered copy is retained ([`history`]) so a
 //! client attaching later — a second client, or the same one after a
 //! reconnect — replays a bounded tail first. The output thread appends to the
 //! history and broadcasts under one lock, which is what makes the offset in an
@@ -33,14 +33,11 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::event::{OnResize as _, WindowSize};
 use alacritty_terminal::tty::{self, ChildEvent, EventedPty as _, EventedReadWrite as _, Shell};
 use anyhow::{Context as _, bail};
-use base64::Engine as _;
 use parking_lot::Mutex;
 use polling::{Event, Events, PollMode, Poller};
-use waku_protocol::wire_event::{TerminalOutputPayload, TerminalResetPayload};
-use waku_protocol::{TERMINAL_REPLAY_BYTES, TerminalSnapshot};
+use waku_protocol::TERMINAL_REPLAY_BYTES;
 
 use self::history::{QueryFilter, TerminalHistory};
-use crate::{EventSink, WireDriverEvent};
 
 const CELL_WIDTH: u16 = 8;
 const CELL_HEIGHT: u16 = 16;
@@ -66,6 +63,51 @@ const SLAVE_ATTACH_RETRY: Duration = Duration::from_millis(4);
 #[cfg(unix)]
 const SHELL_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 
+/// What a terminal reports to whoever opened it. Every event is live-only:
+/// a client attaching later replays the retained history instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalEvent {
+    /// Raw PTY output starting at raw byte `offset`.
+    Output {
+        offset: u64,
+        data: Vec<u8>,
+    },
+    /// The retained output was dropped (a clear, or a restart that started
+    /// `generation`); attached clients clear their screen and scrollback.
+    Reset {
+        generation: u32,
+        offset: u64,
+    },
+    /// The shell exited; the retained output stays until a restart or close.
+    Exited,
+    Error(String),
+}
+
+/// Where a terminal's events go. Called on the terminal's output thread, so
+/// it must not block.
+pub type TerminalEvents = Arc<dyn Fn(TerminalEvent) + Send + Sync>;
+
+/// What a client needs to attach to a daemon terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalSnapshot {
+    /// Starts at zero and increments on every restart.
+    pub generation: u32,
+    pub cols: u16,
+    pub rows: u16,
+    /// The raw output offset `replay` ends at. Offsets count every byte the
+    /// PTY has produced since the terminal opened, across restarts.
+    pub offset: u64,
+    /// The tail of the retained output, with terminal queries and replies
+    /// stripped, starting on a line boundary when one is in range.
+    pub replay: Vec<u8>,
+    /// Earlier output exists that `replay` does not contain.
+    pub truncated: bool,
+    /// The shell has exited; the retained output stays until a restart or
+    /// close.
+    pub exited: bool,
+    pub exit_code: Option<i32>,
+}
+
 /// The most terminals one daemon keeps open. Each retains up to
 /// [`waku_protocol::TERMINAL_RETAINED_BYTES`] of output.
 pub const MAX_TERMINALS: usize = 64;
@@ -82,7 +124,7 @@ pub struct DaemonTerminal {
 /// State the output thread and requests share.
 struct Shared {
     state: Mutex<TerminalState>,
-    events: EventSink,
+    events: TerminalEvents,
 }
 
 struct TerminalState {
@@ -98,7 +140,7 @@ struct TerminalState {
 }
 
 impl DaemonTerminal {
-    pub fn open(cwd: &Path, cols: u16, rows: u16, events: EventSink) -> anyhow::Result<Self> {
+    pub fn open(cwd: &Path, cols: u16, rows: u16, events: TerminalEvents) -> anyhow::Result<Self> {
         let shell = crate::command_env::default_terminal_shell();
         let shell_args = crate::command_env::default_terminal_shell_args(&shell);
         Self::open_with_shell(
@@ -114,7 +156,7 @@ impl DaemonTerminal {
         cwd: &Path,
         cols: u16,
         rows: u16,
-        events: EventSink,
+        events: TerminalEvents,
         shell: Shell,
     ) -> anyhow::Result<Self> {
         if !cwd.is_dir() {
@@ -205,14 +247,10 @@ impl DaemonTerminal {
     pub fn clear(&self) {
         let mut state = self.shared.state.lock();
         state.history.clear();
-        let reset = TerminalResetPayload {
+        (self.shared.events)(TerminalEvent::Reset {
             generation: state.generation,
             offset: state.offset,
-        };
-        let _ = self
-            .shared
-            .events
-            .send_ephemeral(WireDriverEvent::TerminalReset(reset));
+        });
     }
 
     /// Replace the shell with a fresh one in the same directory and size.
@@ -228,14 +266,10 @@ impl DaemonTerminal {
             state.filter.reset();
             state.exited = false;
             state.exit_code = None;
-            let reset = TerminalResetPayload {
+            (self.shared.events)(TerminalEvent::Reset {
                 generation: state.generation,
                 offset: state.offset,
-            };
-            let _ = self
-                .shared
-                .events
-                .send_ephemeral(WireDriverEvent::TerminalReset(reset));
+            });
             // Taken before the new shell starts: everything it writes is at
             // or above this offset and reaches the caller live.
             TerminalSnapshot {
@@ -526,14 +560,8 @@ impl Shared {
         let mut retained = Vec::with_capacity(batch.len());
         state.filter.feed(batch, &mut retained);
         state.history.push(&retained);
-        let data = base64::engine::general_purpose::STANDARD.encode(&*batch);
-        batch.clear();
-        let _ =
-            self.events
-                .send_ephemeral(WireDriverEvent::TerminalOutput(TerminalOutputPayload {
-                    data,
-                    offset: Some(offset),
-                }));
+        let data = std::mem::replace(batch, Vec::with_capacity(READ_CHUNK));
+        (self.events)(TerminalEvent::Output { offset, data });
     }
 
     fn exited(&self, generation: u32, status: Option<std::process::ExitStatus>) {
@@ -543,13 +571,11 @@ impl Shared {
         }
         state.exited = true;
         state.exit_code = status.and_then(|status| status.code());
-        let _ = self.events.send_ephemeral(WireDriverEvent::TerminalExited);
+        (self.events)(TerminalEvent::Exited);
     }
 
     fn report_error(&self, message: String) {
-        let _ = self
-            .events
-            .send_ephemeral(WireDriverEvent::TerminalError(message));
+        (self.events)(TerminalEvent::Error(message));
     }
 }
 

@@ -12,9 +12,9 @@
 //! - no `serde_json::Value`, `untagged` or `flatten`: opaque provider JSON
 //!   travels as [`JsonText`], and maps are never `HashMap`s.
 //!
-//! The module is self-contained: it does not reuse the legacy v7 types in
+//! The module is self-contained: it does not reuse the types in
 //! [`crate::model`], whose enums reject unknown values. `legacy` holds the
-//! conversions the importer (#63) and the cutover (#55) need.
+//! conversions from them.
 
 #[macro_use]
 mod macros;

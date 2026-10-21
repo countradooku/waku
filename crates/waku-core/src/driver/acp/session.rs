@@ -20,23 +20,21 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
-use waku_protocol::model::{DriverEvent, ProviderResumeCursor, ReportedCommand};
+use waku_protocol::model::{ProviderResumeCursor, ReportedCommand};
 use waku_protocol::orchestration::*;
 
 use super::flavor::{self, AgentInfo, Flavor};
 use super::protocol::{Connection, Inbound, METHOD_NOT_FOUND, RpcError, decode};
 use super::questions::{QuestionKind, permission_reason};
 use super::selection::{self, ModelChoice};
-use crate::driver::DriverEventSender;
 use crate::driver::v2::coalescer::DeltaCoalescer;
 use crate::driver::v2::{
-    AdapterEvent, AdapterEventSender, Clock, ComputerUseControl, ContextBlock, DriverError,
-    DriverResult, DriverSession, EnsureThread, EntityKind, ForkPoint, ForkRequest, FrameDirection,
-    IdAllocator, Interrupt, NativeRef, NotReadyReason, ProcessExit, ProtocolReason,
-    ProviderThreadRef, ProviderTurnRef, RawFrameLog, ResumeThread, Rollback, RollbackOutcome,
-    RollbackTarget, RunRef, RuntimeReply, RuntimeResponse, Selection, Steer, ThreadDisposition,
-    ThreadSnapshot, TransportFactory, TurnAccepted, TurnOutcome, TurnStart, TurnTerminal,
-    wrap_synthetic_context,
+    AdapterEvent, AdapterEventSender, Clock, DriverError, DriverResult, DriverSession,
+    EnsureThread, EntityKind, ForkPoint, ForkRequest, FrameDirection, IdAllocator, Interrupt,
+    NativeRef, NotReadyReason, ProcessExit, ProtocolReason, ProviderThreadRef, ProviderTurnRef,
+    RawFrameLog, ResumeThread, Rollback, RollbackOutcome, RollbackTarget, RunRef, RuntimeReply,
+    RuntimeResponse, Selection, Steer, ThreadDisposition, ThreadSnapshot, TransportFactory,
+    TurnAccepted, TurnOutcome, TurnStart, TurnTerminal, wrap_synthetic_context,
 };
 
 const CHANNEL: &str = "main";
@@ -61,10 +59,6 @@ pub struct Setup {
     pub ids: Arc<dyn IdAllocator>,
     pub clock: Arc<dyn Clock>,
     pub raw_log: Arc<dyn RawFrameLog>,
-    /// Today's desktop events that have no `AdapterEvent` yet (commands,
-    /// native titles, the resume cursor); set only behind the `V1Bridge`.
-    pub legacy: Option<DriverEventSender>,
-    pub computer_use: Option<crate::driver::support::HeadlessComputerUseRuntime>,
 }
 
 /// The ACP session currently loaded on the connection.
@@ -139,11 +133,6 @@ struct State {
     capture: Option<Vec<Value>>,
     coalescer: DeltaCoalescer,
     requests: HashMap<String, PendingRequest>,
-    /// Context for the first turn (a legacy Cursor fork's history).
-    pending_context: Vec<ContextBlock>,
-    /// A session created at open for the legacy desktop, bound by the first
-    /// `ensure_thread`.
-    eager: Option<String>,
 }
 
 pub struct Shared {
@@ -176,7 +165,6 @@ impl Shared {
         connection: Connection,
         events: AdapterEventSender,
         selection: Selection,
-        pending_context: Vec<ContextBlock>,
     ) -> Self {
         let coalescer = DeltaCoalescer::new(setup.clock.clone());
         Self {
@@ -193,8 +181,6 @@ impl Shared {
                 capture: None,
                 coalescer,
                 requests: HashMap::new(),
-                pending_context,
-                eager: None,
             }),
             stderr: Mutex::new(VecDeque::new()),
             op: tokio::sync::Mutex::new(()),
@@ -245,12 +231,6 @@ impl Shared {
         self.setup
             .raw_log
             .record(CHANNEL, FrameDirection::Inbound, frame);
-    }
-
-    fn legacy(&self, event: DriverEvent) {
-        if let Some(legacy) = &self.setup.legacy {
-            let _ = legacy.send(event);
-        }
     }
 
     async fn emit(&self, events: Vec<AdapterEvent>) {
@@ -334,9 +314,6 @@ impl Shared {
             config_options,
             applied: choice,
         });
-        self.legacy(DriverEvent::Connected {
-            provider_cursor: self.cursor(&id),
-        });
     }
 
     fn model_error(&self, error: &str) {
@@ -345,10 +322,6 @@ impl Shared {
             FrameDirection::Note,
             &format!("model selection failed: {error}"),
         );
-        self.legacy(DriverEvent::Error(tr!(
-            "errors.select_model",
-            error = error
-        )));
     }
 
     /// `session/new`.
@@ -372,13 +345,6 @@ impl Shared {
             .to_owned();
         self.activate(id.clone(), &response).await;
         Ok(id)
-    }
-
-    /// Creates the session the legacy desktop expects at startup.
-    pub async fn eager_session(&self) -> DriverResult<()> {
-        let id = self.new_session().await?;
-        self.state.lock().eager = Some(id);
-        Ok(())
     }
 
     /// `session/resume` if advertised, else `session/load` with its replay
@@ -417,9 +383,6 @@ impl Shared {
     /// the v1 driver did.
     async fn ensure_active(&self, native: &str) -> DriverResult<String> {
         if native.is_empty() {
-            if let Some(eager) = self.state.lock().eager.take() {
-                return Ok(eager);
-            }
             return self.new_session().await;
         }
         if self
@@ -816,9 +779,7 @@ impl Shared {
                 provider_turn: Some(reference),
             });
         }
-        let mut blocks = std::mem::take(&mut self.state.lock().pending_context);
-        blocks.extend(req.app_context.iter().cloned());
-        let text = wrap_synthetic_context(&blocks, &req.message.text);
+        let text = wrap_synthetic_context(&req.app_context, &req.message.text);
         let mut params = json!({
             "sessionId": native,
             "prompt": [{ "type": "text", "text": text }],
@@ -1041,7 +1002,6 @@ impl Shared {
                                 .filter(|description| !description.is_empty()),
                         })
                         .collect();
-                    self.legacy(DriverEvent::AvailableCommands(commands));
                     self.emit(vec![AdapterEvent::AvailableCommandsUpdated {
                         commands: reported,
                     }])
@@ -1049,17 +1009,7 @@ impl Shared {
                 }
                 return;
             }
-            "session_info_update" => {
-                if update.get("title").is_some() {
-                    self.legacy(DriverEvent::AutoTitleUpdated(
-                        update
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                    ));
-                }
-                return;
-            }
+            "session_info_update" => return,
             // Waku's own prompt echoed back.
             "user_message_chunk" => return,
             _ => {}
@@ -1562,9 +1512,6 @@ impl Shared {
     }
 
     async fn close(&self) {
-        if let Some(runtime) = &self.setup.computer_use {
-            runtime.stop();
-        }
         self.connection.close().await;
     }
 }
@@ -1940,35 +1887,9 @@ impl DriverSession for AcpSession {
         Ok(())
     }
 
-    fn computer_use(&self) -> Option<&dyn ComputerUseControl> {
-        self.shared
-            .setup
-            .computer_use
-            .as_ref()
-            .map(|_| self as &dyn ComputerUseControl)
-    }
-
     async fn close(&self) -> DriverResult<()> {
         self.shared.close().await;
         Ok(())
-    }
-}
-
-impl ComputerUseControl for AcpSession {
-    // Grok drives Computer Use through its own MCP server; Waku only stops it.
-    fn run_computer_tool(&self, _request: crate::computer_use::ComputerToolRequest) {}
-
-    fn reject_computer_tool(
-        &self,
-        _request: crate::computer_use::ComputerToolRequest,
-        _reason: String,
-    ) {
-    }
-
-    fn cancel_computer_use(&self) {
-        if let Some(runtime) = &self.shared.setup.computer_use {
-            runtime.stop();
-        }
     }
 }
 

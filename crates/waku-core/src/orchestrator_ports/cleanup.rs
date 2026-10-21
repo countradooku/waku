@@ -12,9 +12,8 @@ use waku_protocol::orchestration::ThreadId;
 use crate::attachments::AttachmentStore;
 use crate::terminal::DaemonTerminal;
 
-/// The daemon's open terminals: one per thread (session), with the runtime
-/// that owns it. This is the shape `WakuBackend` keeps today.
-pub type TerminalMap = Mutex<HashMap<Uuid, (Uuid, Arc<DaemonTerminal>)>>;
+/// The daemon's open terminals by id.
+pub type TerminalMap = Mutex<HashMap<Uuid, Arc<DaemonTerminal>>>;
 
 /// Closes the terminals of a thread.
 pub trait ThreadTerminals: Send + Sync {

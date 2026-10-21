@@ -18,7 +18,6 @@ use anyhow::{Context as _, anyhow, bail};
 use waku_core::daemon::WakuBackend;
 use waku_core::daemon_host::{DaemonHost, HostOptions};
 use waku_core::model::ProviderKind;
-use waku_core::persistence::StateStore;
 use waku_core::{DaemonSettingsStore, ServerOptions};
 
 #[global_allocator]
@@ -85,10 +84,7 @@ fn main() -> anyhow::Result<()> {
     }
     document.set_continue_threads_after_restart(arguments.continue_after_restart);
     settings.replace(document)?;
-    let backend = Arc::new(WakuBackend::new(
-        settings,
-        StateStore::daemon(arguments.root.join("app.db")),
-    )?);
+    let backend = Arc::new(WakuBackend::new(settings, arguments.root.to_path_buf())?);
     let host = DaemonHost::start(&backend, HostOptions::default())?;
     let local = waku_core::LocalListener::bind(&arguments.socket)?;
     let ready = serde_json::json!({

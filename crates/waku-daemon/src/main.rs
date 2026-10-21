@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow, bail};
-use waku_protocol::{DAEMON_TOKEN_ENV, DaemonReady, PROTOCOL_VERSION};
+use waku_protocol::{DAEMON_TOKEN_ENV, DaemonReady};
 
 /// mimalloc rather than the system allocator (#30): the daemon allocates and
 /// drops a JSON tree per event and per request. Same-machine A/B against
@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
         socket: local
             .as_ref()
             .map(|local| local.path().to_string_lossy().into_owned()),
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: u32::from(waku_protocol::v8::PROTOCOL_MAJOR),
         pid: std::process::id(),
     };
     println!("{}", serde_json::to_string(&ready)?);
@@ -82,14 +82,12 @@ fn main() -> anyhow::Result<()> {
             })?;
     }
 
-    let task_path = waku_core::persistence::StateStore::default_path();
-    let settings = waku_core::DaemonSettingsStore::open_with_legacy(
-        waku_core::DaemonSettings::default_path(),
-        [task_path.with_file_name("settings.json")],
-    )
-    .context("could not load daemon settings")?;
-    let task_store = waku_core::persistence::StateStore::daemon(task_path);
-    let backend = Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?);
+    let settings = waku_core::DaemonSettingsStore::open(waku_core::DaemonSettings::default_path())
+        .context("could not load daemon settings")?;
+    let backend = Arc::new(waku_core::daemon::WakuBackend::new(
+        settings,
+        waku_core::persistence::default_data_dir(),
+    )?);
     waku_core::daemon::start_worktree_cleanup_scheduler(&backend)
         .context("could not start worktree cleanup")?;
     // The orchestrator is the source of truth (#55): opened, reconciled and

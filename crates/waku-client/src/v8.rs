@@ -1,8 +1,6 @@
-//! The protocol v8 client (RFC 0003 §2.7), beside the legacy [`DaemonClient`]
-//! until the desktop switches over (#53).
+//! The protocol v8 client (RFC 0003 §2.7).
 //!
-//! Like the legacy client, a [`V8Client`] owns one thread running a
-//! current-thread tokio runtime: a reader blocked on the socket and a writer
+//! A [`V8Client`] owns one thread running a current-thread tokio runtime: a reader blocked on the socket and a writer
 //! blocked on its queue, with keepalive as a timeout around the writer's
 //! wait. Callers never see the runtime: calls block on crossbeam channels and
 //! stream events arrive on crossbeam receivers.
@@ -12,8 +10,6 @@
 //! MessagePack frames. A subscription that the daemon ends with `overflow` is
 //! resubscribed from its last delivered cursor without the caller noticing
 //! anything but a [`StreamEvent::Resumed`].
-//!
-//! [`DaemonClient`]: crate::DaemonClient
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -195,6 +191,17 @@ pub struct V8Client {
     inner: Arc<Inner>,
 }
 
+/// The address form of a daemon's local endpoint, as [`V8Client::connect`]
+/// accepts it: `unix:<path>` for a Unix socket, `pipe:<name>` for a Windows
+/// named pipe.
+pub fn local_endpoint_address(socket: &str) -> String {
+    if cfg!(windows) {
+        format!("pipe:{socket}")
+    } else {
+        format!("unix:{socket}")
+    }
+}
+
 /// Where a [`V8Client`] connects.
 #[derive(Debug, PartialEq)]
 enum Endpoint {
@@ -294,6 +301,11 @@ impl V8Client {
 
     pub fn is_disconnected(&self) -> bool {
         self.inner.disconnected.load(Ordering::Acquire)
+    }
+
+    /// Whether `other` is a handle to this same connection.
+    pub fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Run `callback` once when the connection closes (at once if it has).

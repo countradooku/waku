@@ -28,9 +28,8 @@ use waku_protocol::v8::orchestration::{
 use waku_protocol::v8::{EndReason, ErrorCode, StreamCursor, StreamItem, codec};
 
 use super::orchestration::Orchestration;
-use super::{BackendHandle, SettingsBus, V8Context};
-use crate::protocol::{Request, ResponsePayload};
-use crate::server::{Backend, EventSink, ShutdownSignal};
+use super::{SettingsBus, V8Context};
+use crate::server::{Backend, ShutdownSignal};
 
 const TOKEN: &str = "orchestration-secret";
 const START: Timestamp = 1_700_000_000_000;
@@ -38,14 +37,11 @@ const START: Timestamp = 1_700_000_000_000;
 struct BlobBackend;
 
 impl Backend for BlobBackend {
-    fn handle(&self, request: Request, _events: EventSink) -> anyhow::Result<ResponsePayload> {
-        match request.command {
-            crate::protocol::Command::StoreBlob { bytes, .. } => Ok(ResponsePayload::BlobStored {
-                reference: format!("waku-blob:{}.png", bytes.len()),
-                path: PathBuf::from("/blobs"),
-            }),
-            _ => anyhow::bail!("not supported by the test backend"),
-        }
+    fn store_blob(&self, _mime_type: &str, bytes: &[u8]) -> anyhow::Result<(String, PathBuf)> {
+        Ok((
+            format!("waku-blob:{}.png", bytes.len()),
+            PathBuf::from("/blobs"),
+        ))
     }
 }
 
@@ -84,7 +80,7 @@ impl Served {
         let context = Arc::new(
             V8Context::new(
                 TOKEN.into(),
-                BackendHandle::new(Arc::new(BlobBackend), crate::server::test_event_sink()),
+                Arc::new(BlobBackend),
                 SettingsBus::default(),
                 ShutdownSignal::new(),
             )

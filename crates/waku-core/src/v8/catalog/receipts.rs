@@ -1,7 +1,7 @@
 //! `opId` receipts (RFC 0003 §2.3): a mutation re-sent with an `opId` the
 //! daemon already ran returns the stored result instead of running again.
 //!
-//! The bounds are the legacy response cache's: 2,048 receipts, 64 MiB of
+//! The bounds are those of the former v7 response cache: 2,048 receipts, 64 MiB of
 //! encoded results, 10 minutes. A retry that arrives while the first
 //! attempt still runs waits for it. Only successes are stored, so a failed
 //! mutation can be retried for real.

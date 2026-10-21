@@ -7,7 +7,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::ts::TS;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -25,7 +24,7 @@ pub const WORKTREE_BRANCH_PREFIX: &str = "waku/";
 
 /// How much local work keeps a worktree on disk. Unpushed commits are
 /// governed separately by [`WorktreeCleanupSettings::remove_unpushed_commits`].
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeKeepWhen {
     /// Keep a worktree with modified, untracked or ignored files. Dependency
@@ -49,7 +48,7 @@ impl WorktreeKeepWhen {
 
 /// Automatic worktree cleanup rules. Every rule is off by default, so an
 /// existing installation never loses a worktree until the user opts in.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct WorktreeCleanupSettings {
     /// Remove a worktree whose tasks have had no activity for this many days.
@@ -112,7 +111,7 @@ impl WorktreeCleanupSettings {
 }
 
 /// Daemon storage settings: the managed worktree folder and its cleanup.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct StorageSettings {
     /// Where new worktrees are created; `None` is `~/.waku-fork/worktrees`.
@@ -191,14 +190,14 @@ pub fn validate_worktrees_directory(
     Ok(normalized)
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeCleanupTrigger {
     Automatic,
     Manual,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeCleanupOutcome {
     Removed,
@@ -208,7 +207,7 @@ pub enum WorktreeCleanupOutcome {
 
 /// Why a worktree was removed, kept, or could not be removed. Clients
 /// localize these; `base` names the branch the worktree was compared with.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
@@ -241,7 +240,7 @@ pub enum WorktreeCleanupReason {
     Error { message: String },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorktreeCleanupEntry {
     pub path: PathBuf,
     pub branch: Option<String>,
@@ -253,7 +252,7 @@ pub struct WorktreeCleanupEntry {
     pub branch_deleted: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorktreeCleanupReport {
     pub trigger: WorktreeCleanupTrigger,
     /// Unix seconds.
@@ -295,7 +294,7 @@ impl WorktreeCleanupReport {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorktreeCleanupStatus {
     /// Unix seconds of the last finished run, automatic or manual.
     pub last_run_at: Option<u64>,

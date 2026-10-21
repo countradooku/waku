@@ -29,7 +29,6 @@ use waku_client::v8::V8Client;
 use waku_core::daemon::WakuBackend;
 use waku_core::daemon_host::{DaemonHost, HostOptions};
 use waku_core::model::{ActivityKind, MessageRole, ProviderKind, SessionStatus, TurnStatus};
-use waku_core::persistence::StateStore;
 use waku_core::{DaemonSettings, DaemonSettingsStore, ServerOptions};
 
 const TOKEN: &str = "desktop-client-secret";
@@ -51,8 +50,7 @@ impl Daemon {
             .provider_binary_overrides
             .insert(ProviderKind::Codex, codex.display().to_string());
         settings.replace(document).unwrap();
-        let backend =
-            Arc::new(WakuBackend::new(settings, StateStore::daemon(root.join("app.db"))).unwrap());
+        let backend = Arc::new(WakuBackend::new(settings, root.to_path_buf()).unwrap());
         let host = DaemonHost::start(&backend, HostOptions::default()).unwrap();
         let socket = root.join("d.sock");
         let _ = std::fs::remove_file(&socket);

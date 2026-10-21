@@ -7,7 +7,6 @@ use super::entities::*;
 use super::ids::*;
 use super::turn_item::TurnItem;
 use super::values::DriverKind;
-use crate::ts::TS;
 
 open_enum! {
     /// Why a thread snapshot was emitted. Keeps the audit trail that T3's
@@ -49,7 +48,7 @@ open_enum! {
 }
 
 /// The payload of `thread.updated`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadUpdate {
@@ -59,7 +58,7 @@ pub struct ThreadUpdate {
 
 /// A committed domain fact. Internally tagged by `type` (RFC 0003 §1.1) so an
 /// unknown event type skips its payload and decodes to `Unknown`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type")]
 pub enum DomainEvent {
@@ -303,7 +302,7 @@ impl DomainEvent {
 }
 
 /// An event as committed: what streams send as `event{sequence, …}`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct StoredEvent {

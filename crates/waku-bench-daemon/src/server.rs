@@ -27,7 +27,6 @@ use serde_json::json;
 use uuid::Uuid;
 use waku_core::daemon::WakuBackend;
 use waku_core::daemon_host::{DaemonHost, HostOptions};
-use waku_core::persistence::StateStore;
 use waku_core::{DaemonSettingsStore, ServerOptions};
 use waku_orchestrator::Orchestrator;
 use waku_orchestrator::feed::{CommittedFeed, FeedEnded};
@@ -198,10 +197,7 @@ impl BenchServer {
             .filter(|provider| !BENCH_PROVIDERS.contains(provider))
             .collect();
         settings.replace(document)?;
-        let backend = Arc::new(WakuBackend::new(
-            settings,
-            StateStore::daemon(state_dir.join("app.db")),
-        )?);
+        let backend = Arc::new(WakuBackend::new(settings, state_dir.to_path_buf())?);
         waku_core::daemon::start_worktree_cleanup_scheduler(&backend)
             .context("could not start worktree cleanup")?;
         let host = DaemonHost::start(&backend, HostOptions::default())

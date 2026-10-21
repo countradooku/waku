@@ -14,7 +14,6 @@ use waku_protocol::orchestration::ModelSelection;
 use waku_protocol::v8::*;
 
 use crate::daemon::WakuBackend;
-use crate::persistence::StateStore;
 use crate::server::{Listeners, ServerOptions, ShutdownSignal, serve_listeners};
 use crate::settings::DaemonSettingsStore;
 
@@ -154,7 +153,7 @@ impl Daemon {
         );
         let backend = WakuBackend::new(
             DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
-            StateStore::daemon(root.join("app.db")),
+            root.to_path_buf(),
         )
         .unwrap()
         .with_terminal_shell(shell);
@@ -1174,12 +1173,12 @@ fn provider_sessions_leave_out_conversations_a_live_thread_holds() {
     );
     let backend = WakuBackend::new(
         DaemonSettingsStore::open(root.path().join("settings.json")).unwrap(),
-        StateStore::daemon(root.path().join("app.db")),
+        root.path().to_path_buf(),
     )
     .unwrap();
     let context = crate::v8::V8Context::new(
         TOKEN.into(),
-        crate::v8::BackendHandle::new(Arc::new(backend), crate::server::test_event_sink()),
+        Arc::new(backend),
         crate::v8::SettingsBus::default(),
         ShutdownSignal::new(),
     )

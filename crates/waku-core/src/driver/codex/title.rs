@@ -1,5 +1,5 @@
 //! One-shot Codex title generation for the orchestrator's `TitlePort`
-//! (RFC 0001) and the `V1Bridge` session's auto title.
+//! (RFC 0001).
 //!
 //! Codex's app-server persists a thread name but does not generate one, so,
 //! as Codex Desktop does, an isolated ephemeral turn on a short-lived

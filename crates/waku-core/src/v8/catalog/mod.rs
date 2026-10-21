@@ -3,10 +3,9 @@
 //! completion, skills, drafts, settings and storage, blobs and attachments,
 //! and the daemon itself.
 //!
-//! Every method is an adapter over the same backend the legacy protocol
-//! uses ([`BackendHandle`](super::BackendHandle) and the backend functions
-//! behind it), so both protocols see one daemon state while clients move
-//! over. Mutations are idempotent by `opId` through [`receipts`].
+//! Every method is an adapter over the daemon's [`Backend`](crate::Backend)
+//! and the functions behind it. Mutations are idempotent by `opId` through
+//! [`receipts`].
 
 mod blobs;
 mod composer;
@@ -26,7 +25,6 @@ use waku_protocol::v8::{Error, ErrorCode, ErrorDetails, Method, MethodResult};
 
 use super::V8Context;
 use super::connection::{Conn, DataChunk, StreamSink};
-use crate::protocol::{Command, ResponsePayload};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
 pub(crate) use blobs::store_blob;
@@ -236,16 +234,6 @@ pub(super) fn internal(error: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Internal, error.to_string())
 }
 
-fn unexpected(payload: &ResponsePayload) -> Error {
-    Error::new(
-        ErrorCode::Internal,
-        format!(
-            "unexpected backend response {}",
-            super::payload_name(payload)
-        ),
-    )
-}
-
 pub(super) fn bad_request(field: &str, reason: impl Into<String>) -> Error {
     let reason = reason.into();
     Error::new(ErrorCode::BadRequest, format!("{field}: {reason}")).with_details(
@@ -332,15 +320,9 @@ pub(super) fn backend_error(error: anyhow::Error, domain: Domain) -> Error {
 }
 
 /// Run a legacy command on the backend, with no session.
-pub(super) fn call(
-    context: &V8Context,
-    command: Command,
-    domain: Domain,
-) -> Result<ResponsePayload, Error> {
-    context
-        .backend
-        .call(command)
-        .map_err(|error| backend_error(error, domain))
+/// A backend call's result as a v8 error of `domain`.
+pub(super) fn call<T>(result: anyhow::Result<T>, domain: Domain) -> Result<T, Error> {
+    result.map_err(|error| backend_error(error, domain))
 }
 
 /// Run a workspace operation on the backend.
@@ -349,10 +331,7 @@ pub(super) fn workspace(
     operation: WorkspaceOperation,
     domain: Domain,
 ) -> Result<WorkspaceResult, Error> {
-    match call(context, Command::Workspace { operation }, domain)? {
-        ResponsePayload::Workspace { result } => Ok(result),
-        other => Err(unexpected(&other)),
-    }
+    call(context.backend.workspace(operation), domain)
 }
 
 pub(super) fn path_string(path: &Path) -> Result<String, Error> {

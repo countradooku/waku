@@ -23,7 +23,6 @@ use waku_client::v8::{
 use waku_core::daemon::WakuBackend;
 use waku_core::daemon_host::{DaemonHost, HostOptions};
 use waku_core::model::ProviderKind;
-use waku_core::persistence::StateStore;
 use waku_core::{DaemonSettings, DaemonSettingsStore, ServerOptions};
 use waku_protocol::orchestration::*;
 use waku_protocol::v8::orchestration::{DispatchCommand, DispatchParams};
@@ -72,8 +71,7 @@ impl Daemon {
 
         let settings = DaemonSettingsStore::open(root.join("settings.json")).unwrap();
         settings.replace(DaemonSettings::default()).unwrap();
-        let backend =
-            Arc::new(WakuBackend::new(settings, StateStore::daemon(root.join("app.db"))).unwrap());
+        let backend = Arc::new(WakuBackend::new(settings, root.to_path_buf()).unwrap());
         let host = DaemonHost::start(&backend, HostOptions::default()).unwrap();
         let socket = root.join("d.sock");
         let local = waku_core::LocalListener::bind(&socket).unwrap();

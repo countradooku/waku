@@ -20,8 +20,7 @@ use uuid::Uuid;
 
 use super::protocol::{Connection, Inbound, decode};
 use crate::driver::v2::{
-    DriverError, DriverResult, NullRawLog, ProcessSpec, ProtocolReason, RawFrameLog,
-    TransportFactory,
+    DriverError, DriverResult, ProcessSpec, ProtocolReason, RawFrameLog, TransportFactory,
 };
 
 /// The replay channel of the side process.
@@ -169,40 +168,6 @@ async fn native_fork(
     let _ = read.await;
     let _ = transport.exit.await;
     result
-}
-
-/// The synchronous entry the legacy daemon fork and rewind paths use until
-/// the orchestrator cutover: the same fork, on real processes.
-pub fn fork_session_at_turn_blocking(
-    binary: &Path,
-    cwd: &Path,
-    source: &str,
-    retained_turns: usize,
-) -> anyhow::Result<String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("could not start the Grok fork runtime")?;
-    let transports: Arc<dyn TransportFactory> =
-        Arc::new(crate::driver::v2::ProcessTransportFactory);
-    let home = grok_home(
-        &dirs::home_dir().ok_or_else(|| anyhow!("Grok's home directory could not be located"))?,
-        false,
-    );
-    runtime
-        .block_on(fork_session(
-            &transports,
-            binary,
-            cwd,
-            &home,
-            source,
-            Some(retained_turns),
-            Arc::new(NullRawLog),
-        ))
-        .map_err(|error| match error {
-            DriverError::Protocol { detail, .. } => anyhow!(detail),
-            other => anyhow!(other.to_string()),
-        })
 }
 
 pub fn find_session_directory_in(grok_home: &Path, session_id: &str) -> anyhow::Result<PathBuf> {

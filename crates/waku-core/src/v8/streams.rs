@@ -10,7 +10,6 @@ use waku_protocol::v8::{
 
 use super::V8Context;
 use super::connection::StreamSink;
-use crate::protocol::{Command, ResponsePayload};
 
 /// `settings`: a snapshot (skipped when `after` is the current revision),
 /// `synchronized`, then `updated` on every change.
@@ -27,7 +26,7 @@ pub(crate) async fn settings(
         None => {
             let backend = context.backend.clone();
             let bus = context.settings.clone();
-            match tokio::task::spawn_blocking(move || backend.load_settings(&bus)).await {
+            match tokio::task::spawn_blocking(move || super::load_settings(&*backend, &bus)).await {
                 Ok(Ok(current)) => current,
                 Ok(Err(error)) => {
                     sink.end(EndReason::Error {
@@ -88,22 +87,14 @@ pub(crate) async fn blob_download(
 ) {
     let backend = context.backend.clone();
     let reference = spec.reference.clone();
+    let path = spec.path.clone();
     // A file inside an attachment, or a blob.
-    let command = match spec.path.clone() {
-        Some(path) => Command::ReadAttachment {
-            reference,
-            path: path.into(),
-        },
-        None => Command::ReadBlob { reference },
+    let read = move || match path {
+        Some(path) => backend.read_attachment(&reference, std::path::Path::new(&path)),
+        None => backend.read_blob(&reference),
     };
-    let bytes = match tokio::task::spawn_blocking(move || backend.call(command)).await {
-        Ok(Ok(ResponsePayload::BlobData { bytes })) => bytes,
-        Ok(Ok(_)) => {
-            sink.end(EndReason::Error {
-                error: Error::new(ErrorCode::Internal, "unexpected blob response"),
-            });
-            return;
-        }
+    let bytes = match tokio::task::spawn_blocking(read).await {
+        Ok(Ok(bytes)) => bytes,
         Ok(Err(error)) => {
             sink.end(EndReason::Error {
                 error: Error::new(ErrorCode::NotFound, format!("{error:#}")).with_details(

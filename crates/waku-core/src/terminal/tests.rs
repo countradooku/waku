@@ -1,108 +1,91 @@
-//! Daemon terminals over a real WebSocket daemon (#60): replay on attach,
-//! several attached clients, resize, clear, restart and exit. The desktop's
-//! v8 terminal link is exercised in `waku-bench-daemon`'s
-//! `desktop_surfaces` test. The shells are `/bin/sh` scripts, so these run on Unix;
-//! the PTY code itself is shared with Windows.
+//! Daemon terminals through the daemon's backend (#60): replay on attach,
+//! several viewers of one terminal, resize, clear, restart, exit and close.
+//! The v8 terminal streams are exercised in `v8::catalog`'s tests and the
+//! desktop's v8 terminal link in `waku-bench-daemon`'s `desktop_surfaces`
+//! test. The shells are `/bin/sh` scripts, so these run on Unix; the PTY
+//! code itself is shared with Windows.
 
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use base64::Engine as _;
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+use parking_lot::Mutex;
 use uuid::Uuid;
-use waku_client::DaemonClient;
-use waku_protocol::{Command, ResponsePayload, SequencedEvent, TerminalSnapshot, WireDriverEvent};
 
+use super::{DaemonTerminal, TerminalEvent, TerminalEvents, TerminalSnapshot};
+use crate::Backend;
 use crate::daemon::WakuBackend;
-use crate::persistence::StateStore;
 use crate::settings::DaemonSettingsStore;
-use crate::{ServerOptions, ShutdownSignal, serve};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A backend whose terminals run `script` in `/bin/sh`.
 struct TestDaemon {
     root: PathBuf,
-    address: String,
-    shutdown: ShutdownSignal,
-    server: Option<JoinHandle<()>>,
+    backend: WakuBackend,
 }
 
 impl TestDaemon {
     fn start(script: &str) -> Self {
         let root = std::env::temp_dir().join(format!("waku-terminal-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        // Do not load the developer's or CI runner's login files, prompt
-        // plugins, or terminal capability queries in a transport test.
-        let shell =
-            alacritty_terminal::tty::Shell::new("/bin/sh".into(), vec!["-c".into(), script.into()]);
         let backend = WakuBackend::new(
             DaemonSettingsStore::open(root.join("settings.json")).unwrap(),
-            StateStore::daemon(root.join("app.db")),
+            root.join("data"),
         )
         .unwrap()
-        .with_terminal_shell(shell);
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap().to_string();
-        let shutdown = ShutdownSignal::new();
-        let server_shutdown = shutdown.clone();
-        let server = std::thread::spawn(move || {
-            serve(
-                listener,
-                "secret".into(),
-                Arc::new(backend),
-                server_shutdown,
-                ServerOptions::default(),
-            )
-            .unwrap()
-        });
-        Self {
-            root,
-            address,
-            shutdown,
-            server: Some(server),
-        }
-    }
-
-    fn connect(&self) -> DaemonClient {
-        DaemonClient::connect(&self.address, "secret".into()).unwrap()
+        .with_terminal_shell(shell(script));
+        Self { root, backend }
     }
 }
 
 impl Drop for TestDaemon {
     fn drop(&mut self) {
-        self.shutdown.trigger();
-        if let Some(server) = self.server.take() {
-            let _ = server.join();
-        }
+        self.backend.shutdown();
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
-fn request(client: &DaemonClient, terminal_id: Uuid, command: Command) -> ResponsePayload {
-    client.request(terminal_id, terminal_id, command).unwrap()
+/// Do not load the developer's or CI runner's login files, prompt plugins,
+/// or terminal capability queries in a terminal test.
+fn shell(script: &str) -> alacritty_terminal::tty::Shell {
+    alacritty_terminal::tty::Shell::new("/bin/sh".into(), vec!["-c".into(), script.into()])
 }
 
-fn attach(client: &DaemonClient, terminal_id: Uuid, size: Option<(u16, u16)>) -> TerminalSnapshot {
-    match request(
-        client,
-        terminal_id,
-        Command::AttachTerminal {
-            cols: size.map(|(cols, _)| cols),
-            rows: size.map(|(_, rows)| rows),
-            max_replay_bytes: None,
-        },
-    ) {
-        ResponsePayload::TerminalAttached { terminal } => terminal,
-        other => panic!("unexpected attach response: {other:?}"),
+/// A terminal's events, fanned out to every viewer that joined so far, the
+/// way the v8 terminal broadcasts them to its subscribers.
+#[derive(Clone, Default)]
+struct Viewers(Arc<Mutex<Vec<Sender<TerminalEvent>>>>);
+
+impl Viewers {
+    fn sink(&self) -> TerminalEvents {
+        let viewers = self.clone();
+        Arc::new(move |event| {
+            viewers
+                .0
+                .lock()
+                .retain(|viewer| viewer.send(event.clone()).is_ok());
+        })
     }
+
+    fn join(&self) -> Receiver<TerminalEvent> {
+        let (sender, receiver) = unbounded();
+        self.0.lock().push(sender);
+        receiver
+    }
+}
+
+fn attach(daemon: &TestDaemon, id: Uuid) -> TerminalSnapshot {
+    daemon
+        .backend
+        .attach_terminal(id, None, None, None)
+        .unwrap()
 }
 
 /// Live output from `events` until `marker` appears, with each chunk's
 /// offset.
-fn output_until(events: &Receiver<SequencedEvent>, marker: &[u8]) -> (Vec<u8>, Vec<u64>) {
+fn output_until(events: &Receiver<TerminalEvent>, marker: &[u8]) -> (Vec<u8>, Vec<u64>) {
     let deadline = Instant::now() + TIMEOUT;
     let mut output = Vec::new();
     let mut offsets = Vec::new();
@@ -115,30 +98,26 @@ fn output_until(events: &Receiver<SequencedEvent>, marker: &[u8]) -> (Vec<u8>, V
                 String::from_utf8_lossy(&output)
             );
         };
-        if let WireDriverEvent::TerminalOutput(chunk) = event.event {
-            offsets.extend(chunk.offset);
-            output.extend(
-                base64::engine::general_purpose::STANDARD
-                    .decode(&chunk.data)
-                    .unwrap(),
-            );
+        if let TerminalEvent::Output { offset, data } = event {
+            offsets.push(offset);
+            output.extend(data);
         }
     }
     (output, offsets)
 }
 
 fn next_matching(
-    events: &Receiver<SequencedEvent>,
-    mut matches: impl FnMut(&WireDriverEvent) -> bool,
-) -> WireDriverEvent {
+    events: &Receiver<TerminalEvent>,
+    mut matches: impl FnMut(&TerminalEvent) -> bool,
+) -> TerminalEvent {
     let deadline = Instant::now() + TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let event = events
             .recv_timeout(remaining)
             .expect("the expected terminal event never arrived");
-        if matches(&event.event) {
-            return event.event;
+        if matches(&event) {
+            return event;
         }
     }
 }
@@ -156,47 +135,34 @@ const ECHO_SHELL: &str = "printf 'ready\\n'\n\
     done";
 
 #[test]
-fn a_second_client_attaches_with_a_stripped_replay_and_shares_the_terminal() {
+fn a_second_viewer_attaches_with_a_stripped_replay_and_shares_the_terminal() {
     let daemon = TestDaemon::start(ECHO_SHELL);
-    let first = daemon.connect();
+    let viewers = Viewers::default();
+    let first = viewers.join();
     let terminal_id = Uuid::new_v4();
-    let first_events = first.subscribe(terminal_id, terminal_id);
-    request(
-        &first,
-        terminal_id,
-        Command::OpenTerminal {
-            cwd: daemon.root.clone(),
-            cols: 80,
-            rows: 24,
-        },
-    );
+    daemon
+        .backend
+        .open_terminal(terminal_id, &daemon.root, 80, 24, viewers.sink())
+        .unwrap();
     // Live output is unfiltered: the attached emulator answers the query.
-    let (live, _) = output_until(&first_events, b":end");
+    let (live, _) = output_until(&first, b":end");
     assert!(contains(&live, b"\x1b[6n"));
 
     // Resize, then let the shell report the PTY's size.
-    request(
-        &first,
-        terminal_id,
-        Command::ResizeTerminal {
-            cols: 100,
-            rows: 30,
-        },
-    );
-    request(
-        &first,
-        terminal_id,
-        Command::WriteTerminal {
-            data: b"size\r".to_vec(),
-        },
-    );
-    output_until(&first_events, b"30 100");
+    daemon
+        .backend
+        .resize_terminal(terminal_id, 100, 30)
+        .unwrap();
+    daemon
+        .backend
+        .write_terminal(terminal_id, b"size\r".to_vec())
+        .unwrap();
+    output_until(&first, b"30 100");
 
-    // A second client attaches and replays the retained tail, with the
+    // A second viewer attaches and replays the retained tail, with the
     // queries gone.
-    let second = daemon.connect();
-    let second_events = second.subscribe(terminal_id, terminal_id);
-    let snapshot = attach(&second, terminal_id, None);
+    let second = viewers.join();
+    let snapshot = attach(&daemon, terminal_id);
     let replay = String::from_utf8_lossy(&snapshot.replay).into_owned();
     assert!(replay.contains("ready"), "replay: {replay:?}");
     assert!(replay.contains("query::end"), "replay: {replay:?}");
@@ -207,136 +173,180 @@ fn a_second_client_attaches_with_a_stripped_replay_and_shares_the_terminal() {
     assert!(!snapshot.exited);
     assert!(snapshot.offset > 0);
 
-    // Input from either client reaches the one shell, and both see it.
-    request(
-        &second,
-        terminal_id,
-        Command::WriteTerminal {
-            data: b"from-second\r".to_vec(),
-        },
-    );
-    let (_, offsets) = output_until(&second_events, b"received:from-second");
+    // Input reaches the one shell, and both viewers see it.
+    daemon
+        .backend
+        .write_terminal(terminal_id, b"from-second\r".to_vec())
+        .unwrap();
+    let (_, offsets) = output_until(&second, b"received:from-second");
     assert!(
         offsets.iter().all(|offset| *offset >= snapshot.offset),
         "live chunks below the replay offset {}: {offsets:?}",
         snapshot.offset
     );
-    output_until(&first_events, b"received:from-second");
-    request(
-        &first,
-        terminal_id,
-        Command::WriteTerminal {
-            data: b"from-first\r".to_vec(),
-        },
-    );
-    output_until(&second_events, b"received:from-first");
+    output_until(&first, b"received:from-second");
 
-    request(&first, terminal_id, Command::CloseTerminal);
+    daemon.backend.close_terminal(terminal_id).unwrap();
     assert!(
-        second
-            .request(
-                terminal_id,
-                terminal_id,
-                Command::AttachTerminal {
-                    cols: None,
-                    rows: None,
-                    max_replay_bytes: None,
-                },
-            )
+        daemon
+            .backend
+            .attach_terminal(terminal_id, None, None, None)
             .is_err(),
         "a closed terminal still accepted an attach"
     );
 }
 
 #[test]
-fn clear_and_restart_reset_every_attached_client() {
+fn clear_and_restart_reset_every_viewer() {
     let daemon = TestDaemon::start(
         "printf 'started\\n'\nwhile IFS= read -r line; do printf 'received:%s\\n' \"$line\"; done",
     );
-    let client = daemon.connect();
+    let viewers = Viewers::default();
+    let events = viewers.join();
     let terminal_id = Uuid::new_v4();
-    let events = client.subscribe(terminal_id, terminal_id);
-    request(
-        &client,
-        terminal_id,
-        Command::OpenTerminal {
-            cwd: daemon.root.clone(),
-            cols: 80,
-            rows: 24,
-        },
-    );
+    daemon
+        .backend
+        .open_terminal(terminal_id, &daemon.root, 80, 24, viewers.sink())
+        .unwrap();
     output_until(&events, b"started");
 
-    request(&client, terminal_id, Command::ClearTerminal);
-    let WireDriverEvent::TerminalReset(reset) = next_matching(&events, |event| {
-        matches!(event, WireDriverEvent::TerminalReset(_))
+    daemon.backend.clear_terminal(terminal_id).unwrap();
+    let TerminalEvent::Reset { generation, offset } = next_matching(&events, |event| {
+        matches!(event, TerminalEvent::Reset { .. })
     }) else {
         unreachable!()
     };
-    assert_eq!(reset.generation, 0);
-    let cleared = attach(&client, terminal_id, None);
+    assert_eq!(generation, 0);
+    let cleared = attach(&daemon, terminal_id);
     assert!(cleared.replay.is_empty());
     assert!(!cleared.truncated);
-    assert_eq!(cleared.offset, reset.offset);
+    assert_eq!(cleared.offset, offset);
 
-    let ResponsePayload::TerminalAttached {
-        terminal: restarted,
-    } = request(&client, terminal_id, Command::RestartTerminal)
-    else {
-        panic!("restart did not return the terminal");
-    };
+    let restarted = daemon.backend.restart_terminal(terminal_id).unwrap();
     assert_eq!(restarted.generation, 1);
-    let WireDriverEvent::TerminalReset(reset) = next_matching(&events, |event| {
-        matches!(event, WireDriverEvent::TerminalReset(_))
+    let TerminalEvent::Reset { generation, .. } = next_matching(&events, |event| {
+        matches!(event, TerminalEvent::Reset { .. })
     }) else {
         unreachable!()
     };
-    assert_eq!(reset.generation, 1);
+    assert_eq!(generation, 1);
     // The fresh shell's output starts at the reset offset.
     let (_, offsets) = output_until(&events, b"started");
     assert_eq!(offsets.first().copied(), Some(restarted.offset));
-    request(
-        &client,
-        terminal_id,
-        Command::WriteTerminal {
-            data: b"after-restart\r".to_vec(),
-        },
-    );
+    daemon
+        .backend
+        .write_terminal(terminal_id, b"after-restart\r".to_vec())
+        .unwrap();
     output_until(&events, b"received:after-restart");
-    request(&client, terminal_id, Command::CloseTerminal);
+    daemon.backend.close_terminal(terminal_id).unwrap();
 }
 
 #[test]
 fn an_exited_terminal_keeps_its_scrollback_for_a_late_attach() {
     let daemon = TestDaemon::start("printf 'goodbye\\n'; exit 3");
-    let client = daemon.connect();
+    let viewers = Viewers::default();
+    let events = viewers.join();
     let terminal_id = Uuid::new_v4();
-    let events = client.subscribe(terminal_id, terminal_id);
-    request(
-        &client,
-        terminal_id,
-        Command::OpenTerminal {
-            cwd: daemon.root.clone(),
-            cols: 80,
-            rows: 24,
-        },
-    );
-    next_matching(&events, |event| {
-        matches!(event, WireDriverEvent::TerminalExited)
-    });
+    daemon
+        .backend
+        .open_terminal(terminal_id, &daemon.root, 80, 24, viewers.sink())
+        .unwrap();
+    // Output arrives before the exit is reported.
+    output_until(&events, b"goodbye");
+    next_matching(&events, |event| matches!(event, TerminalEvent::Exited));
 
-    let late = daemon.connect();
-    let snapshot = attach(&late, terminal_id, None);
+    let snapshot = attach(&daemon, terminal_id);
     assert!(snapshot.exited);
     assert_eq!(snapshot.exit_code, Some(3));
     assert!(contains(&snapshot.replay, b"goodbye"));
 
     // A restart brings the exited terminal back.
-    let ResponsePayload::TerminalAttached { terminal } =
-        request(&late, terminal_id, Command::RestartTerminal)
-    else {
-        panic!("restart did not return the terminal");
-    };
+    let terminal = daemon.backend.restart_terminal(terminal_id).unwrap();
     assert!(!terminal.exited);
-    request(&late, terminal_id, Command::CloseTerminal);
+    daemon.backend.close_terminal(terminal_id).unwrap();
+}
+
+#[test]
+fn dropping_an_idle_terminal_does_not_wait_for_output() {
+    let root = std::env::temp_dir().join(format!("waku-terminal-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let terminal = DaemonTerminal::open_with_shell(
+        &root,
+        80,
+        24,
+        Arc::new(|_| {}),
+        shell("while IFS= read -r line; do :; done"),
+    )
+    .unwrap();
+    let (dropped, finished) = bounded(1);
+    std::thread::spawn(move || {
+        drop(terminal);
+        let _ = dropped.send(());
+    });
+
+    assert!(
+        finished.recv_timeout(Duration::from_secs(3)).is_ok(),
+        "dropping an idle daemon terminal blocked on its output reader"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn input_round_trips_and_close_returns_promptly() {
+    round_trip_then_close(false);
+}
+
+#[test]
+fn close_does_not_wait_for_a_shell_ignoring_hangup() {
+    round_trip_then_close(true);
+}
+
+fn round_trip_then_close(ignore_hangup: bool) {
+    let daemon = TestDaemon::start(&format!(
+        "{}\nprintf 'ready:%s\\n' \"$$\"\nwhile IFS= read -r line; do printf 'received:%s\\n' \"$line\"; done",
+        if ignore_hangup { "trap '' HUP" } else { ":" },
+    ));
+    let viewers = Viewers::default();
+    let events = viewers.join();
+    let terminal_id = Uuid::new_v4();
+    daemon
+        .backend
+        .open_terminal(terminal_id, &daemon.root, 80, 24, viewers.sink())
+        .unwrap();
+    // Wait until the shell has installed its signal handler. Receiving local
+    // echo alone does not prove that shell startup has completed.
+    let (ready, _) = output_until(&events, b"\n");
+    let child_pid: libc::pid_t = String::from_utf8_lossy(&ready)
+        .trim()
+        .strip_prefix("ready:")
+        .unwrap()
+        .parse()
+        .unwrap();
+    daemon
+        .backend
+        .write_terminal(terminal_id, b"waku-terminal-round-trip\r".to_vec())
+        .unwrap();
+    // The response prefix is absent from the input, so a PTY echo cannot
+    // satisfy this before the child has actually read it.
+    output_until(&events, b"received:waku-terminal-round-trip");
+
+    let daemon = Arc::new(daemon);
+    let (closed, finished) = bounded(1);
+    let closing = daemon.clone();
+    let close = std::thread::spawn(move || {
+        let _ = closed.send(closing.backend.close_terminal(terminal_id).is_ok());
+    });
+    let result = finished.recv_timeout(Duration::from_secs(3));
+    if result.is_err() {
+        // Clean up the fixture even when closing regresses, and fail here.
+        unsafe {
+            libc::kill(child_pid, libc::SIGKILL);
+        }
+    }
+    close.join().unwrap();
+    assert_eq!(
+        result,
+        Ok(true),
+        "closing the daemon terminal did not finish"
+    );
 }

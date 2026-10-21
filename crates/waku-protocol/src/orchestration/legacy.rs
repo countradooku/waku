@@ -1,5 +1,5 @@
-//! Conversions from the legacy v7 types in [`crate::model`], for the
-//! importer (#63) and the cutover (#55).
+//! Conversions from the shared data models in [`crate::model`] to the
+//! orchestration types.
 
 use super::ids::JsonText;
 use super::values::*;

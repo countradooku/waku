@@ -343,11 +343,7 @@ pub fn cli(arguments: &[String]) -> anyhow::Result<bool> {
         [flag] if flag == "--json" => true,
         _ => anyhow::bail!("usage: waku-daemon doctor [--json]"),
     };
-    let task_path = waku_core::persistence::StateStore::default_path();
-    let data_dir = task_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
+    let data_dir = waku_core::persistence::default_data_dir();
     let settings = waku_core::DaemonSettingsStore::open(DaemonSettings::default_path())
         .map(|store| store.get())
         .unwrap_or_default();

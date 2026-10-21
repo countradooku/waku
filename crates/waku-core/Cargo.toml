@@ -6,11 +6,6 @@ description = "Headless provider, persistence, and workspace runtime for Waku"
 license = "GPL-3.0-only"
 readme = "README.md"
 
-[features]
-# `tracing` spans around event fan-out, request dispatch and task-state saves.
-# Off by default, and without it every span compiles to nothing.
-profiling = ["dep:tracing"]
-
 [dependencies]
 agent-client-protocol = "2.0.0"
 # `DriverV2` and `DriverSession` are object-safe async traits (RFC 0002 D-1).
@@ -43,7 +38,6 @@ similar = "3"
 # Temporary workspaces and databases of the replay harness and recorder.
 tempfile = "3"
 toml = "0.8"
-tracing = { version = "0.1", optional = true }
 trash = "5.2.6"
 # The socket layer is evented (#18): a small multi-thread runtime owns accept,
 # per-connection reader and writer tasks and the keepalive timers, while
@@ -75,15 +69,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
-criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 waku-client = { path = "../waku-client" }
 
 [lints]
 workspace = true
-
-[[bench]]
-name = "persistence"
-harness = false
 
 # Records a replay fixture from a live session (RFC 0002 "Recorder").
 [[bin]]

@@ -51,7 +51,7 @@ WAKU_DAEMON_ADDRESS=127.0.0.1:53412 WAKU_DAEMON_TOKEN=… <path to waku>
 | `--history-sessions N` | Adds N such threads instead of one (memory scenarios). The first keeps the id and content it always had. |
 | `--autoplay[=MS]` | Prompts the `--timeline` thread with its timeline MS ms (default 1500) after a client subscribes to that thread, with no UI input. See below. |
 | `--exit-after N` | Stops after N runs have replayed a timeline. |
-| `--state-dir DIR` | The throwaway data directory (`app.db`, the orchestrator's `state.sqlite`, settings, the fakes' links). It is wiped on every start, and the daemon refuses to wipe a directory it did not create. |
+| `--state-dir DIR` | The throwaway data directory (the orchestrator's `state.sqlite`, blobs, drafts, settings, the fakes' links). It is wiped on every start, and the daemon refuses to wipe a directory it did not create. |
 | `--project DIR` | The project directory of the fixture. |
 | `--fakes DIR` | Where `fake-codex` and `fake-claude` are. Default: beside the `waku-bench-daemon` executable, where Cargo builds them. |
 
@@ -136,7 +136,7 @@ The timelines are checked in under `timelines/` as gzip-compressed JSON Lines:
 | `tool-storm` | 300 tool calls (commands, edits, searches, reads), each with a ≥ 50 KB output or diff, one every 100 ms. Each call is sent as an in-progress row and then a completed row. |
 | `images` | 20 tool results, each carrying a 320×200 PNG data URL, with captions in between. |
 
-Content comes from the banks in `scripts/seed-mock-sessions.ts`, ported to `src/content.rs` with the same mulberry32 generator.
+Content comes from the banks in `src/content.rs` (originally ported from a seeding script for the legacy session database) with a mulberry32 generator.
 
 The fixture sizes are a trade-off between keeping fixtures in the repository and keeping the repository small. Uncompressed JSON totals about 21 MB, of which `tool-storm` is 17 MB (300 × 50 KB is the point of that timeline). Gzipped at level 9, all six total about 1.9 MB, with `tool-storm` at 1.4 MB. That is small enough to commit, which the issue requires: the files are fixtures, not generated at random. It is also small enough to embed in the binary, so the daemon works from any directory.
 

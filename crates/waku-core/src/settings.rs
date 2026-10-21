@@ -14,17 +14,9 @@ pub struct DaemonSettingsStore {
 }
 
 impl DaemonSettingsStore {
+    /// Open the daemon document; a missing one means the defaults (D6: no
+    /// settings are imported from another layout).
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        Self::open_with_legacy(path, std::iter::empty())
-    }
-
-    /// Open the daemon document, importing the first old combined settings
-    /// file only when the new path does not exist. The source is left intact
-    /// so the desktop can independently migrate its app-owned fields.
-    pub fn open_with_legacy(
-        path: PathBuf,
-        legacy_paths: impl IntoIterator<Item = PathBuf>,
-    ) -> io::Result<Self> {
         let (mut settings, write_current) = match fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(settings) => (settings, false),
@@ -38,24 +30,7 @@ impl DaemonSettingsStore {
                 }
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let mut restored: Option<DaemonSettings> = None;
-                for legacy_path in legacy_paths {
-                    if legacy_path == path {
-                        continue;
-                    }
-                    match fs::read(legacy_path) {
-                        Ok(bytes) => {
-                            if let Ok(settings) = serde_json::from_slice(&bytes) {
-                                restored = Some(settings);
-                                break;
-                            }
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error),
-                    }
-                }
-                let migrated = restored.is_some();
-                (restored.unwrap_or_default(), migrated)
+                (DaemonSettings::default(), false)
             }
             Err(error) => return Err(error),
         };
@@ -117,7 +92,6 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use uuid::Uuid;
-    use waku_protocol::model::ProviderKind;
 
     #[test]
     fn legacy_combined_settings_keep_only_daemon_fields() {
@@ -140,28 +114,6 @@ mod tests {
         assert!(value.get("analytics_enabled").is_none());
         assert_eq!(value["future"], 42);
         fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn imports_daemon_fields_from_a_debug_combined_settings_file() {
-        let directory = std::env::temp_dir().join(format!("waku-settings-{}", Uuid::new_v4()));
-        let path = directory.join("home/settings.json");
-        let legacy = directory.join("checkout/temp/settings.json");
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(
-            &legacy,
-            r#"{"theme":"dark","disabled_providers":["claude"]}"#,
-        )
-        .unwrap();
-
-        let store = DaemonSettingsStore::open_with_legacy(path.clone(), [legacy.clone()]).unwrap();
-
-        assert_eq!(store.get().disabled_providers, vec![ProviderKind::Claude]);
-        let migrated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(migrated["disabled_providers"][0], "claude");
-        assert!(migrated.get("theme").is_none());
-        assert!(legacy.exists());
-        fs::remove_dir_all(directory).ok();
     }
 
     #[test]

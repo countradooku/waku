@@ -15,9 +15,8 @@ use waku_protocol::v8::{
     MAX_ATTACHMENT_PARTS, MAX_BLOB_BYTES, StoredAttachment,
 };
 
-use super::{CallContext, Domain, bad_request, call, display_path, not_found, unexpected};
+use super::{CallContext, Domain, bad_request, call, display_path, not_found};
 use crate::attachments::{AttachmentUpload, AttachmentUploadEntry};
-use crate::protocol::{Command, ResponsePayload};
 use crate::v8::V8Context;
 use crate::v8::connection::Conn;
 
@@ -87,17 +86,7 @@ pub(crate) fn store_blob(
     mime: &str,
     bytes: Vec<u8>,
 ) -> Result<(String, PathBuf), Error> {
-    match call(
-        context,
-        Command::StoreBlob {
-            mime_type: mime.to_owned(),
-            bytes,
-        },
-        Domain::General,
-    )? {
-        ResponsePayload::BlobStored { reference, path } => Ok((reference, path)),
-        other => Err(unexpected(&other)),
-    }
+    call(context.backend.store_blob(mime, &bytes), Domain::General)
 }
 
 pub(super) async fn put(
@@ -185,14 +174,9 @@ pub(super) async fn put(
 async fn blob_exists(context: &Arc<V8Context>, reference: &str) -> bool {
     let task_context = context.clone();
     let reference = reference.to_owned();
-    tokio::task::spawn_blocking(move || {
-        matches!(
-            task_context.backend.call(Command::LocateBlob { reference }),
-            Ok(ResponsePayload::BlobLocation { .. })
-        )
-    })
-    .await
-    .unwrap_or(false)
+    tokio::task::spawn_blocking(move || task_context.backend.locate_blob(&reference).is_ok())
+        .await
+        .unwrap_or(false)
 }
 
 /// Where a blob, or a file inside an attachment, lives on the daemon host.
@@ -201,23 +185,16 @@ pub(crate) fn locate(
     reference: &str,
     path: Option<&str>,
 ) -> Result<PathBuf, Error> {
-    let command = if reference.starts_with(crate::attachments::ATTACHMENT_SCHEME) {
+    let located = if reference.starts_with(crate::attachments::ATTACHMENT_SCHEME) {
         let path =
             path.ok_or_else(|| bad_request("path", "an attachment needs the file's path"))?;
-        Command::LocateAttachment {
-            reference: reference.to_owned(),
-            path: super::absolute_path("path", path)?,
-        }
+        context
+            .backend
+            .locate_attachment(reference, &super::absolute_path("path", path)?)
     } else {
-        Command::LocateBlob {
-            reference: reference.to_owned(),
-        }
+        context.backend.locate_blob(reference)
     };
-    match context.backend.call(command) {
-        Ok(ResponsePayload::BlobLocation { path }) => Ok(path),
-        Ok(other) => Err(unexpected(&other)),
-        Err(_) => Err(not_found("blob", reference)),
-    }
+    located.map_err(|_| not_found("blob", reference))
 }
 
 pub(super) fn stat(
@@ -259,13 +236,10 @@ pub(super) fn stat(
 }
 
 fn read_blob(context: &V8Context, reference: &str) -> Result<Vec<u8>, Error> {
-    match context.backend.call(Command::ReadBlob {
-        reference: reference.to_owned(),
-    }) {
-        Ok(ResponsePayload::BlobData { bytes }) => Ok(bytes),
-        Ok(other) => Err(unexpected(&other)),
-        Err(_) => Err(not_found("blob", reference)),
-    }
+    context
+        .backend
+        .read_blob(reference)
+        .map_err(|_| not_found("blob", reference))
 }
 
 fn stored(attachment: crate::attachments::StoredAttachment) -> StoredAttachment {
@@ -328,17 +302,11 @@ pub(super) fn import_attachment(
             ));
         }
     };
-    match call(
-        context,
-        Command::ImportAttachment {
-            name: params.name,
-            upload,
-        },
+    call(
+        context.backend.import_attachment(&params.name, upload),
         Domain::General,
-    )? {
-        ResponsePayload::AttachmentStored { attachment } => Ok(stored(attachment)),
-        other => Err(unexpected(&other)),
-    }
+    )
+    .map(stored)
 }
 
 pub(super) fn import_path(
@@ -346,12 +314,9 @@ pub(super) fn import_path(
     params: AttachmentsImportPathParams,
 ) -> Result<StoredAttachment, Error> {
     let path = super::absolute_path("path", &params.path)?;
-    match call(
-        context,
-        Command::ImportPathAttachment { path },
+    call(
+        context.backend.import_path_attachment(&path),
         Domain::General,
-    )? {
-        ResponsePayload::AttachmentStored { attachment } => Ok(stored(attachment)),
-        other => Err(unexpected(&other)),
-    }
+    )
+    .map(stored)
 }

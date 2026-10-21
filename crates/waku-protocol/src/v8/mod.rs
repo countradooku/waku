@@ -15,8 +15,8 @@
 //! - [`api`]: the methods and streams, declared with [`methods!`] and
 //!   [`streams!`].
 //!
-//! v8 never shares an endpoint with the legacy (v7) protocol: it is served on
-//! the WebSocket path [`WEBSOCKET_PATH`] with subprotocol
+//! v8 is the daemon's only protocol (decision D6): it is served on the
+//! WebSocket path [`WEBSOCKET_PATH`] with subprotocol
 //! [`WEBSOCKET_SUBPROTOCOL`], and on the local socket behind [`PREFACE`].
 //!
 //! - [`orchestration`]: the envelopes of `orchestration.dispatch`, the

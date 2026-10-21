@@ -32,7 +32,7 @@ Codex's native option ids, the runtime mode) are in `input.codex.json`.
 | `message_steering` | S | `message_steering` | none |
 | `provider_thread_resume` | R | `provider_thread_resume` | none (second process is `main#2`) |
 | `thread_rollback` | S | `thread_rollback` | T3's `thread/read` history probe dropped; `thread/turns/list` + `thread/revert` kept |
-| `thread_fork_native` | S | `thread_fork_native_continue` | T3 continues the fork on the same app-server; Waku runs it in a new session, so `main#2` gets the transcript's own `initialize` exchange and a `thread/resume` answered with the `thread/fork` result's thread; a `thread/unsubscribe` exchange (response `{"status":"unsubscribed"}`, as the bench `fake-codex` answers) follows the fork |
+| `thread_fork_native` | S | `thread_fork_native_continue` | T3 continues the fork on the same app-server; Waku forks in the target thread's own session (`fork_in_target_session`), so `main#2` gets the transcript's own `initialize` exchange, then `thread/fork` and the fork's turn |
 | `subagent` | S | `subagent_v2` | none: multi-agent v2 `subAgentActivity` items and the child thread's own turn |
 | `usage_limit` | R | `simple` cut after `turn/started` | **synthetic tail**: `account/rateLimits/updated` (primary window 100 %, `resetsAt` 2000100000), an `error` notification and a failed `turn/completed`, both with `codexErrorInfo: "usageLimitExceeded"`; shapes from T3's `CodexAdapterV2.test.ts` usage-limit cases and the Codex 0.159.2 `ErrorNotification` / `TurnCompletedNotification` schemas |
 | `runtime_exit_unexpected` | R | `simple` cut after the first `item/agentMessage/delta` | **synthetic tail**: the process exits with status 1 |

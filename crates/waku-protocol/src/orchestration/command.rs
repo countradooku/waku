@@ -11,13 +11,12 @@ use serde::{Deserialize, Serialize};
 use super::entities::PlanRef;
 use super::ids::*;
 use super::values::*;
-use crate::ts::TS;
 
 fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CommandEnvelope {
@@ -28,7 +27,7 @@ pub struct CommandEnvelope {
 }
 
 /// How `message.dispatch` delivers a message.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 // A client → daemon union: an unknown tag fails to decode and the daemon
 // answers `badRequest`, so the schema marks it closed instead of open.
@@ -55,7 +54,7 @@ pub enum DispatchMode {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 // A client → daemon union: an unknown tag fails to decode and the daemon
 // answers `badRequest`, so the schema marks it closed instead of open.
@@ -71,7 +70,7 @@ pub enum ForkSourcePoint {
     Checkpoint { checkpoint_id: CheckpointId },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 // A client → daemon union: an unknown tag fails to decode and the daemon
 // answers `badRequest`, so the schema marks it closed instead of open.

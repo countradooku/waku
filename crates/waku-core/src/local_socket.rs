@@ -3,9 +3,8 @@
 //!
 //! The managed daemon listens here instead of on TCP when remote exposure is
 //! off, so the desktop reaches it without the TCP stack and without a port
-//! anyone else on the machine can connect to. Legacy clients speak the
-//! WebSocket protocol on top; protocol v8 clients open with the `WAKU`
-//! preface and RFC 0003's binary framing instead, on the same socket.
+//! anyone else on the machine can connect to. Clients open with protocol
+//! v8's `WAKU` preface and speak RFC 0003's binary framing.
 //!
 //! Unix: the socket lives in a 0700 directory owned by the daemon's user and
 //! is itself 0600. Every accepted peer must run as the same effective uid

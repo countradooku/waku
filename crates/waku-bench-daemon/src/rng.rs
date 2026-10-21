@@ -1,7 +1,7 @@
 //! Deterministic randomness shared by every generator.
 //!
-//! This is the same mulberry32 generator `scripts/seed-mock-sessions.ts` uses,
-//! so one seed always produces the same fixture bytes on every machine.
+//! This is the mulberry32 generator the former `scripts/seed-mock-sessions.ts`
+//! used, so one seed always produces the same fixture bytes on every machine.
 
 use uuid::Uuid;
 
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn matches_the_typescript_mulberry32_sequence() {
-        // First outputs of mulberry32(20260806), the seed-mock-sessions default.
+        // First outputs of mulberry32(20260806), the original seeding script's default.
         let mut rng = Rng::new(20_260_806);
         let first = rng.next_u32();
         let mut again = Rng::new(20_260_806);

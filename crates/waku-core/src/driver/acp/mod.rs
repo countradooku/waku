@@ -17,8 +17,6 @@
 //! - JSON-RPC is spoken directly (`protocol.rs`) so replay matches request
 //!   ids; the SDK's schema types still read typed payloads, and its
 //!   connection still serves the session catalog (`catalog_agent`).
-//! - Until the orchestrator cutover, [`start`] runs the driver behind
-//!   `V1Bridge` for the desktop.
 
 mod flavor;
 mod grok;
@@ -34,50 +32,27 @@ use std::time::Duration;
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, LineDirection};
 use anyhow::anyhow;
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use serde_json::{Value, json};
-use waku_protocol::model::{ProviderKind, ProviderResumeCursor};
+use waku_protocol::model::ProviderKind;
 use waku_protocol::orchestration::Capabilities;
 
 pub use self::flavor::{AgentInfo, Flavor};
-pub use self::grok::fork_session_at_turn_blocking as grok_fork_session_at_turn;
 use self::protocol::Connection;
 use self::session::{AcpSession, Homes, Setup, Shared};
-use crate::driver::v2::bridge::V1Bridge;
 use crate::driver::v2::{
-    ContextBlock, ContextKind, DriverError, DriverFamily, DriverResult, DriverV2, InstanceConfig,
-    OpenedSession, ProcessSpec, ProcessTransportFactory, ProtocolReason, Selection, SessionContext,
-    TransitionPlan, adapter_channel,
+    DriverError, DriverFamily, DriverResult, DriverV2, InstanceConfig, OpenedSession, ProcessSpec,
+    ProtocolReason, Selection, SessionContext, TransitionPlan, adapter_channel,
 };
-use crate::driver::{DriverEventSender, DriverStartOptions};
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// What the desktop's v1 start hands the driver (only behind `V1Bridge`).
-struct LegacyStart {
-    events: DriverEventSender,
-    /// Create the ACP session at startup, as the v1 driver did, so commands
-    /// and the resume cursor arrive before the first prompt.
-    eager: bool,
-    /// A Cursor branch's retained conversation, sent with the first prompt.
-    fork_context: Option<String>,
-}
-
 /// The ACP family's `DriverV2`.
 #[derive(Default)]
-pub struct AcpDriver {
-    legacy: Mutex<Option<LegacyStart>>,
-}
+pub struct AcpDriver;
 
 impl AcpDriver {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn legacy(start: LegacyStart) -> Self {
-        Self {
-            legacy: Mutex::new(Some(start)),
-        }
+        Self
     }
 }
 
@@ -152,30 +127,11 @@ impl DriverV2 for AcpDriver {
 
     async fn open_session(&self, ctx: SessionContext) -> DriverResult<OpenedSession> {
         let flavor = Flavor::from_driver(ctx.instance.provider);
-        let legacy = self.legacy.lock().take();
-        let computer_use = match (&legacy, flavor) {
-            (Some(legacy), Flavor::Grok) if ctx.instance.computer_use_enabled => Some(
-                super::support::HeadlessComputerUseRuntime::start(
-                    ProviderKind::Grok,
-                    legacy.events.clone(),
-                )
-                .map_err(|error| DriverError::Protocol {
-                    reason: ProtocolReason::UnexpectedFrame,
-                    detail: error.to_string(),
-                })?,
-            ),
-            _ => None,
-        };
-        let (computer_args, computer_env) = super::support::grok_computer_use_launch_configuration(
-            computer_use.as_ref().map(|runtime| &runtime.config),
-        );
-        let mut args = flavor.launch_args(
+        let args = flavor.launch_args(
             ctx.selection.reasoning_effort.as_deref(),
             &ctx.instance.extra,
         );
-        args.extend(computer_args);
         let mut env = flavor.launch_env();
-        env.extend(computer_env);
         env.extend(ctx.instance.env.iter().cloned());
         let transport = ctx
             .transports
@@ -192,25 +148,11 @@ impl DriverV2 for AcpDriver {
         let provider_home = ctx.transports.provider_home(&ctx.instance);
         let configured = ctx.instance.provider_home.is_some();
         let homes = Homes {
-            grok: computer_use
-                .as_ref()
-                .and_then(super::support::HeadlessComputerUseRuntime::grok_home)
-                .map(Path::to_owned)
-                .unwrap_or_else(|| grok::grok_home(&provider_home, configured)),
+            grok: grok::grok_home(&provider_home, configured),
             kimi: kimi_home(&provider_home, configured),
         };
         let connection = Connection::new("main", transport.stdin, ctx.raw_log.clone());
         let (events, receiver) = adapter_channel();
-        let pending_context = legacy
-            .as_ref()
-            .and_then(|legacy| legacy.fork_context.clone())
-            .map(|text| ContextBlock {
-                key: "fork".to_owned(),
-                kind: ContextKind::SyntheticUser,
-                text,
-            })
-            .into_iter()
-            .collect();
         let setup = Setup {
             flavor,
             provider_session_id: ctx.provider_session_id,
@@ -223,15 +165,12 @@ impl DriverV2 for AcpDriver {
             ids: ctx.ids.clone(),
             clock: ctx.clock.clone(),
             raw_log: ctx.raw_log.clone(),
-            legacy: legacy.as_ref().map(|legacy| legacy.events.clone()),
-            computer_use,
         };
         let shared = Arc::new(Shared::new(
             setup,
             connection,
             events,
             ctx.selection.clone(),
-            pending_context,
         ));
         tokio::spawn(session::read_loop(
             shared.clone(),
@@ -276,70 +215,12 @@ impl DriverV2 for AcpDriver {
         let agent = AgentInfo::from_initialize(&result);
         let capabilities = flavor::capabilities(flavor, &ctx.instance, &agent);
         shared.negotiated(agent, capabilities.clone());
-        if legacy.as_ref().is_some_and(|legacy| legacy.eager)
-            && let Err(error) = shared.eager_session().await
-        {
-            shared.connection().close().await;
-            return Err(error);
-        }
         Ok(OpenedSession {
             session: Arc::new(AcpSession { shared }),
             events: receiver,
             capabilities,
         })
     }
-}
-
-// -- the v1 desktop -----------------------------------------------------------------
-
-/// The runtime ACP sessions run on until the daemon's tokio runtime (#18)
-/// hosts drivers: the one shared by every bridged driver, whose threads
-/// unblock SIGCHLD so agents can reap children.
-fn runtime() -> tokio::runtime::Handle {
-    crate::driver::v2::bridge::runtime()
-}
-
-/// Starts an ACP session for the desktop: the `DriverV2` behind `V1Bridge`.
-pub(crate) fn start(
-    provider: ProviderKind,
-    options: DriverStartOptions,
-    events: DriverEventSender,
-) -> anyhow::Result<V1Bridge> {
-    if Flavor::from_provider(provider).is_none() {
-        return Err(anyhow!(
-            "{} does not speak the Agent Client Protocol",
-            provider.display_name()
-        ));
-    }
-    let (eager, fork_context) = match &options.provider_cursor {
-        Some(cursor) if cursor.provider() != provider => {
-            return Err(anyhow!(
-                "cannot resume {} from a {} cursor",
-                provider.display_name(),
-                cursor.provider().display_name()
-            ));
-        }
-        Some(ProviderResumeCursor::Cursor {
-            session_id,
-            fork_context,
-        }) => (session_id.is_empty(), fork_context.clone()),
-        Some(cursor) => (cursor.native_id().is_empty(), None),
-        None => (true, None),
-    };
-    let driver = Arc::new(AcpDriver::legacy(LegacyStart {
-        events: events.clone(),
-        eager,
-        fork_context,
-    }));
-    let instance = InstanceConfig::new(provider.id(), provider.into());
-    V1Bridge::start(
-        driver,
-        instance,
-        options,
-        events,
-        Arc::new(ProcessTransportFactory),
-        runtime(),
-    )
 }
 
 // -- session catalog (SDK connection) -----------------------------------------------

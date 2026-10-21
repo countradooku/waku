@@ -1,5 +1,5 @@
 //! The v8 endpoint end to end: the Rust v8 client and raw protocol probes
-//! against a real daemon server, beside the legacy protocol.
+//! against a real daemon server.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,11 +21,8 @@ use waku_protocol::v8::{
     ServerMessageSeed, SettingsItem, SettingsSpec, StreamCursor, StreamItem, codec,
 };
 
-use super::{BackendHandle, SettingsBus, V8Context, settings_revision, wire_settings};
-use crate::protocol::{Command, Request, ResponsePayload};
-use crate::server::{
-    Backend, EventSink, Listeners, ServerOptions, ShutdownSignal, serve_listeners,
-};
+use super::{SettingsBus, V8Context, settings_revision, wire_settings};
+use crate::server::{Backend, Listeners, ServerOptions, ShutdownSignal, serve_listeners};
 use crate::settings::DaemonSettings;
 
 const TOKEN: &str = "secret";
@@ -37,20 +34,20 @@ struct TestBackend {
 }
 
 impl Backend for TestBackend {
-    fn handle(&self, request: Request, _events: EventSink) -> anyhow::Result<ResponsePayload> {
-        match request.command {
-            Command::GetSettings => Ok(ResponsePayload::Settings {
-                settings: self.settings.lock().clone(),
-            }),
-            Command::UpdateSettings { settings } => {
-                *self.settings.lock() = settings;
-                Ok(ResponsePayload::Ack)
-            }
-            Command::ReadBlob { reference } if reference == BLOB => Ok(ResponsePayload::BlobData {
-                bytes: self.blob.clone(),
-            }),
-            Command::ReadBlob { .. } => anyhow::bail!("no such blob"),
-            _ => anyhow::bail!("not supported by the test backend"),
+    fn settings(&self) -> anyhow::Result<DaemonSettings> {
+        Ok(self.settings.lock().clone())
+    }
+
+    fn update_settings(&self, settings: DaemonSettings) -> anyhow::Result<()> {
+        *self.settings.lock() = settings;
+        Ok(())
+    }
+
+    fn read_blob(&self, reference: &str) -> anyhow::Result<Vec<u8>> {
+        if reference == BLOB {
+            Ok(self.blob.clone())
+        } else {
+            anyhow::bail!("no such blob")
         }
     }
 }
@@ -255,16 +252,7 @@ fn v8_methods_run_on_the_local_socket_beside_the_legacy_protocol() {
         ErrorCode::NotFound
     );
 
-    // The legacy protocol still answers on the same socket.
-    let legacy = waku_client::DaemonClient::connect(&daemon.local_address(), TOKEN.into()).unwrap();
-    assert!(matches!(
-        legacy
-            .request(Uuid::nil(), Uuid::nil(), Command::GetSettings)
-            .unwrap(),
-        ResponsePayload::Settings { .. }
-    ));
-
-    // And a wrong token is refused with a typed reason.
+    // A wrong token is refused with a typed reason.
     let error = V8Client::connect(&daemon.local_address(), "wrong")
         .err()
         .unwrap();
@@ -275,7 +263,7 @@ fn v8_methods_run_on_the_local_socket_beside_the_legacy_protocol() {
 }
 
 #[test]
-fn the_settings_stream_follows_legacy_updates_and_resumes_from_its_revision() {
+fn the_settings_stream_follows_another_clients_updates_and_resumes_from_its_revision() {
     let daemon = Daemon::start();
     let client = daemon.connect();
     let subscription =
@@ -294,20 +282,21 @@ fn the_settings_stream_follows_legacy_updates_and_resumes_from_its_revision() {
         }))
     );
 
-    // A change made by a legacy client reaches the v8 subscriber.
-    let legacy = waku_client::DaemonClient::connect(&daemon.local_address(), TOKEN.into()).unwrap();
+    // A change made by another client reaches the subscriber.
+    let other = daemon.connect();
     let changed = DaemonSettings {
         computer_use_enabled: true,
         ..DaemonSettings::default()
     };
-    legacy
-        .request(
-            Uuid::nil(),
-            Uuid::nil(),
-            Command::UpdateSettings {
-                settings: changed.clone(),
+    other
+        .call::<method::SettingsUpdate>(waku_protocol::v8::SettingsUpdateParams {
+            base_revision: None,
+            patch: waku_protocol::v8::SettingsPatch {
+                computer_use_enabled: Some(true),
+                ..Default::default()
             },
-        )
+            op_id: Uuid::new_v4(),
+        })
         .unwrap();
     let StreamEvent::Item(StreamItem::Settings(SettingsItem::Updated {
         revision: updated,
@@ -597,7 +586,7 @@ fn handshakes_are_refused_with_a_reason() {
 fn test_context(limits: waku_protocol::v8::Limits, hello_deadline: Duration) -> Arc<V8Context> {
     let mut context = V8Context::new(
         TOKEN.into(),
-        BackendHandle::new(backend(), crate::server::test_event_sink()),
+        backend(),
         SettingsBus::default(),
         ShutdownSignal::new(),
     );

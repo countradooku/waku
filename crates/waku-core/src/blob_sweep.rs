@@ -1,14 +1,12 @@
 //! Daemon-scheduled sweeps of the blob and attachment stores (#53, #55).
 //!
-//! v7 clients asked for a sweep (`SweepBlobs`) after deleting a session. The
-//! daemon now schedules sweeps itself, and a sweep keeps everything that is
+//! The daemon schedules sweeps itself, and a sweep keeps everything that is
 //! still referenced:
 //!
 //! - the orchestrator's turn items and messages of threads that are not
 //!   deleted ([`orchestrator_references`]);
-//! - the composer drafts, keyed by orchestration project and thread ids;
-//! - until v7 is deleted (D6), the legacy sessions of `app.db`, which the
-//!   desktop still writes ([`crate::persistence::AssetSweep`]).
+//! - the composer drafts, keyed by orchestration project and thread ids
+//!   ([`crate::persistence::AssetSweep`]).
 //!
 //! Scheduling is cheap: one thread sleeps on a condition variable until a
 //! sweep is due, and never wakes otherwise. A sweep is requested
@@ -18,8 +16,8 @@
 //!   ([`crate::persistence::ASSET_SWEEP_GRACE_PERIOD`]) has passed, so an
 //!   upload that nothing came to reference is reclaimed
 //!   ([`SweepTimes::after_store`]);
-//! - after something released references: a thread deleted or rolled back,
-//!   or a v7 `SweepBlobs` ([`SweepTimes::after_release`]).
+//! - after something released references: a thread deleted or rolled back
+//!   ([`SweepTimes::after_release`]).
 //!
 //! Draft edits request nothing: a draft is cleared on every send, and the
 //! attachments a discarded draft held were stored first, so the sweep after
@@ -297,12 +295,9 @@ mod tests {
     }
 
     /// A blob old enough for a sweep to take.
-    fn aged_blob(store: &crate::persistence::StateStore, byte: u8) -> (String, std::path::PathBuf) {
-        let reference = store
-            .blobs()
-            .store_image_bytes("image/png", &[byte; 64])
-            .unwrap();
-        let path = store.blobs().path_for(&reference).unwrap();
+    fn aged_blob(store: &crate::blob_store::BlobStore, byte: u8) -> (String, std::path::PathBuf) {
+        let reference = store.store_image_bytes("image/png", &[byte; 64]).unwrap();
+        let path = store.path_for(&reference).unwrap();
         std::fs::File::options()
             .write(true)
             .open(&path)
@@ -322,10 +317,10 @@ mod tests {
             WorkspaceStrategy,
         };
         let root = tempfile::tempdir().unwrap();
-        let store = crate::persistence::StateStore::daemon(root.path().join("app.db"));
-        store.load().unwrap();
-        let (kept, kept_path) = aged_blob(&store, 1);
-        let (_, orphan_path) = aged_blob(&store, 2);
+        let blobs = Arc::new(crate::blob_store::BlobStore::new(root.path().join("blobs")));
+        let sweep = crate::persistence::AssetSweep::in_dir(root.path(), blobs.clone());
+        let (kept, kept_path) = aged_blob(&blobs, 1);
+        let (_, orphan_path) = aged_blob(&blobs, 2);
 
         let orchestrator = Orchestrator::open(
             waku_orchestrator::OrchestratorConfig::new(root.path().join("state.sqlite")),
@@ -395,7 +390,7 @@ mod tests {
 
         let references = orchestrator_references(&orchestrator).unwrap();
         assert!(references.blobs.contains(&kept));
-        store.asset_sweep().run(&references);
+        sweep.run(&references);
         assert!(kept_path.exists(), "a live thread's attachment stays");
         assert!(!orphan_path.exists(), "an aged orphan goes");
 
@@ -403,7 +398,7 @@ mod tests {
         dispatch("delete", Command::ThreadDelete { thread_id });
         let references = orchestrator_references(&orchestrator).unwrap();
         assert!(references.blobs.is_empty());
-        store.asset_sweep().run(&references);
+        sweep.run(&references);
         assert!(!kept_path.exists(), "a deleted thread's attachment goes");
         orchestrator.shutdown();
     }

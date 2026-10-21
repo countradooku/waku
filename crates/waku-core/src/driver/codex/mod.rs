@@ -11,11 +11,10 @@
 //! (`thread/read`) and background terminals — runs on that one live
 //! connection; no second app-server is started for a live session.
 //!
-//! [`legacy`] serves the session behind the old `DriverControl` interface
-//! through `V1Bridge` until the orchestrator cutover (D-9), and [`title`]
-//! keeps the one-shot title generation the orchestrator's `TitlePort` uses.
+//! [`title`] keeps the one-shot title generation the orchestrator's
+//! `TitlePort` uses.
 
-mod legacy;
+mod computer_use;
 mod normalize;
 mod protocol;
 pub mod script;
@@ -38,7 +37,6 @@ use self::protocol::Connection;
 use crate::driver::v2::coalescer::DeltaCoalescer;
 use crate::driver::v2::{RuntimeResponse, *};
 
-pub(crate) use self::legacy::start_local;
 pub(crate) use self::title::generate_codex_title;
 
 /// `ProviderKind::Codex.id()`.
@@ -128,17 +126,13 @@ pub fn codex_capabilities(cfg: &InstanceConfig) -> Capabilities {
     caps
 }
 
-/// The Codex driver family. Holds no per-session state; `legacy` is set only
-/// by the `V1Bridge` wrapper, which needs the raw frames for the old
-/// desktop events.
+/// The Codex driver family. Holds no per-session state.
 #[derive(Default)]
-pub struct CodexDriver {
-    legacy: Option<Arc<legacy::Sidecar>>,
-}
+pub struct CodexDriver;
 
 impl CodexDriver {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 
@@ -185,9 +179,9 @@ impl DriverV2 for CodexDriver {
     async fn open_session(&self, ctx: SessionContext) -> DriverResult<OpenedSession> {
         let capabilities = self.capabilities(&ctx.instance);
         let computer_use = if ctx.instance.computer_use_enabled {
-            Some(Arc::new(legacy::ComputerUse::load().map_err(|error| {
-                DriverError::Io(std::io::Error::other(error.to_string()))
-            })?))
+            Some(Arc::new(computer_use::ComputerUse::load().map_err(
+                |error| DriverError::Io(std::io::Error::other(error.to_string())),
+            )?))
         } else {
             None
         };
@@ -225,13 +219,9 @@ impl DriverV2 for CodexDriver {
             selection: Mutex::new(ctx.selection.clone()),
             state: Mutex::new(State::new(DeltaCoalescer::new(ctx.clock.clone()))),
             events: Mutex::new(Some(events)),
-            legacy: self.legacy.clone(),
             computer_use,
             created_at: now,
         });
-        if let Some(legacy) = &self.legacy {
-            legacy.attach(shared.clone());
-        }
         tokio::spawn(normalize::read_loop(
             shared.clone(),
             transport.stdout,
@@ -266,9 +256,6 @@ async fn stderr_loop(shared: Arc<Shared>, stderr: Box<dyn tokio::io::AsyncRead +
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         shared.conn.raw_log(FrameDirection::Note, &line);
-        if let Some(legacy) = &shared.legacy {
-            legacy.stderr(&line);
-        }
     }
 }
 
@@ -286,8 +273,7 @@ struct Shared {
     selection: Mutex<Selection>,
     state: Mutex<State>,
     events: Mutex<Option<AdapterEventSender>>,
-    legacy: Option<Arc<legacy::Sidecar>>,
-    computer_use: Option<Arc<legacy::ComputerUse>>,
+    computer_use: Option<Arc<computer_use::ComputerUse>>,
     created_at: Timestamp,
 }
 
@@ -343,8 +329,8 @@ impl Shared {
     }
 
     /// A provider thread row for a thread this session knows natively. Only
-    /// child (subagent) threads, snapshots and the `V1Bridge` use it: the
-    /// orchestrator owns the app-side fields of a root row.
+    /// child (subagent) threads and snapshots use it: the orchestrator owns
+    /// the app-side fields of a root row.
     fn thread_row(
         &self,
         id: ProviderThreadId,
@@ -385,25 +371,10 @@ impl Shared {
         }
     }
 
-    /// Binds this session's root thread and, behind the bridge, reports it.
-    async fn bind_root(
-        &self,
-        provider_thread_id: ProviderThreadId,
-        native: &str,
-        title: Option<String>,
-    ) {
+    /// Binds this session's root thread. The manager writes its row (it
+    /// owns the app-side fields).
+    fn bind_root(&self, provider_thread_id: ProviderThreadId, native: &str) {
         self.state.lock().bind_root(provider_thread_id, native);
-        if self.legacy.is_some() {
-            // The bridge turns the cursor into `Connected` and the name
-            // into the auto title. In orchestrator mode the manager writes
-            // the row itself (it owns its app-side fields).
-            let row = self.thread_row(provider_thread_id, native, None, title);
-            self.emit_coalesced(vec![AdapterEvent::ProviderThreadUpdated {
-                thread: row,
-                retained_native_turn_ids: None,
-            }])
-            .await;
-        }
     }
 
     fn root_native(&self) -> DriverResult<String> {
@@ -414,22 +385,6 @@ impl Shared {
             .map(|root| root.native.clone())
             .ok_or(DriverError::NotReady(NotReadyReason::ThreadMissing))
     }
-}
-
-const RESUME_RETRIES: u32 = 8;
-
-fn is_writer_conflict(error: &protocol::RpcError) -> bool {
-    let message = error.message.to_ascii_lowercase();
-    message.contains("active writer") || message.contains("already loaded")
-}
-
-fn thread_name(result: &Value) -> Option<String> {
-    result
-        .pointer("/thread/name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
 }
 
 fn thread_native_id(result: &Value) -> DriverResult<String> {
@@ -455,29 +410,6 @@ pub struct CodexSession {
 }
 
 impl CodexSession {
-    /// The native id of the root turn running now, for the bridge's Stop,
-    /// which also stops provider-initiated (`/goal`) turns.
-    async fn interrupt_active(&self) -> DriverResult<()> {
-        let target = {
-            let state = self.shared.state.lock();
-            state
-                .root
-                .as_ref()
-                .map(|root| root.native.clone())
-                .zip(state.active_root_turn())
-        };
-        if let Some((thread, turn)) = target {
-            self.shared
-                .conn
-                .request(
-                    "turn/interrupt",
-                    json!({ "threadId": thread, "turnId": turn }),
-                )
-                .await?;
-        }
-        Ok(())
-    }
-
     /// `thread/backgroundTerminals/list`, every page.
     async fn background_terminals(&self) -> DriverResult<Vec<Value>> {
         let thread = self.shared.root_native()?;
@@ -503,19 +435,6 @@ impl CodexSession {
                 None => return Ok(terminals),
             }
         }
-    }
-
-    /// Persists a generated title (`thread/name/set`).
-    async fn set_thread_name(&self, name: &str) -> DriverResult<()> {
-        let thread = self.shared.root_native()?;
-        self.shared
-            .conn
-            .request(
-                "thread/name/set",
-                json!({ "threadId": thread, "name": name }),
-            )
-            .await
-            .map(|_| ())
     }
 
     async fn goal_updated(&self, goal: Option<ThreadGoal>) {
@@ -601,9 +520,7 @@ impl DriverSession for CodexSession {
                 &native,
             ),
         };
-        self.shared
-            .bind_root(provider_thread_id, &native, thread_name(&result))
-            .await;
+        self.shared.bind_root(provider_thread_id, &native);
         // A thread this session started has no turns it has not seen.
         self.shared.state.lock().mark_history_complete();
         Ok(ProviderThreadRef {
@@ -619,29 +536,10 @@ impl DriverSession for CodexSession {
             protocol::thread_resume_params(&req.thread.native.id, &self.shared.cwd, &req.selection);
         // History is read page by page (`thread/turns/list`) when needed.
         params["excludeTurns"] = json!(true);
-        let mut attempt = 0;
-        let result = loop {
-            match self
-                .shared
-                .conn
-                .request_raw("thread/resume", params.clone())
-                .await?
-            {
-                Ok(result) => break result,
-                // A thread forked in another session's app-server stays
-                // loaded there until that server lets go of it (`fork`
-                // unsubscribes); give it a moment.
-                Err(error) if is_writer_conflict(&error) && attempt < RESUME_RETRIES => {
-                    attempt += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                }
-                Err(error) => return Err(protocol::rpc_failure("thread/resume", &error)),
-            }
-        };
+        let result = self.shared.conn.request("thread/resume", params).await?;
         let native = thread_native_id(&result).unwrap_or_else(|_| req.thread.native.id.clone());
         self.shared
-            .bind_root(req.thread.provider_thread_id, &native, thread_name(&result))
-            .await;
+            .bind_root(req.thread.provider_thread_id, &native);
         Ok(ProviderThreadRef {
             provider_thread_id: req.thread.provider_thread_id,
             native: NativeRef::strong(&native),
@@ -868,25 +766,9 @@ impl DriverSession for CodexSession {
             EntityKind::ProviderThread,
             &native,
         );
-        if self.shared.state.lock().root.is_none() {
-            // The session of the forked thread made the fork
-            // (`fork_in_target_session`): the new thread is its own.
-            self.shared
-                .bind_root(provider_thread_id, &native, thread_name(&result))
-                .await;
-        } else if let Err(error) = self
-            .shared
-            .conn
-            .request("thread/unsubscribe", json!({ "threadId": native }))
-            .await
-        {
-            // The fork's turns run in another session: this app-server lets
-            // go of the new thread so that session can load it.
-            self.shared.conn.raw_log(
-                FrameDirection::Note,
-                &format!("thread/unsubscribe after fork failed: {error}"),
-            );
-        }
+        // The forked thread's own session makes the fork
+        // (`fork_in_target_session`): the new thread is its root.
+        self.shared.bind_root(provider_thread_id, &native);
         Ok(ProviderThreadRef {
             provider_thread_id,
             native: NativeRef::strong(&native),

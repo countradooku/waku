@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use crate::ts::TS;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -9,7 +8,7 @@ use crate::computer_use::ComputerAppGrant;
 use crate::model::ProviderKind;
 use crate::storage::StorageSettings;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 #[derive(Default)]
 pub struct DaemonSettings {
@@ -20,7 +19,6 @@ pub struct DaemonSettings {
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
     /// Managed worktree folder and its cleanup rules (#62).
     #[serde(skip_serializing_if = "StorageSettings::is_default")]
-    #[ts(as = "Option<StorageSettings>", optional)]
     pub storage: StorageSettings,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,

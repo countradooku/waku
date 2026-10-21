@@ -8,7 +8,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow, bail};
-use chrono::{SecondsFormat, Utc};
+use chrono::SecondsFormat;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
@@ -30,22 +30,6 @@ pub struct ClaudeSessionMetadata {
     pub title: Option<String>,
 }
 
-pub fn session_metadata(session_id: &str) -> anyhow::Result<ClaudeSessionMetadata> {
-    session_metadata_in(&projects_directory()?, session_id)
-}
-
-pub fn message_id_for_turn(session_id: &str, provider_turn_count: usize) -> anyhow::Result<String> {
-    message_id_for_turn_in(&projects_directory()?, session_id, provider_turn_count)
-}
-
-pub fn fork_session_at(
-    session_id: &str,
-    up_to_message_id: &str,
-    title: &str,
-) -> anyhow::Result<ForkedClaudeSession> {
-    fork_session_at_in(&projects_directory()?, session_id, up_to_message_id, title)
-}
-
 /// List Claude Code conversations that can be resumed by session ID.
 ///
 /// Claude keeps one JSONL file per top-level conversation directly beneath a
@@ -53,16 +37,6 @@ pub fn fork_session_at(
 /// excluded, matching the interactive `/resume` picker.
 pub fn list_provider_sessions(limit: usize) -> anyhow::Result<Vec<ProviderSessionSummary>> {
     list_provider_sessions_in(&projects_directory()?, limit)
-}
-
-/// Import the visible text of one Claude Code conversation. The native JSONL
-/// remains the source of truth and the returned cursor continues that exact
-/// conversation on the next Waku prompt.
-pub fn provider_session_history(
-    session_id: &str,
-    turn_limit: usize,
-) -> anyhow::Result<ProviderSessionHistory> {
-    provider_session_history_in(&projects_directory()?, session_id, turn_limit)
 }
 
 fn projects_directory() -> anyhow::Result<PathBuf> {
@@ -721,21 +695,6 @@ fn is_user_prompt(entry: &Map<String, Value>) -> bool {
     }
 }
 
-fn fork_session_at_in(
-    projects_directory: &Path,
-    session_id: &str,
-    up_to_message_id: &str,
-    title: &str,
-) -> anyhow::Result<ForkedClaudeSession> {
-    fork_session_with(
-        projects_directory,
-        session_id,
-        up_to_message_id,
-        title,
-        ForkIds::random(),
-    )
-}
-
 /// The ids and timestamp a transcript copy is written with. `DriverV2`
 /// derives them, so a replayed fork writes the same file every time.
 pub(crate) struct ForkIds {
@@ -746,14 +705,6 @@ pub(crate) struct ForkIds {
 }
 
 impl ForkIds {
-    fn random() -> Self {
-        Self {
-            session_id: Uuid::new_v4().to_string(),
-            timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-            derived: false,
-        }
-    }
-
     /// `session_id` names the copy; message uuids are UUIDv5 of the copy's
     /// session id and the original uuid; `now_ms` stamps the copy.
     pub(crate) fn derived(session_id: String, now_ms: i64) -> Self {
@@ -1114,58 +1065,5 @@ mod tests {
         assert!(is_user_prompt(image_prompt));
         assert_eq!(message_text(image_prompt), None);
         assert!(serde_json::to_vec(image_prompt).unwrap().len() < 256);
-    }
-
-    #[test]
-    fn forks_through_message_and_remaps_the_parent_chain() {
-        let (root, source) = fixture();
-        let projects = root.join("projects");
-        let fork = fork_session_at_in(&projects, SESSION, ASSISTANT_TWO, "Rewound task")
-            .expect("fork succeeds");
-        let fork_path = source
-            .parent()
-            .unwrap()
-            .join(format!("{}.jsonl", fork.session_id));
-        let entries = read_entries(&fork_path).unwrap();
-        let transcript = transcript_entries(&entries);
-
-        assert_eq!(transcript.len(), 4);
-        assert!(
-            transcript
-                .iter()
-                .all(|entry| entry.get("sessionId").and_then(Value::as_str)
-                    == Some(fork.session_id.as_str()))
-        );
-        assert!(
-            transcript
-                .iter()
-                .all(|entry| entry.get("type").and_then(Value::as_str) != Some("progress"))
-        );
-        let first_assistant = transcript
-            .iter()
-            .find(|entry| {
-                entry
-                    .get("forkedFrom")
-                    .and_then(|forked_from| forked_from.get("messageUuid"))
-                    .and_then(Value::as_str)
-                    == Some(ASSISTANT_ONE)
-            })
-            .unwrap();
-        assert_eq!(
-            first_assistant.get("parentUuid").and_then(Value::as_str),
-            fork.message_ids.get(USER_ONE).map(String::as_str)
-        );
-        assert!(entries.iter().any(|entry| {
-            entry.get("type").and_then(Value::as_str) == Some("content-replacement")
-        }));
-        assert!(entries.iter().any(|entry| {
-            entry.get("customTitle").and_then(Value::as_str) == Some("Rewound task")
-        }));
-        assert!(
-            !fs::read_to_string(source)
-                .unwrap()
-                .contains(&fork.session_id)
-        );
-        fs::remove_dir_all(root).ok();
     }
 }

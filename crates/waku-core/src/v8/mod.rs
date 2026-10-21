@@ -1,13 +1,11 @@
-//! The daemon's protocol v8 endpoint (RFC 0003), served beside the legacy
-//! protocol until the clients move over (#53).
+//! The daemon's protocol v8 endpoint (RFC 0003), its only protocol (D6).
 //!
 //! - **WebSocket**: `GET /v8` with subprotocol `waku.v8` on the daemon's TCP
-//!   listener; `/v1` stays the legacy endpoint.
-//! - **Local socket**: the same Unix socket or named pipe as the legacy
-//!   protocol. A v8 client opens with the 8-byte `WAKU` preface, a legacy
-//!   client with an HTTP upgrade, so the first four bytes tell them apart.
+//!   listener.
+//! - **Local socket**: the daemon's Unix socket or named pipe. A client
+//!   opens with the 8-byte `WAKU` preface.
 //!
-//! Methods start as adapters over the existing [`Backend`]; orchestration
+//! Methods outside orchestration call the daemon's [`Backend`]; orchestration
 //! (`orchestration.dispatch`, `projects.list`, the `threads.*` reads and
 //! searches, the `shell`, `thread` and `commandOutput` streams) is served
 //! from the daemon's orchestrator ([`orchestration`], #54–#57, #55).
@@ -33,8 +31,7 @@ use waku_protocol::v8::{
 };
 
 use crate::model::ProviderKind;
-use crate::protocol::{Command, Request, ResponsePayload};
-use crate::server::{Backend, EventSink, ShutdownSignal};
+use crate::server::{Backend, ShutdownSignal};
 use crate::settings::DaemonSettings;
 
 pub(crate) use connection::Budget;
@@ -42,7 +39,7 @@ pub(crate) use connection::Budget;
 /// Everything a v8 connection needs from the daemon.
 pub(crate) struct V8Context {
     pub(crate) token: String,
-    pub(crate) backend: BackendHandle,
+    pub(crate) backend: Arc<dyn Backend>,
     pub(crate) settings: SettingsBus,
     pub(crate) shutdown: ShutdownSignal,
     pub(crate) limits: Limits,
@@ -61,7 +58,7 @@ pub(crate) struct V8Context {
 impl V8Context {
     pub(crate) fn new(
         token: String,
-        backend: BackendHandle,
+        backend: Arc<dyn Backend>,
         settings: SettingsBus,
         shutdown: ShutdownSignal,
     ) -> Self {
@@ -133,65 +130,12 @@ fn host_name() -> String {
         .unwrap_or_else(|| "localhost".into())
 }
 
-/// Calls into the daemon's [`Backend`] on behalf of v8 methods. They are not
-/// runtime commands, so they use no session.
-#[derive(Clone)]
-pub(crate) struct BackendHandle {
-    backend: Arc<dyn Backend>,
-    events: EventSink,
-}
-
-impl BackendHandle {
-    pub(crate) fn new(backend: Arc<dyn Backend>, events: EventSink) -> Self {
-        Self { backend, events }
-    }
-
-    pub(crate) fn call(&self, command: Command) -> anyhow::Result<ResponsePayload> {
-        self.backend.handle(
-            Request {
-                request_id: Uuid::new_v4(),
-                session_id: Uuid::nil(),
-                runtime_id: Uuid::nil(),
-                command,
-            },
-            self.events.clone(),
-        )
-    }
-
-    /// Run `command` as `session_id`/`runtime_id`, with its events going to
-    /// `events` (the terminals of v8 clients).
-    pub(crate) fn call_as(
-        &self,
-        session_id: Uuid,
-        runtime_id: Uuid,
-        command: Command,
-        events: EventSink,
-    ) -> anyhow::Result<ResponsePayload> {
-        self.backend.handle(
-            Request {
-                request_id: Uuid::new_v4(),
-                session_id,
-                runtime_id,
-                command,
-            },
-            events,
-        )
-    }
-
-    /// The daemon settings as clients see them, published to `bus`.
-    pub(crate) fn load_settings(&self, bus: &SettingsBus) -> anyhow::Result<Arc<SettingsState>> {
-        match self.call(Command::GetSettings)? {
-            ResponsePayload::Settings { settings } => Ok(bus.publish(wire_settings(&settings))),
-            other => anyhow::bail!("unexpected settings response {}", payload_name(&other)),
-        }
-    }
-}
-
-pub(crate) fn payload_name(payload: &ResponsePayload) -> String {
-    serde_json::to_value(payload)
-        .ok()
-        .and_then(|value| value.get("type")?.as_str().map(str::to_owned))
-        .unwrap_or_default()
+/// The daemon settings as clients see them, published to `bus`.
+pub(crate) fn load_settings(
+    backend: &dyn Backend,
+    bus: &SettingsBus,
+) -> anyhow::Result<Arc<SettingsState>> {
+    Ok(bus.publish(wire_settings(&backend.settings()?)))
 }
 
 /// One published settings revision. Its `updated` item is encoded at most
@@ -223,8 +167,7 @@ impl SettingsState {
     }
 }
 
-/// The latest daemon settings, for the `settings` stream. Settings changed
-/// through either protocol are published here.
+/// The latest daemon settings, for the `settings` stream.
 #[derive(Clone)]
 pub(crate) struct SettingsBus {
     sender: Arc<watch::Sender<Option<Arc<SettingsState>>>>,
@@ -245,10 +188,6 @@ impl SettingsBus {
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<Option<Arc<SettingsState>>> {
         self.sender.subscribe()
-    }
-
-    pub(crate) fn has_subscribers(&self) -> bool {
-        self.sender.receiver_count() > 0
     }
 
     /// Publish `settings`; subscribers are woken only when the revision
@@ -289,7 +228,7 @@ pub(crate) fn settings_revision(settings: &Settings) -> u64 {
     hash & waku_protocol::v8::MAX_SAFE_INTEGER
 }
 
-/// The legacy settings document as v8 clients see it.
+/// The daemon settings document as v8 clients see it.
 pub(crate) fn wire_settings(settings: &DaemonSettings) -> Settings {
     Settings {
         computer_use_enabled: settings.computer_use_enabled,
@@ -323,19 +262,8 @@ fn provider_name(provider: &ProviderKind) -> String {
         .unwrap_or_default()
 }
 
-/// The legacy protocol changed the settings: re-read and publish them for
-/// v8 subscribers. Runs on the blocking pool after `UpdateSettings`.
-pub(crate) fn settings_changed(backend: &BackendHandle, bus: &SettingsBus) {
-    if !bus.has_subscribers() {
-        return;
-    }
-    if let Err(error) = backend.load_settings(bus) {
-        eprintln!("waku-daemon could not publish settings to v8 clients: {error:#}");
-    }
-}
-
-/// Serve a v8 client on the local socket. `magic` is the four bytes already
-/// read to tell it from a legacy client.
+/// Serve a v8 client on the local socket. `magic` is the four bytes of its
+/// preface already read.
 pub(crate) async fn serve_local<S>(mut stream: S, magic: [u8; 4], context: Arc<V8Context>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,

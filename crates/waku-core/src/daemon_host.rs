@@ -23,7 +23,7 @@
 //!    terminals, the attachment store);
 //! 5. the lifecycle service (auto-settle, snooze wake);
 //! 6. the blob sweeper ([`crate::blob_sweep`]), which keeps what the
-//!    orchestrator, the drafts and the legacy sessions reference, and a
+//!    orchestrator and the drafts reference, and a
 //!    watcher that asks it for a sweep when a thread is deleted or rolled
 //!    back.
 //!
@@ -171,7 +171,7 @@ impl DaemonHost {
                 deltas: Some(live.deltas.clone()),
                 raw_log: Arc::new(NullRawLog),
                 checkpoints: Some(Arc::new(GitCheckpointPort)),
-                runtime: crate::driver::v2::bridge::runtime(),
+                runtime: crate::driver::v2::runtime(),
             },
             SessionManagerConfig::default(),
         );
@@ -197,11 +197,11 @@ impl DaemonHost {
         );
 
         let swept = orchestrator.clone();
-        let legacy = backend.asset_sweep();
+        let stores = backend.asset_sweep();
         let sweeper =
             BlobSweeper::start(options.blob_sweeps, move || {
                 match orchestrator_references(&swept) {
-                    Ok(references) => legacy.run(&references),
+                    Ok(references) => stores.run(&references),
                     Err(error) => eprintln!("waku-daemon skipped a blob sweep: {error:#}"),
                 }
             });
@@ -278,7 +278,7 @@ impl DaemonHost {
         }
         // Not on a runtime thread: the daemon's main thread or a test's.
         let manager = self.manager.clone();
-        let runtime = crate::driver::v2::bridge::runtime();
+        let runtime = crate::driver::v2::runtime();
         let _ = std::thread::Builder::new()
             .name("waku-session-shutdown".into())
             .spawn(move || runtime.block_on(manager.shutdown()))

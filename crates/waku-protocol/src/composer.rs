@@ -1,7 +1,6 @@
-use crate::ts::TS;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum CommandScope {
     Project,
     User,
@@ -34,7 +33,7 @@ impl CommandScope {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SlashCommand {
     pub name: String,
     pub description: String,
@@ -43,7 +42,7 @@ pub struct SlashCommand {
     pub template: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FileEntry {
     pub path: String,
     pub is_dir: bool,

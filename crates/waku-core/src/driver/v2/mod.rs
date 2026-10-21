@@ -12,9 +12,7 @@
 //! ```
 //!
 //! Drivers never spawn processes or open sockets themselves: they go through
-//! [`SessionContext::transports`], which replay replaces (#45). Until the
-//! orchestrator cutover, [`bridge::V1Bridge`] runs any `DriverSession` behind
-//! the old `DriverControl` interface (D-9).
+//! [`SessionContext::transports`], which replay replaces (#45).
 //!
 //! The normalized events, run references and the selection-transition plan
 //! are shared with `waku-orchestrator`, whose pure `decide_ingest` reads them;
@@ -24,7 +22,6 @@
 // own attribute, which newer clippy reports as `double_must_use`.
 #![allow(clippy::double_must_use)]
 
-pub mod bridge;
 pub mod coalescer;
 pub mod fake;
 pub mod fake_agent;
@@ -61,6 +58,28 @@ pub use self::transport::{
     Downlink, HttpMethod, HttpResponse, HttpTransport, ProcessExit, ProcessSpec,
     ProcessTransportFactory, StdioTransport, TransportFactory,
 };
+
+/// The runtime every driver session runs on: drivers are async (RFC 0002
+/// D-2) and the daemon's ports are not. Created on first use. Its threads
+/// unblock SIGCHLD: agents spawned from them inherit the signal mask and
+/// must be able to reap their children.
+pub fn runtime() -> tokio::runtime::Handle {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_name("waku-driver-v2")
+                .on_thread_start(|| {
+                    let _ = crate::command_env::unblock_sigchld_for_current_thread();
+                })
+                .enable_all()
+                .build()
+                .expect("the driver runtime starts")
+        })
+        .handle()
+        .clone()
+}
 
 pub type DriverResult<T> = Result<T, DriverError>;
 pub type AdapterEventSender = mpsc::Sender<AdapterEvent>;

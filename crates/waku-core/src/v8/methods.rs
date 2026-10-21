@@ -20,10 +20,8 @@ pub(crate) fn handle(
 ) -> Result<MethodResult, Error> {
     match method {
         Method::SettingsGet(_) => {
-            let state = context
-                .backend
-                .load_settings(&context.settings)
-                .map_err(internal)?;
+            let state =
+                super::load_settings(&*context.backend, &context.settings).map_err(internal)?;
             Ok(MethodResult::SettingsGet(SettingsSnapshot {
                 revision: state.revision,
                 settings: state.settings.clone(),

@@ -249,7 +249,6 @@ fn handle(
             }
             Ok(json!({}))
         }
-        "thread/unsubscribe" => Ok(json!({"status": "unsubscribed"})),
         "turn/start" => {
             let thread_id = params
                 .get("threadId")

@@ -4,8 +4,6 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ts::TS;
-
 /// `events.sequence`; 0 means "before the first event".
 pub type Sequence = u64;
 /// Unix epoch milliseconds, UTC (R7).
@@ -37,9 +35,8 @@ uuid_ids!(
 /// The idempotency key of a dispatched command: 1–256 bytes of
 /// `[A-Za-z0-9:._-]`, checked on decode. Ids derived from stable inputs
 /// (`limit-resume:<thread>:<run>:<reset>`, `effect:<id>:<n>`) stay readable.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-#[ts(type = "string")]
 pub struct CommandId(String);
 
 /// Why a string is not a valid [`CommandId`].
@@ -134,7 +131,7 @@ impl fmt::Display for CommandId {
 
 /// A configured provider instance. Phase 2: the driver tag (`"codex"`);
 /// Phase 3: `"codex:<name>"`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct ProviderInstanceId(pub String);
@@ -161,7 +158,7 @@ impl fmt::Display for ProviderInstanceId {
 }
 
 /// A fractional index (base-62), compared bytewise.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct OrderKey(pub String);
@@ -178,7 +175,7 @@ impl OrderKey {
 
 /// Opaque JSON text, never parsed by the protocol layer (RFC 0003 §5.1).
 /// Replaces `serde_json::Value` wherever provider-native JSON is carried.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct JsonText(pub String);

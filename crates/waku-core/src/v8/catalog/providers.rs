@@ -16,11 +16,8 @@ use waku_protocol::v8::{
     UsageMonth, UsageProject, UsageProviderPart, UsageProviderSlice, UsageWindow,
 };
 
-use super::{
-    Domain, call, content_revision, display_path, provider_kind, seconds_to_ms, unexpected,
-};
+use super::{Domain, call, content_revision, display_path, provider_kind, seconds_to_ms};
 use crate::model::ProviderKind;
-use crate::protocol::{Command, ResponsePayload};
 use crate::settings::DaemonSettings;
 use crate::v8::V8Context;
 use crate::v8::connection::StreamSink;
@@ -126,10 +123,7 @@ impl ProvidersBus {
 }
 
 pub(super) fn daemon_settings(context: &V8Context) -> Result<DaemonSettings, Error> {
-    match call(context, Command::GetSettings, Domain::General)? {
-        ResponsePayload::Settings { settings } => Ok(settings),
-        other => Err(unexpected(&other)),
-    }
+    call(context.backend.settings(), Domain::General)
 }
 
 /// The binary a provider instance runs: its override in settings, or the
@@ -193,19 +187,15 @@ fn legacy_probe(
     discover_models: bool,
     probe_version: bool,
 ) -> Result<(crate::model::ProviderProbe, Option<String>), Error> {
-    match call(
-        context,
-        Command::ProbeProvider {
-            provider: kind,
-            binary_override: settings.provider_binary_overrides.get(&kind).cloned(),
+    call(
+        context.backend.probe_provider(
+            kind,
+            settings.provider_binary_overrides.get(&kind).cloned(),
             discover_models,
             probe_version,
-        },
+        ),
         Domain::Provider,
-    )? {
-        ResponsePayload::ProviderProbe { probe, version } => Ok((probe, version)),
-        other => Err(unexpected(&other)),
-    }
+    )
 }
 
 /// Every provider's status from settings and the cached probe (a `PATH`
@@ -343,29 +333,26 @@ pub(super) fn plan_usage(
         return Ok(None);
     }
     let settings = daemon_settings(context)?;
-    let usage = match call(
-        context,
-        Command::FetchPlanUsage {
-            provider: kind,
-            binary_override: settings.provider_binary_overrides.get(&kind).cloned(),
-            cli_version: context.catalog.providers.version(kind.id()),
-        },
+    let usage = call(
+        context.backend.plan_usage(
+            kind,
+            settings.provider_binary_overrides.get(&kind).cloned(),
+            context.catalog.providers.version(kind.id()),
+        ),
         Domain::Provider,
-    )? {
-        ResponsePayload::PlanUsage { usage } => usage.map(|usage| PlanUsage {
-            plan_label: usage.plan_label,
-            windows: usage
-                .windows
-                .into_iter()
-                .map(|window| PlanWindow {
-                    label: window.label,
-                    percent: window.percent,
-                    resets_at: window.resets_at.map(|seconds| seconds.saturating_mul(1000)),
-                })
-                .collect(),
-        }),
-        other => return Err(unexpected(&other)),
-    };
+    )?
+    .map(|usage| PlanUsage {
+        plan_label: usage.plan_label,
+        windows: usage
+            .windows
+            .into_iter()
+            .map(|window| PlanWindow {
+                label: window.label,
+                percent: window.percent,
+                resets_at: window.resets_at.map(|seconds| seconds.saturating_mul(1000)),
+            })
+            .collect(),
+    });
     let _ = context
         .catalog
         .providers
@@ -448,17 +435,13 @@ pub(super) fn provider_sessions(
     // Conversations a live thread already holds are not offered again; ask
     // for enough more to fill `limit` after leaving them out.
     let imported = imported_native_ids(context, kind)?;
-    let sessions = match call(
-        context,
-        Command::ListProviderSessions {
-            provider: kind,
-            limit: (limit + imported.len()).min(MAX_PROVIDER_SESSIONS as usize),
-        },
+    let sessions = call(
+        context.backend.provider_sessions(
+            kind,
+            (limit + imported.len()).min(MAX_PROVIDER_SESSIONS as usize),
+        ),
         Domain::Provider,
-    )? {
-        ResponsePayload::ProviderSessions { sessions } => sessions,
-        other => return Err(unexpected(&other)),
-    };
+    )?;
     sessions
         .into_iter()
         .filter(|session| !imported.contains(session.cursor.native_id()))
@@ -566,17 +549,10 @@ pub(super) fn usage(
             .map(|project| project.path)
             .collect()
     };
-    let history = match call(
-        context,
-        Command::LoadUsageHistory {
-            window,
-            project_roots,
-        },
+    let history = call(
+        context.backend.usage_history(window, project_roots),
         Domain::General,
-    )? {
-        ResponsePayload::UsageHistory { history } => history,
-        other => return Err(unexpected(&other)),
-    };
+    )?;
     use crate::usage_history::PricingStatus as Pricing;
     Ok(UsageHistory {
         window: wire_window(history.window),
@@ -684,18 +660,11 @@ pub(super) fn computer_permissions(
             required: Scope::Operate,
         }));
     }
-    match call(
-        context,
-        Command::ProbeComputerPermissions {
-            prompt: params.prompt,
-        },
-        Domain::General,
-    ) {
-        Ok(ResponsePayload::ComputerPermissions { permissions }) => Ok(ComputerPermissions {
+    match context.backend.computer_permissions(params.prompt) {
+        Ok(permissions) => Ok(ComputerPermissions {
             screen_recording: permissions.screen_recording,
             accessibility: permissions.accessibility,
         }),
-        Ok(other) => Err(unexpected(&other)),
-        Err(error) => Err(Error::new(ErrorCode::Unsupported, error.message)),
+        Err(error) => Err(Error::new(ErrorCode::Unsupported, format!("{error:#}"))),
     }
 }
