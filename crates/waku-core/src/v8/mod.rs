@@ -312,6 +312,7 @@ pub(crate) fn wire_settings(settings: &DaemonSettings) -> Settings {
             .map(|(provider, binary)| (provider_name(provider), binary.clone()))
             .collect(),
         storage: catalog::wire_storage(&settings.storage),
+        continue_threads_after_restart: settings.continue_threads_after_restart(),
     }
 }
 

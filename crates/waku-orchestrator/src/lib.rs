@@ -22,6 +22,7 @@ pub mod lifecycle;
 pub mod orchestrator;
 pub mod projection;
 pub mod provider;
+pub mod recovery;
 pub mod search;
 pub mod store;
 pub mod streams;

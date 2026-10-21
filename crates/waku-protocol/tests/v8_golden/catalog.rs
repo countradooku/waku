@@ -205,6 +205,7 @@ fn settings() -> Settings {
         disabled_providers: vec!["grok".into()],
         provider_binary_overrides: BTreeMap::new(),
         storage: storage(),
+        continue_threads_after_restart: true,
     }
 }
 

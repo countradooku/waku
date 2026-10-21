@@ -44,6 +44,8 @@ impl World {
     }
 }
 
+type ExitSender = Arc<Mutex<Option<oneshot::Sender<ProcessExit>>>>;
+
 /// Spawns fake agents. Threads live in one world shared by every process the
 /// factory starts, as a real CLI's threads live on disk.
 #[derive(Clone)]
@@ -52,6 +54,8 @@ pub struct FakeAgentFactory {
     home: PathBuf,
     /// A rollback replaces the native thread instead of truncating it.
     pub rollback_replaces: bool,
+    /// Running agents, for `kill_all` (a daemon restart).
+    running: Arc<Mutex<Vec<(tokio::task::AbortHandle, ExitSender)>>>,
 }
 
 impl FakeAgentFactory {
@@ -60,6 +64,7 @@ impl FakeAgentFactory {
             world: Arc::default(),
             home,
             rollback_replaces: false,
+            running: Arc::default(),
         }
     }
 }
@@ -77,10 +82,17 @@ impl TransportFactory for FakeAgentFactory {
             active: None,
             next_request: 0,
         };
-        tokio::spawn(async move {
+        let exit_sender: ExitSender = Arc::new(Mutex::new(Some(exit_sender)));
+        let finished = exit_sender.clone();
+        let task = tokio::spawn(async move {
             agent.run(agent_stdin).await;
-            let _ = exit_sender.send(ProcessExit::SUCCESS);
+            if let Some(exit) = finished.lock().take() {
+                let _ = exit.send(ProcessExit::SUCCESS);
+            }
         });
+        let mut running = self.running.lock();
+        running.retain(|(task, _)| !task.is_finished());
+        running.push((task.abort_handle(), exit_sender));
         Ok(StdioTransport {
             stdin: Box::new(driver_stdin),
             stdout: Box::new(driver_stdout),
@@ -99,6 +111,22 @@ impl TransportFactory for FakeAgentFactory {
 
     fn provider_home(&self, _cfg: &InstanceConfig) -> PathBuf {
         self.home.clone()
+    }
+
+    /// SIGKILL for every running agent: its output ends mid-turn and it
+    /// exits with the signal. The world (its threads) survives, as a real
+    /// CLI's threads survive on disk.
+    fn kill_all(&self) {
+        for (task, exit) in self.running.lock().drain(..) {
+            task.abort();
+            if let Some(exit) = exit.lock().take() {
+                let _ = exit.send(ProcessExit {
+                    success: false,
+                    code: None,
+                    signal: Some(9),
+                });
+            }
+        }
     }
 }
 

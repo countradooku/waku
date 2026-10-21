@@ -142,6 +142,8 @@ pub fn settings_patch(settings: &DaemonSettings) -> SettingsPatch {
     disabled.sort();
     disabled.dedup();
     SettingsPatch {
+        // Not a desktop setting; left as the daemon has it.
+        continue_threads_after_restart: None,
         computer_use_enabled: Some(settings.computer_use_enabled),
         computer_use_allowed_apps: Some(
             settings
@@ -568,6 +570,7 @@ mod tests {
             disabled_providers: patch.disabled_providers.unwrap(),
             provider_binary_overrides: patch.provider_binary_overrides.unwrap(),
             storage: patch.storage.unwrap(),
+            continue_threads_after_restart: true,
         };
         let back = settings_from_wire(&wire);
         assert!(same_settings(&settings, &back));

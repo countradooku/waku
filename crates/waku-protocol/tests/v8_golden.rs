@@ -165,6 +165,7 @@ fn settings() -> Settings {
             ("codex".into(), "/usr/local/bin/codex".into()),
         ]),
         storage: StorageSettings::default(),
+        continue_threads_after_restart: true,
     }
 }
 

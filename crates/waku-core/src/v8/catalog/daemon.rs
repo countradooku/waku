@@ -207,6 +207,9 @@ pub(super) fn update_settings(
     if let Some(storage) = patch.storage {
         settings.storage = legacy_storage(storage)?;
     }
+    if let Some(enabled) = patch.continue_threads_after_restart {
+        settings.set_continue_threads_after_restart(enabled);
+    }
     call(
         context,
         Command::UpdateSettings { settings },

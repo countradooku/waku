@@ -499,6 +499,7 @@ fn pending_requests_are_always_in_the_snapshot() {
                 updated_at: START,
                 kind: TurnItemKind::SystemNotice {
                     message: format!("row {n}"),
+                    lifecycle: None,
                 },
             })
         })

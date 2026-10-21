@@ -566,7 +566,8 @@ pub struct TurnStart {
     pub run: RunRef,
     pub run_ordinal: u32,
     pub provider_turn_ordinal: u32,
-    /// Set on a steering-restart or retry attempt.
+    /// Set on a steering-restart or retry attempt, and on a run continuing
+    /// one a daemon restart interrupted (#59).
     pub restart_continuation_of: Option<RunId>,
     pub thread: ProviderThreadRef,
     pub message: TurnMessage,

@@ -1,0 +1,13 @@
+[Unit]
+Description=Waku daemon (background service, #58)
+
+[Service]
+Type=simple
+ExecStart="/home/dev/.waku-fork/bin/waku-daemon-service"
+Restart=on-failure
+RestartSec=2
+StandardOutput=append:/home/dev/.waku-fork/logs/daemon.log
+StandardError=append:/home/dev/.waku-fork/logs/daemon.log
+
+[Install]
+WantedBy=default.target

@@ -8,6 +8,13 @@
 //! counters (`SequentialIds`, `SeqIdAllocator`), and native ids bind through
 //! UUIDv5. Every run ends by checking that rebuilding the projections from
 //! the event log equals the live projections.
+//!
+//! `restart_daemon` (#59) is a `kill -9` of the daemon: the effect workers
+//! and the orchestrator stop without a graceful shutdown, every provider
+//! process is killed, and a new orchestrator, session manager and worker
+//! pool open the same `state.sqlite` and run the startup sequence
+//! (effect reconciliation, then `recover_after_restart`). The transcript
+//! continues with the processes the new daemon spawns.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -19,6 +26,7 @@ use serde::Deserialize;
 use tempfile::TempDir;
 use uuid::Uuid;
 use waku_orchestrator::fakes::FakePorts;
+use waku_orchestrator::recovery::{RecoveryReport, recover_after_restart};
 use waku_orchestrator::{
     DefaultExecutor, DispatchError, EffectWorkerPool, ManualClock, Orchestrator,
     OrchestratorConfig, SequentialIds, ThreadProjection, WorkerConfig,
@@ -159,6 +167,8 @@ pub enum ScenarioStep {
         #[serde(default)]
         thread: Option<String>,
     },
+    /// Kills the daemon and starts it again on the same database (#59).
+    RestartDaemon,
 }
 
 pub struct ScenarioResult {
@@ -177,6 +187,8 @@ pub struct ScenarioResult {
     pub released: Vec<ThreadId>,
     /// The harness workspace (`<workspace>` in transcripts).
     pub workspace: PathBuf,
+    /// What each `restart_daemon` step's recovery did, in order.
+    pub recoveries: Vec<RecoveryReport>,
 }
 
 pub struct ReplayHarness {
@@ -196,6 +208,91 @@ pub struct ReplayHarness {
     replay: Option<Arc<ReplayTransportFactory>>,
     counter: u128,
     released: Vec<ThreadId>,
+    /// What a restarted daemon is built from.
+    database: PathBuf,
+    registry: DriverRegistry,
+    factory: Arc<dyn TransportFactory>,
+    native_ids: Arc<SeqIdAllocator>,
+    boots: u64,
+    recoveries: Vec<RecoveryReport>,
+}
+
+/// One daemon's orchestrator, session manager and effect workers.
+struct Daemon {
+    orchestrator: Arc<Orchestrator>,
+    manager: Arc<ProviderSessionManager>,
+    pool: EffectWorkerPool,
+    recovery: Option<RecoveryReport>,
+}
+
+struct DaemonParts<'a> {
+    database: &'a std::path::Path,
+    clock: &'a Arc<ManualClock>,
+    registry: &'a DriverRegistry,
+    factory: &'a Arc<dyn TransportFactory>,
+    native_ids: &'a Arc<SeqIdAllocator>,
+    ports: &'a FakePorts,
+    runtime: tokio::runtime::Handle,
+    adapter_events: &'a Arc<Mutex<Vec<AdapterEvent>>>,
+}
+
+/// Opens the orchestrator on `database` and starts a session manager and
+/// effect workers on it. Boot 0 is the first start; a later boot runs the
+/// startup recovery first and takes fresh app ids from its own counter.
+fn start_daemon(parts: DaemonParts<'_>, boot: u64) -> Result<Daemon, ReplayError> {
+    let mut config = OrchestratorConfig::new(parts.database);
+    config.read_connections = 2;
+    let orchestrator = Orchestrator::open(
+        config,
+        waku_orchestrator::Dependencies {
+            clock: parts.clock.clone(),
+            ids: Box::new(SequentialIds::new(0x5eed + boot)),
+            capabilities: Arc::new(parts.registry.clone()),
+        },
+    )
+    .map_err(harness_error)?;
+    let recovery = if boot == 0 {
+        None
+    } else {
+        EffectWorkerPool::reconcile_after_process_loss(&orchestrator).map_err(harness_error)?;
+        Some(
+            recover_after_restart(&orchestrator, Uuid::from_u128(u128::from(boot)))
+                .map_err(harness_error)?,
+        )
+    };
+    let manager = ProviderSessionManager::new(
+        ManagerDeps {
+            orchestrator: orchestrator.clone(),
+            registry: parts.registry.clone(),
+            transports: parts.factory.clone(),
+            ids: parts.native_ids.clone(),
+            clock: parts.clock.clone(),
+            output: Arc::new(NullOutput),
+            deltas: None,
+            raw_log: Arc::new(NullRawLog),
+            checkpoints: Some(parts.ports.checkpoints.clone()),
+            runtime: parts.runtime.clone(),
+        },
+        SessionManagerConfig::default(),
+    );
+    let executor = Arc::new(DefaultExecutor {
+        provider: Arc::new(ManagerExecutor(manager.clone())),
+        ports: parts.ports.ports(),
+    });
+    let pool = EffectWorkerPool::start(orchestrator.clone(), executor, WorkerConfig::default());
+    let mut live = manager.subscribe();
+    let sink = parts.adapter_events.clone();
+    parts.runtime.spawn(async move {
+        while let Ok(event) = live.recv().await {
+            sink.lock().push(event.event);
+        }
+    });
+    Ok(Daemon {
+        orchestrator,
+        manager,
+        pool,
+        recovery,
+    })
 }
 
 fn harness_error(error: impl std::fmt::Display) -> ReplayError {
@@ -281,55 +378,32 @@ impl ReplayHarness {
         };
         let registry = DriverRegistry::new();
         registry.register(driver, instance.clone());
-        let mut config = OrchestratorConfig::new(root.join("state.sqlite"));
-        config.read_connections = 2;
-        let orchestrator = Orchestrator::open(
-            config,
-            waku_orchestrator::Dependencies {
-                clock: clock.clone(),
-                ids: Box::new(SequentialIds::new(0x5eed)),
-                capabilities: Arc::new(registry.clone()),
-            },
-        )
-        .map_err(harness_error)?;
+        let database = root.join("state.sqlite");
         let ports = FakePorts::default();
-        let manager = ProviderSessionManager::new(
-            ManagerDeps {
-                orchestrator: orchestrator.clone(),
-                registry,
-                transports: factory,
-                ids: Arc::new(SeqIdAllocator::new()),
-                clock: clock.clone(),
-                output: Arc::new(NullOutput),
-                deltas: None,
-                raw_log: Arc::new(NullRawLog),
-                checkpoints: Some(ports.checkpoints.clone()),
-                runtime: runtime.handle().clone(),
-            },
-            SessionManagerConfig::default(),
-        );
-        let executor = Arc::new(DefaultExecutor {
-            provider: Arc::new(ManagerExecutor(manager.clone())),
-            ports: ports.ports(),
-        });
-        let pool = EffectWorkerPool::start(orchestrator.clone(), executor, WorkerConfig::default());
+        let native_ids = Arc::new(SeqIdAllocator::new());
         let adapter_events = Arc::new(Mutex::new(Vec::new()));
-        let mut live = manager.subscribe();
-        let sink = adapter_events.clone();
-        runtime.spawn(async move {
-            while let Ok(event) = live.recv().await {
-                sink.lock().push(event.event);
-            }
-        });
+        let daemon = start_daemon(
+            DaemonParts {
+                database: &database,
+                clock: &clock,
+                registry: &registry,
+                factory: &factory,
+                native_ids: &native_ids,
+                ports: &ports,
+                runtime: runtime.handle().clone(),
+                adapter_events: &adapter_events,
+            },
+            0,
+        )?;
         let mut harness = Self {
             runtime,
             _dir: dir,
             workspace,
             home,
             clock,
-            orchestrator,
-            manager,
-            pool: Some(pool),
+            orchestrator: daemon.orchestrator,
+            manager: daemon.manager,
+            pool: Some(daemon.pool),
             ports,
             instance,
             project: ProjectId(Uuid::nil()),
@@ -338,6 +412,12 @@ impl ReplayHarness {
             replay,
             counter: 0,
             released: Vec::new(),
+            database,
+            registry,
+            factory,
+            native_ids,
+            boots: 0,
+            recoveries: Vec::new(),
         };
         harness.project = ProjectId(harness.next_id(0xa));
         let project = harness.project;
@@ -693,8 +773,43 @@ impl ReplayHarness {
                     .block_on(manager.unload_thread(thread_id))
                     .map_err(harness_error)?;
             }
+            ScenarioStep::RestartDaemon => self.restart_daemon()?,
         }
         self.settle()
+    }
+
+    /// `kill -9` and a fresh start on the same database (see the module
+    /// documentation). The old session manager is abandoned, not shut down:
+    /// its sessions only see their processes die, and whatever they still
+    /// try to commit is refused by the stopped orchestrator.
+    pub fn restart_daemon(&mut self) -> Result<(), ReplayError> {
+        if let Some(pool) = self.pool.take() {
+            pool.shutdown(Duration::from_millis(200));
+        }
+        self.orchestrator.shutdown();
+        match &self.replay {
+            Some(replay) => replay.restart_daemon()?,
+            None => self.factory.kill_all(),
+        }
+        self.boots += 1;
+        let daemon = start_daemon(
+            DaemonParts {
+                database: &self.database,
+                clock: &self.clock,
+                registry: &self.registry,
+                factory: &self.factory,
+                native_ids: &self.native_ids,
+                ports: &self.ports,
+                runtime: self.runtime.handle().clone(),
+                adapter_events: &self.adapter_events,
+            },
+            self.boots,
+        )?;
+        self.orchestrator = daemon.orchestrator;
+        self.manager = daemon.manager;
+        self.pool = Some(daemon.pool);
+        self.recoveries.extend(daemon.recovery);
+        Ok(())
     }
 
     fn pending_request(
@@ -777,6 +892,7 @@ impl ReplayHarness {
             checkpoint_calls: self.ports.checkpoints.calls.lock().clone(),
             released: self.released.clone(),
             workspace: self.workspace.clone(),
+            recoveries: self.recoveries.clone(),
         })
     }
 }

@@ -6,7 +6,7 @@
 //! causality: a frame the driver needed before writing is always before
 //! what it wrote. The process start and its exit are recorded too.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -29,6 +29,8 @@ use crate::driver::v2::transport::{
 };
 
 type Entries = Arc<Mutex<Vec<ReplayEntry>>>;
+/// Channels a daemon restart killed: nothing more is recorded for them.
+type Killed = Arc<Mutex<HashSet<String>>>;
 
 pub struct RecordingTransportFactory {
     inner: Arc<dyn TransportFactory>,
@@ -36,6 +38,9 @@ pub struct RecordingTransportFactory {
     spawns: Mutex<HashMap<String, u32>>,
     /// The recorded channel of each spawned pid, for signals.
     pids: Mutex<HashMap<u32, String>>,
+    /// Every channel opened so far, for a daemon restart.
+    opened: Mutex<Vec<String>>,
+    killed: Killed,
 }
 
 impl RecordingTransportFactory {
@@ -45,6 +50,8 @@ impl RecordingTransportFactory {
             entries: Arc::new(Mutex::new(Vec::new())),
             spawns: Mutex::new(HashMap::new()),
             pids: Mutex::new(HashMap::new()),
+            opened: Mutex::new(Vec::new()),
+            killed: Arc::default(),
         })
     }
 
@@ -72,10 +79,14 @@ struct LineTee {
     channel: String,
     outbound: bool,
     entries: Entries,
+    killed: Killed,
 }
 
 impl LineTee {
     fn push(&mut self, bytes: &[u8]) {
+        if self.killed.lock().contains(&self.channel) {
+            return;
+        }
         self.buffer.extend_from_slice(bytes);
         while let Some(end) = self.buffer.iter().position(|byte| *byte == b'\n') {
             let line = self.buffer.drain(..=end).collect::<Vec<_>>();
@@ -172,7 +183,10 @@ impl TransportFactory for RecordingTransportFactory {
         if let Some(pid) = transport.pid {
             self.pids.lock().insert(pid, channel.clone());
         }
+        self.opened.lock().push(channel.clone());
         let entries = self.entries.clone();
+        let killed = self.killed.clone();
+        let exit_name = channel.clone();
         let exit_channel = channel_field(channel);
         let exit = transport.exit;
         Ok(StdioTransport {
@@ -183,6 +197,7 @@ impl TransportFactory for RecordingTransportFactory {
                     channel: channel.to_owned(),
                     outbound: true,
                     entries: self.entries.clone(),
+                    killed: self.killed.clone(),
                 },
             }),
             stdout: Box::new(TeeReader {
@@ -192,11 +207,16 @@ impl TransportFactory for RecordingTransportFactory {
                     channel: channel.to_owned(),
                     outbound: false,
                     entries: self.entries.clone(),
+                    killed: self.killed.clone(),
                 },
             }),
             stderr: transport.stderr,
             exit: Box::pin(async move {
                 let status = exit.await;
+                // A process a daemon restart killed ends at its marker.
+                if killed.lock().contains(&exit_name) {
+                    return status;
+                }
                 let (kind, code, signal) = match &status {
                     Ok(exit) if exit.success => (ExitStatusKind::Success, exit.code, exit.signal),
                     Ok(exit) => (ExitStatusKind::Error, exit.code, exit.signal),
@@ -218,10 +238,12 @@ impl TransportFactory for RecordingTransportFactory {
     async fn http(&self, channel: &str, base: Url) -> io::Result<Arc<dyn HttpTransport>> {
         let channel = spawn_channel(&mut self.spawns.lock(), channel);
         let inner = self.inner.http(&channel, base).await?;
+        self.opened.lock().push(channel.clone());
         Ok(Arc::new(TeeHttp {
             inner,
             channel,
             entries: self.entries.clone(),
+            killed: self.killed.clone(),
         }))
     }
 
@@ -240,6 +262,23 @@ impl TransportFactory for RecordingTransportFactory {
         });
         self.inner.interrupt(&name, pid).await
     }
+
+    /// A daemon restart: records the `daemon_restart` marker, stops
+    /// recording every open channel, and kills the processes (SIGKILL for
+    /// real ones, the inner factory's own kill for the fake agent).
+    fn kill_all(&self) {
+        let opened = self.opened.lock().clone();
+        self.killed.lock().extend(opened);
+        self.entries.lock().push(ReplayEntry::DaemonRestart);
+        #[cfg(unix)]
+        for pid in self.pids.lock().keys() {
+            if let Ok(pid) = i32::try_from(*pid) {
+                // SAFETY: `kill` takes a plain pid and signal number.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+        self.inner.kill_all();
+    }
 }
 
 /// Records an HTTP channel: each request as an `http.request` followed by its
@@ -250,10 +289,18 @@ struct TeeHttp {
     inner: Arc<dyn HttpTransport>,
     channel: String,
     entries: Entries,
+    killed: Killed,
 }
 
 impl TeeHttp {
+    fn is_killed(&self) -> bool {
+        self.killed.lock().contains(&self.channel)
+    }
+
     fn outbound(&self, label: String, frame: Value) {
+        if self.is_killed() {
+            return;
+        }
         self.entries.lock().push(ReplayEntry::ExpectOutbound {
             label: Some(label),
             channel: channel_field(&self.channel),
@@ -263,17 +310,24 @@ impl TeeHttp {
 
     fn tee(&self, path: &str, downlink: Downlink) -> Downlink {
         let entries = self.entries.clone();
+        let killed = self.killed.clone();
+        let name = self.channel.clone();
         let channel = channel_field(&self.channel);
         let path = path.to_owned();
         Box::pin(futures_util::stream::unfold(
             Some(downlink),
             move |downlink| {
                 let entries = entries.clone();
+                let killed = killed.clone();
+                let name = name.clone();
                 let channel = channel.clone();
                 let path = path.clone();
                 async move {
                     let mut downlink = downlink?;
                     let item = downlink.next().await;
+                    if killed.lock().contains(&name) {
+                        return None;
+                    }
                     let frame = match &item {
                         Some(Ok(data)) => {
                             json!({ "type": "stream.event", "path": path, "data": data })
@@ -315,6 +369,12 @@ impl HttpTransport for TeeHttp {
         }
         self.outbound(format!("{} {path}", method.as_str()), frame);
         let response = self.inner.request(method, path, body).await?;
+        if self.is_killed() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the daemon restarted",
+            ));
+        }
         self.entries.lock().push(ReplayEntry::EmitInbound {
             label: Some("http.response".to_owned()),
             channel: channel_field(&self.channel),

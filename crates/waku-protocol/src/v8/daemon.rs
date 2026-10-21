@@ -70,6 +70,9 @@ pub struct SettingsPatch {
     /// keeps the old location in `previousWorktreesDirectories`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageSettings>,
+    /// Continue threads whose turn a daemon restart interrupted (#59).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continue_threads_after_restart: Option<bool>,
 }
 
 impl SettingsPatch {

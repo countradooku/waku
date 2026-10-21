@@ -5977,6 +5977,14 @@
       "description": "Opaque JSON text, never parsed by the protocol layer (RFC 0003 §5.1).\nReplaces `serde_json::Value` wherever provider-native JSON is carried.",
       "type": "string"
     },
+    "LifecycleNotice": {
+      "enum": [
+        "restart_interrupted",
+        "restart_resumed"
+      ],
+      "type": "string",
+      "x-waku-open": true
+    },
     "LimitRecovery": {
       "properties": {
         "autoResume": {
@@ -9096,6 +9104,11 @@
           "default": false,
           "type": "boolean"
         },
+        "continueThreadsAfterRestart": {
+          "default": true,
+          "description": "Continue threads whose turn a daemon restart interrupted (#59). On\nby default.",
+          "type": "boolean"
+        },
         "disabledProviders": {
           "default": [],
           "description": "Provider instance ids that are switched off.",
@@ -9220,6 +9233,13 @@
           ]
         },
         "computerUseEnabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "continueThreadsAfterRestart": {
+          "description": "Continue threads whose turn a daemon restart interrupted (#59).",
           "type": [
             "boolean",
             "null"
@@ -12526,6 +12546,17 @@
         },
         {
           "properties": {
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LifecycleNotice"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set on lifecycle rows (restart recovery, #59)."
+            },
             "message": {
               "type": "string"
             },

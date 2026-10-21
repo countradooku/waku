@@ -703,7 +703,7 @@ fn turn_terminal(
 
 /// Streaming rows of a run stop streaming when its turn ends (the first step
 /// of the finalization barrier).
-fn flush_streams(draft: &mut Draft<'_>, run_id: RunId, interrupted: bool) {
+pub(super) fn flush_streams(draft: &mut Draft<'_>, run_id: RunId, interrupted: bool) {
     let now = draft.now;
     let status = if interrupted {
         ItemStatus::Interrupted
@@ -744,7 +744,7 @@ fn flush_streams(draft: &mut Draft<'_>, run_id: RunId, interrupted: bool) {
 
 /// Open tool and message nodes under the run's root end with it. Subagent
 /// nodes keep running when the provider says their turns continue.
-fn close_child_nodes(
+pub(super) fn close_child_nodes(
     draft: &mut Draft<'_>,
     run: &Run,
     status: NodeStatus,

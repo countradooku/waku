@@ -1115,6 +1115,7 @@ impl Normalizer {
             ItemStatus::Completed,
             TurnItemKind::SystemNotice {
                 message: message.to_owned(),
+                lifecycle: None,
             },
         );
         self.offer(vec![AdapterEvent::TurnItemUpdated { item }])

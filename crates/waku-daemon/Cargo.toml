@@ -23,6 +23,14 @@ required-features = ["dev-binary"]
 
 [dependencies]
 anyhow = "1.0"
+dirs = "6.0"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+uuid = { version = "1.18", features = ["v4"] }
+# `doctor` verifies the orchestrator database and probes the socket with a
+# v8 handshake, as the desktop would.
+waku-client = { path = "../waku-client" }
+waku-orchestrator = { path = "../waku-orchestrator" }
 # The global allocator; see src/main.rs.
 mimalloc = "0.1.52"
 serde_json = "1.0"
@@ -52,3 +60,6 @@ windows-sys = { version = "0.61", features = [
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"
