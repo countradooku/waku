@@ -121,6 +121,14 @@ T3 Connect runs on Cloudflare Workers, Durable Objects, PlanetScale Postgres and
 > - Release signing, update feeds and storage are set up by the owner with their own credentials. See `docs/fork/RELEASING.md`.
 > - Keep GPL headers, and add MIT notices for any T3-derived code.
 
+### D6: compatibility with upstream Waku
+
+> **Decided (2026-10-21): none.** This is a new product derived from Waku, not a successor to it.
+> - Protocol v8 is the only protocol. v7, its `/v1` endpoint and its generated TypeScript types are deleted, not kept beside v8.
+> - Drivers implement `DriverV2` only. `DriverControl`, `V1Bridge` and per-driver legacy wrappers are deleted.
+> - The orchestrator database starts fresh: no import of upstream Waku or older fork `app.db` data, and no settings migrations from upstream.
+> - The desktop and web clients render from the v8 shell and thread streams. They don't keep a client-side session model.
+
 ---
 
 ## 3. Target architecture
