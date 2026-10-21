@@ -1,0 +1,1585 @@
+{
+ "schema": "waku.bench-baseline/1",
+ "machine": {
+  "model": "Mac17,8",
+  "cpu": "Apple M5 Pro",
+  "cores": "18",
+  "memory_gb": 48,
+  "macos": "27.0.1 (26A434)",
+  "display_max_fps": 120,
+  "power_source": "Now drawing from 'AC Power'",
+  "commit": "f2b91bc35fb5248385591c26b35143c90533a7f6",
+  "dirty": false,
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Homebrew)",
+  "app_binary": "/Users/radudiaconu/Desktop/Code/waku/target/release/waku",
+  "python": "3.9.6"
+ },
+ "scenarios": {
+  "burst": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "replay.elapsed_s": 10.1,
+    "app.cpu_pct": 21.07,
+    "daemon.cpu_pct": 6.95,
+    "providers.cpu_pct": 1.87,
+    "app.cpu_s": 2.13,
+    "daemon.cpu_s": 0.7,
+    "providers.cpu_s": 0.19,
+    "app.intr_wakeups_per_s": 249.0,
+    "daemon.intr_wakeups_per_s": 73.6,
+    "counters.frames_per_s": 35.55,
+    "counters.commits_per_s": 7.55,
+    "counters.peak_commits_per_s": 9,
+    "counters.transcript_renders_per_commit": 4.59,
+    "counters.rows_per_commit_frame": 2.18,
+    "counters.ui_alloc_kb_per_commit": 6.2,
+    "counters.renders.sidebar": 296,
+    "counters.renders.right_panel": 0,
+    "counters.save_ui_ms": 0.0,
+    "app.rss_peak_mb": 155.2,
+    "app.footprint_peak_mb": 328.9,
+    "app.footprint_final_mb": 236.4,
+    "daemon.footprint_final_mb": 32.2,
+    "providers.footprint_final_mb": 8.5,
+    "replay.max_lag_ms": 2.0
+   },
+   "range": {
+    "replay.elapsed_s": [
+     10.1,
+     10.1
+    ],
+    "app.cpu_pct": [
+     20.5,
+     21.71
+    ],
+    "daemon.cpu_pct": [
+     6.82,
+     6.99
+    ],
+    "providers.cpu_pct": [
+     1.86,
+     2.05
+    ],
+    "app.cpu_s": [
+     2.08,
+     2.2
+    ],
+    "daemon.cpu_s": [
+     0.69,
+     0.71
+    ],
+    "providers.cpu_s": [
+     0.19,
+     0.21
+    ],
+    "app.intr_wakeups_per_s": [
+     248.9,
+     249.6
+    ],
+    "daemon.intr_wakeups_per_s": [
+     73.3,
+     73.6
+    ],
+    "counters.frames_per_s": [
+     34.64,
+     36.63
+    ],
+    "counters.commits_per_s": [
+     7.45,
+     7.55
+    ],
+    "counters.peak_commits_per_s": [
+     9,
+     9
+    ],
+    "counters.transcript_renders_per_commit": [
+     4.46,
+     4.79
+    ],
+    "counters.rows_per_commit_frame": [
+     2.18,
+     2.18
+    ],
+    "counters.ui_alloc_kb_per_commit": [
+     6.1,
+     6.2
+    ],
+    "counters.renders.sidebar": [
+     295,
+     301
+    ],
+    "counters.renders.right_panel": [
+     0,
+     0
+    ],
+    "counters.save_ui_ms": [
+     0.0,
+     0.0
+    ],
+    "app.rss_peak_mb": [
+     155.2,
+     156.8
+    ],
+    "app.footprint_peak_mb": [
+     328.7,
+     333.7
+    ],
+    "app.footprint_final_mb": [
+     236.2,
+     241.2
+    ],
+    "daemon.footprint_final_mb": [
+     32.0,
+     33.6
+    ],
+    "providers.footprint_final_mb": [
+     8.5,
+     8.5
+    ],
+    "replay.max_lag_ms": [
+     0.2,
+     4.6
+    ]
+   },
+   "per_run": [
+    {
+     "replay.elapsed_s": 10.1,
+     "app.cpu_pct": 21.07,
+     "daemon.cpu_pct": 6.99,
+     "providers.cpu_pct": 1.86,
+     "app.cpu_s": 2.135,
+     "daemon.cpu_s": 0.708,
+     "providers.cpu_s": 0.188,
+     "app.intr_wakeups_per_s": 249.0,
+     "daemon.intr_wakeups_per_s": 73.3,
+     "counters.frames_per_s": 35.55,
+     "counters.commits_per_s": 7.55,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.59,
+     "counters.rows_per_commit_frame": 2.18,
+     "counters.ui_alloc_kb_per_commit": 6.2,
+     "counters.renders.sidebar": 296,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 155.2,
+     "app.footprint_peak_mb": 328.9,
+     "app.footprint_final_mb": 236.4,
+     "daemon.footprint_final_mb": 33.6,
+     "providers.footprint_final_mb": 8.5,
+     "replay.max_lag_ms": 0.2
+    },
+    {
+     "replay.elapsed_s": 10.1,
+     "app.cpu_pct": 20.5,
+     "daemon.cpu_pct": 6.82,
+     "providers.cpu_pct": 2.05,
+     "app.cpu_s": 2.075,
+     "daemon.cpu_s": 0.691,
+     "providers.cpu_s": 0.207,
+     "app.intr_wakeups_per_s": 249.6,
+     "daemon.intr_wakeups_per_s": 73.6,
+     "counters.frames_per_s": 34.64,
+     "counters.commits_per_s": 7.55,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.458,
+     "counters.rows_per_commit_frame": 2.18,
+     "counters.ui_alloc_kb_per_commit": 6.1,
+     "counters.renders.sidebar": 301,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 155.2,
+     "app.footprint_peak_mb": 328.7,
+     "app.footprint_final_mb": 236.2,
+     "daemon.footprint_final_mb": 32.0,
+     "providers.footprint_final_mb": 8.5,
+     "replay.max_lag_ms": 4.6
+    },
+    {
+     "replay.elapsed_s": 10.1,
+     "app.cpu_pct": 21.71,
+     "daemon.cpu_pct": 6.95,
+     "providers.cpu_pct": 1.87,
+     "app.cpu_s": 2.203,
+     "daemon.cpu_s": 0.705,
+     "providers.cpu_s": 0.19,
+     "app.intr_wakeups_per_s": 248.9,
+     "daemon.intr_wakeups_per_s": 73.6,
+     "counters.frames_per_s": 36.63,
+     "counters.commits_per_s": 7.45,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.793,
+     "counters.rows_per_commit_frame": 2.18,
+     "counters.ui_alloc_kb_per_commit": 6.2,
+     "counters.renders.sidebar": 295,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 156.8,
+     "app.footprint_peak_mb": 333.7,
+     "app.footprint_final_mb": 241.2,
+     "daemon.footprint_final_mb": 32.2,
+     "providers.footprint_final_mb": 8.5,
+     "replay.max_lag_ms": 2.0
+    }
+   ]
+  },
+  "code-wall": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "replay.elapsed_s": 25.75,
+    "app.cpu_pct": 16.25,
+    "daemon.cpu_pct": 4.31,
+    "providers.cpu_pct": 1.48,
+    "app.cpu_s": 4.19,
+    "daemon.cpu_s": 1.11,
+    "providers.cpu_s": 0.38,
+    "app.intr_wakeups_per_s": 244.0,
+    "daemon.intr_wakeups_per_s": 39.6,
+    "counters.frames_per_s": 34.19,
+    "counters.commits_per_s": 7.82,
+    "counters.peak_commits_per_s": 9,
+    "counters.transcript_renders_per_commit": 4.33,
+    "counters.rows_per_commit_frame": 2.13,
+    "counters.ui_alloc_kb_per_commit": 6.1,
+    "counters.renders.sidebar": 745,
+    "counters.renders.right_panel": 0,
+    "counters.save_ui_ms": 0.0,
+    "app.rss_peak_mb": 185.0,
+    "app.footprint_peak_mb": 334.6,
+    "app.footprint_final_mb": 334.5,
+    "daemon.footprint_final_mb": 34.3,
+    "providers.footprint_final_mb": 10.6,
+    "replay.max_lag_ms": 0.1
+   },
+   "range": {
+    "replay.elapsed_s": [
+     25.75,
+     25.75
+    ],
+    "app.cpu_pct": [
+     15.54,
+     16.36
+    ],
+    "daemon.cpu_pct": [
+     4.27,
+     4.34
+    ],
+    "providers.cpu_pct": [
+     1.37,
+     1.55
+    ],
+    "app.cpu_s": [
+     4.01,
+     4.22
+    ],
+    "daemon.cpu_s": [
+     1.1,
+     1.12
+    ],
+    "providers.cpu_s": [
+     0.35,
+     0.4
+    ],
+    "app.intr_wakeups_per_s": [
+     242.1,
+     244.0
+    ],
+    "daemon.intr_wakeups_per_s": [
+     39.5,
+     39.7
+    ],
+    "counters.frames_per_s": [
+     33.48,
+     34.44
+    ],
+    "counters.commits_per_s": [
+     7.78,
+     7.82
+    ],
+    "counters.peak_commits_per_s": [
+     9,
+     9
+    ],
+    "counters.transcript_renders_per_commit": [
+     4.24,
+     4.37
+    ],
+    "counters.rows_per_commit_frame": [
+     2.13,
+     2.13
+    ],
+    "counters.ui_alloc_kb_per_commit": [
+     6.1,
+     6.1
+    ],
+    "counters.renders.sidebar": [
+     744,
+     746
+    ],
+    "counters.renders.right_panel": [
+     0,
+     0
+    ],
+    "counters.save_ui_ms": [
+     0.0,
+     0.0
+    ],
+    "app.rss_peak_mb": [
+     182.3,
+     185.1
+    ],
+    "app.footprint_peak_mb": [
+     332.4,
+     338.7
+    ],
+    "app.footprint_final_mb": [
+     332.4,
+     338.7
+    ],
+    "daemon.footprint_final_mb": [
+     32.8,
+     35.9
+    ],
+    "providers.footprint_final_mb": [
+     10.6,
+     10.7
+    ],
+    "replay.max_lag_ms": [
+     0.1,
+     0.1
+    ]
+   },
+   "per_run": [
+    {
+     "replay.elapsed_s": 25.75,
+     "app.cpu_pct": 15.54,
+     "daemon.cpu_pct": 4.31,
+     "providers.cpu_pct": 1.37,
+     "app.cpu_s": 4.006,
+     "daemon.cpu_s": 1.112,
+     "providers.cpu_s": 0.352,
+     "app.intr_wakeups_per_s": 244.0,
+     "daemon.intr_wakeups_per_s": 39.5,
+     "counters.frames_per_s": 34.19,
+     "counters.commits_per_s": 7.82,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.332,
+     "counters.rows_per_commit_frame": 2.13,
+     "counters.ui_alloc_kb_per_commit": 6.1,
+     "counters.renders.sidebar": 745,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 185.1,
+     "app.footprint_peak_mb": 338.7,
+     "app.footprint_final_mb": 338.7,
+     "daemon.footprint_final_mb": 32.8,
+     "providers.footprint_final_mb": 10.6,
+     "replay.max_lag_ms": 0.1
+    },
+    {
+     "replay.elapsed_s": 25.75,
+     "app.cpu_pct": 16.36,
+     "daemon.cpu_pct": 4.27,
+     "providers.cpu_pct": 1.55,
+     "app.cpu_s": 4.218,
+     "daemon.cpu_s": 1.101,
+     "providers.cpu_s": 0.398,
+     "app.intr_wakeups_per_s": 244.0,
+     "daemon.intr_wakeups_per_s": 39.7,
+     "counters.frames_per_s": 34.44,
+     "counters.commits_per_s": 7.78,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.371,
+     "counters.rows_per_commit_frame": 2.13,
+     "counters.ui_alloc_kb_per_commit": 6.1,
+     "counters.renders.sidebar": 746,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 185.0,
+     "app.footprint_peak_mb": 332.4,
+     "app.footprint_final_mb": 332.4,
+     "daemon.footprint_final_mb": 35.9,
+     "providers.footprint_final_mb": 10.6,
+     "replay.max_lag_ms": 0.1
+    },
+    {
+     "replay.elapsed_s": 25.75,
+     "app.cpu_pct": 16.25,
+     "daemon.cpu_pct": 4.34,
+     "providers.cpu_pct": 1.48,
+     "app.cpu_s": 4.19,
+     "daemon.cpu_s": 1.12,
+     "providers.cpu_s": 0.381,
+     "app.intr_wakeups_per_s": 242.1,
+     "daemon.intr_wakeups_per_s": 39.6,
+     "counters.frames_per_s": 33.48,
+     "counters.commits_per_s": 7.82,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.242,
+     "counters.rows_per_commit_frame": 2.13,
+     "counters.ui_alloc_kb_per_commit": 6.1,
+     "counters.renders.sidebar": 744,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 182.3,
+     "app.footprint_peak_mb": 334.6,
+     "app.footprint_final_mb": 334.5,
+     "daemon.footprint_final_mb": 34.3,
+     "providers.footprint_final_mb": 10.7,
+     "replay.max_lag_ms": 0.1
+    }
+   ]
+  },
+  "idle": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "app.cpu_pct": 0.9,
+    "app.intr_wakeups_per_s": 123.4,
+    "app.idle_wakeups_per_s": 0.3,
+    "daemon.cpu_pct": 0.07,
+    "daemon.intr_wakeups_per_s": 7.0,
+    "providers.cpu_pct": 0.0,
+    "counters.frames_per_s": 0.02,
+    "counters.renders_per_s.transcript": 0.02,
+    "counters.renders_per_s.sidebar": 0.02,
+    "app.footprint_final_mb": 138.0,
+    "app.rss_final_mb": 107.7,
+    "daemon.footprint_final_mb": 15.4
+   },
+   "range": {
+    "app.cpu_pct": [
+     0.86,
+     0.92
+    ],
+    "app.intr_wakeups_per_s": [
+     123.2,
+     124.0
+    ],
+    "app.idle_wakeups_per_s": [
+     0.2,
+     1.0
+    ],
+    "daemon.cpu_pct": [
+     0.05,
+     0.07
+    ],
+    "daemon.intr_wakeups_per_s": [
+     7.0,
+     7.1
+    ],
+    "providers.cpu_pct": [
+     0.0,
+     0.0
+    ],
+    "counters.frames_per_s": [
+     0.02,
+     0.06
+    ],
+    "counters.renders_per_s.transcript": [
+     0.02,
+     0.06
+    ],
+    "counters.renders_per_s.sidebar": [
+     0.02,
+     0.06
+    ],
+    "app.footprint_final_mb": [
+     137.9,
+     139.9
+    ],
+    "app.rss_final_mb": [
+     107.6,
+     107.8
+    ],
+    "daemon.footprint_final_mb": [
+     15.2,
+     15.4
+    ]
+   },
+   "per_run": [
+    {
+     "app.cpu_pct": 0.9,
+     "app.intr_wakeups_per_s": 123.2,
+     "app.idle_wakeups_per_s": 1.0,
+     "daemon.cpu_pct": 0.05,
+     "daemon.intr_wakeups_per_s": 7.0,
+     "providers.cpu_pct": 0.0,
+     "counters.frames_per_s": 0.02,
+     "counters.renders_per_s.transcript": 0.02,
+     "counters.renders_per_s.sidebar": 0.02,
+     "app.footprint_final_mb": 138.0,
+     "app.rss_final_mb": 107.7,
+     "daemon.footprint_final_mb": 15.4
+    },
+    {
+     "app.cpu_pct": 0.86,
+     "app.intr_wakeups_per_s": 123.4,
+     "app.idle_wakeups_per_s": 0.2,
+     "daemon.cpu_pct": 0.07,
+     "daemon.intr_wakeups_per_s": 7.0,
+     "providers.cpu_pct": 0.0,
+     "counters.frames_per_s": 0.02,
+     "counters.renders_per_s.transcript": 0.02,
+     "counters.renders_per_s.sidebar": 0.02,
+     "app.footprint_final_mb": 137.9,
+     "app.rss_final_mb": 107.6,
+     "daemon.footprint_final_mb": 15.4
+    },
+    {
+     "app.cpu_pct": 0.92,
+     "app.intr_wakeups_per_s": 124.0,
+     "app.idle_wakeups_per_s": 0.3,
+     "daemon.cpu_pct": 0.07,
+     "daemon.intr_wakeups_per_s": 7.1,
+     "providers.cpu_pct": 0.0,
+     "counters.frames_per_s": 0.06,
+     "counters.renders_per_s.transcript": 0.06,
+     "counters.renders_per_s.sidebar": 0.06,
+     "app.footprint_final_mb": 139.9,
+     "app.rss_final_mb": 107.8,
+     "daemon.footprint_final_mb": 15.2
+    }
+   ]
+  },
+  "memory-1": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "app_after_launch.footprint_mb": 287.9,
+    "app.footprint_final_mb": 199.0,
+    "app.footprint_peak_mb": 291.5,
+    "app.rss_final_mb": 116.7,
+    "app.rss_peak_mb": 118.5,
+    "daemon.footprint_final_mb": 42.5,
+    "visits": 7
+   },
+   "range": {
+    "app_after_launch.footprint_mb": [
+     287.7,
+     288.1
+    ],
+    "app.footprint_final_mb": [
+     197.8,
+     199.2
+    ],
+    "app.footprint_peak_mb": [
+     290.4,
+     291.7
+    ],
+    "app.rss_final_mb": [
+     115.5,
+     116.9
+    ],
+    "app.rss_peak_mb": [
+     116.6,
+     118.6
+    ],
+    "daemon.footprint_final_mb": [
+     41.8,
+     43.7
+    ],
+    "visits": [
+     7,
+     7
+    ]
+   },
+   "per_run": [
+    {
+     "app_after_launch.footprint_mb": 287.7,
+     "app.footprint_final_mb": 197.8,
+     "app.footprint_peak_mb": 290.4,
+     "app.rss_final_mb": 115.5,
+     "app.rss_peak_mb": 116.6,
+     "daemon.footprint_final_mb": 42.5,
+     "visits": 7
+    },
+    {
+     "app_after_launch.footprint_mb": 288.1,
+     "app.footprint_final_mb": 199.2,
+     "app.footprint_peak_mb": 291.7,
+     "app.rss_final_mb": 116.9,
+     "app.rss_peak_mb": 118.6,
+     "daemon.footprint_final_mb": 41.8,
+     "visits": 7
+    },
+    {
+     "app_after_launch.footprint_mb": 287.9,
+     "app.footprint_final_mb": 199.0,
+     "app.footprint_peak_mb": 291.5,
+     "app.rss_final_mb": 116.7,
+     "app.rss_peak_mb": 118.5,
+     "daemon.footprint_final_mb": 43.7,
+     "visits": 7
+    }
+   ]
+  },
+  "memory-20": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "app_after_launch.footprint_mb": 288.8,
+    "app.footprint_final_mb": 200.7,
+    "app.footprint_peak_mb": 310.0,
+    "app.rss_final_mb": 129.2,
+    "app.rss_peak_mb": 129.2,
+    "daemon.footprint_final_mb": 76.6,
+    "visits": 26
+   },
+   "range": {
+    "app_after_launch.footprint_mb": [
+     250.7,
+     289.0
+    ],
+    "app.footprint_final_mb": [
+     200.1,
+     201.9
+    ],
+    "app.footprint_peak_mb": [
+     308.5,
+     311.7
+    ],
+    "app.rss_final_mb": [
+     128.6,
+     130.4
+    ],
+    "app.rss_peak_mb": [
+     128.8,
+     130.5
+    ],
+    "daemon.footprint_final_mb": [
+     76.2,
+     77.9
+    ],
+    "visits": [
+     26,
+     26
+    ]
+   },
+   "per_run": [
+    {
+     "app_after_launch.footprint_mb": 288.8,
+     "app.footprint_final_mb": 201.9,
+     "app.footprint_peak_mb": 311.7,
+     "app.rss_final_mb": 130.4,
+     "app.rss_peak_mb": 130.5,
+     "daemon.footprint_final_mb": 76.2,
+     "visits": 26
+    },
+    {
+     "app_after_launch.footprint_mb": 250.7,
+     "app.footprint_final_mb": 200.1,
+     "app.footprint_peak_mb": 310.0,
+     "app.rss_final_mb": 128.6,
+     "app.rss_peak_mb": 128.8,
+     "daemon.footprint_final_mb": 76.6,
+     "visits": 26
+    },
+    {
+     "app_after_launch.footprint_mb": 289.0,
+     "app.footprint_final_mb": 200.7,
+     "app.footprint_peak_mb": 308.5,
+     "app.rss_final_mb": 129.2,
+     "app.rss_peak_mb": 129.2,
+     "daemon.footprint_final_mb": 77.9,
+     "visits": 26
+    }
+   ]
+  },
+  "memory-5": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "app_after_launch.footprint_mb": 289.1,
+    "app.footprint_final_mb": 205.2,
+    "app.footprint_peak_mb": 308.6,
+    "app.rss_final_mb": 121.6,
+    "app.rss_peak_mb": 121.8,
+    "daemon.footprint_final_mb": 59.2,
+    "visits": 11
+   },
+   "range": {
+    "app_after_launch.footprint_mb": [
+     288.6,
+     291.0
+    ],
+    "app.footprint_final_mb": [
+     202.7,
+     209.3
+    ],
+    "app.footprint_peak_mb": [
+     308.1,
+     310.7
+    ],
+    "app.rss_final_mb": [
+     121.2,
+     122.6
+    ],
+    "app.rss_peak_mb": [
+     121.2,
+     122.7
+    ],
+    "daemon.footprint_final_mb": [
+     58.7,
+     60.9
+    ],
+    "visits": [
+     11,
+     11
+    ]
+   },
+   "per_run": [
+    {
+     "app_after_launch.footprint_mb": 288.6,
+     "app.footprint_final_mb": 202.7,
+     "app.footprint_peak_mb": 308.1,
+     "app.rss_final_mb": 121.2,
+     "app.rss_peak_mb": 121.2,
+     "daemon.footprint_final_mb": 58.7,
+     "visits": 11
+    },
+    {
+     "app_after_launch.footprint_mb": 291.0,
+     "app.footprint_final_mb": 205.2,
+     "app.footprint_peak_mb": 310.7,
+     "app.rss_final_mb": 121.6,
+     "app.rss_peak_mb": 121.8,
+     "daemon.footprint_final_mb": 60.9,
+     "visits": 11
+    },
+    {
+     "app_after_launch.footprint_mb": 289.1,
+     "app.footprint_final_mb": 209.3,
+     "app.footprint_peak_mb": 308.6,
+     "app.rss_final_mb": 122.6,
+     "app.rss_peak_mb": 122.7,
+     "daemon.footprint_final_mb": 59.2,
+     "visits": 11
+    }
+   ]
+  },
+  "reasoning-fast": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "replay.elapsed_s": 12.19,
+    "app.cpu_pct": 13.85,
+    "daemon.cpu_pct": 5.59,
+    "providers.cpu_pct": 1.69,
+    "app.cpu_s": 1.69,
+    "daemon.cpu_s": 0.68,
+    "providers.cpu_s": 0.21,
+    "app.intr_wakeups_per_s": 241.8,
+    "daemon.intr_wakeups_per_s": 46.7,
+    "counters.frames_per_s": 38.08,
+    "counters.commits_per_s": 7.69,
+    "counters.peak_commits_per_s": 9,
+    "counters.transcript_renders_per_commit": 4.22,
+    "counters.rows_per_commit_frame": 4.57,
+    "counters.ui_alloc_kb_per_commit": 6.1,
+    "counters.renders.sidebar": 360,
+    "counters.renders.right_panel": 0,
+    "counters.save_ui_ms": 0.0,
+    "app.rss_peak_mb": 128.0,
+    "app.footprint_peak_mb": 297.6,
+    "app.footprint_final_mb": 205.2,
+    "daemon.footprint_final_mb": 27.2,
+    "providers.footprint_final_mb": 7.5,
+    "replay.max_lag_ms": 4.4
+   },
+   "range": {
+    "replay.elapsed_s": [
+     12.19,
+     12.19
+    ],
+    "app.cpu_pct": [
+     13.16,
+     14.24
+    ],
+    "daemon.cpu_pct": [
+     5.56,
+     5.61
+    ],
+    "providers.cpu_pct": [
+     1.59,
+     1.79
+    ],
+    "app.cpu_s": [
+     1.61,
+     1.74
+    ],
+    "daemon.cpu_s": [
+     0.68,
+     0.69
+    ],
+    "providers.cpu_s": [
+     0.2,
+     0.22
+    ],
+    "app.intr_wakeups_per_s": [
+     241.8,
+     245.2
+    ],
+    "daemon.intr_wakeups_per_s": [
+     46.6,
+     46.9
+    ],
+    "counters.frames_per_s": [
+     38.01,
+     38.15
+    ],
+    "counters.commits_per_s": [
+     7.69,
+     7.77
+    ],
+    "counters.peak_commits_per_s": [
+     9,
+     9
+    ],
+    "counters.transcript_renders_per_commit": [
+     4.18,
+     4.23
+    ],
+    "counters.rows_per_commit_frame": [
+     4.57,
+     4.58
+    ],
+    "counters.ui_alloc_kb_per_commit": [
+     6.1,
+     6.2
+    ],
+    "counters.renders.sidebar": [
+     357,
+     360
+    ],
+    "counters.renders.right_panel": [
+     0,
+     0
+    ],
+    "counters.save_ui_ms": [
+     0.0,
+     0.0
+    ],
+    "app.rss_peak_mb": [
+     124.0,
+     128.0
+    ],
+    "app.footprint_peak_mb": [
+     297.5,
+     299.5
+    ],
+    "app.footprint_final_mb": [
+     205.1,
+     207.0
+    ],
+    "daemon.footprint_final_mb": [
+     27.1,
+     27.7
+    ],
+    "providers.footprint_final_mb": [
+     7.4,
+     7.6
+    ],
+    "replay.max_lag_ms": [
+     3.2,
+     4.4
+    ]
+   },
+   "per_run": [
+    {
+     "replay.elapsed_s": 12.19,
+     "app.cpu_pct": 13.16,
+     "daemon.cpu_pct": 5.61,
+     "providers.cpu_pct": 1.59,
+     "app.cpu_s": 1.609,
+     "daemon.cpu_s": 0.686,
+     "providers.cpu_s": 0.195,
+     "app.intr_wakeups_per_s": 241.8,
+     "daemon.intr_wakeups_per_s": 46.9,
+     "counters.frames_per_s": 38.01,
+     "counters.commits_per_s": 7.69,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.22,
+     "counters.rows_per_commit_frame": 4.58,
+     "counters.ui_alloc_kb_per_commit": 6.1,
+     "counters.renders.sidebar": 357,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 128.0,
+     "app.footprint_peak_mb": 299.5,
+     "app.footprint_final_mb": 207.0,
+     "daemon.footprint_final_mb": 27.7,
+     "providers.footprint_final_mb": 7.5,
+     "replay.max_lag_ms": 3.2
+    },
+    {
+     "replay.elapsed_s": 12.19,
+     "app.cpu_pct": 13.85,
+     "daemon.cpu_pct": 5.56,
+     "providers.cpu_pct": 1.79,
+     "app.cpu_s": 1.693,
+     "daemon.cpu_s": 0.68,
+     "providers.cpu_s": 0.218,
+     "app.intr_wakeups_per_s": 245.2,
+     "daemon.intr_wakeups_per_s": 46.6,
+     "counters.frames_per_s": 38.08,
+     "counters.commits_per_s": 7.77,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.178,
+     "counters.rows_per_commit_frame": 4.57,
+     "counters.ui_alloc_kb_per_commit": 6.2,
+     "counters.renders.sidebar": 360,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 128.0,
+     "app.footprint_peak_mb": 297.6,
+     "app.footprint_final_mb": 205.2,
+     "daemon.footprint_final_mb": 27.1,
+     "providers.footprint_final_mb": 7.6,
+     "replay.max_lag_ms": 4.4
+    },
+    {
+     "replay.elapsed_s": 12.19,
+     "app.cpu_pct": 14.24,
+     "daemon.cpu_pct": 5.59,
+     "providers.cpu_pct": 1.69,
+     "app.cpu_s": 1.742,
+     "daemon.cpu_s": 0.684,
+     "providers.cpu_s": 0.207,
+     "app.intr_wakeups_per_s": 241.8,
+     "daemon.intr_wakeups_per_s": 46.7,
+     "counters.frames_per_s": 38.15,
+     "counters.commits_per_s": 7.69,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.23,
+     "counters.rows_per_commit_frame": 4.57,
+     "counters.ui_alloc_kb_per_commit": 6.1,
+     "counters.renders.sidebar": 360,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 124.0,
+     "app.footprint_peak_mb": 297.5,
+     "app.footprint_final_mb": 205.1,
+     "daemon.footprint_final_mb": 27.2,
+     "providers.footprint_final_mb": 7.4,
+     "replay.max_lag_ms": 4.4
+    }
+   ]
+  },
+  "rpc": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "requests.settings_get.p50_us": 49.62,
+    "requests.settings_get.p95_us": 82.38,
+    "requests.settings_get.p99_us": 90.08,
+    "requests.threads_snapshot.p50_us": 61.38,
+    "requests.threads_snapshot.p95_us": 72.21,
+    "requests.threads_snapshot.p99_us": 81.92,
+    "requests.files_search_entries.p50_us": 9563.83,
+    "requests.files_search_entries.p95_us": 10363.79,
+    "requests.files_search_entries.p99_us": 10889.38,
+    "requests.threads_search.p50_us": 106.29,
+    "requests.threads_search.p95_us": 135.29,
+    "requests.threads_search.p99_us": 151.25
+   },
+   "range": {
+    "requests.settings_get.p50_us": [
+     49.38,
+     49.75
+    ],
+    "requests.settings_get.p95_us": [
+     77.46,
+     89.29
+    ],
+    "requests.settings_get.p99_us": [
+     87.12,
+     95.96
+    ],
+    "requests.threads_snapshot.p50_us": [
+     61.08,
+     61.46
+    ],
+    "requests.threads_snapshot.p95_us": [
+     71.71,
+     73.17
+    ],
+    "requests.threads_snapshot.p99_us": [
+     80.38,
+     89.17
+    ],
+    "requests.files_search_entries.p50_us": [
+     9179.5,
+     10218.54
+    ],
+    "requests.files_search_entries.p95_us": [
+     9969.0,
+     10661.83
+    ],
+    "requests.files_search_entries.p99_us": [
+     10534.42,
+     10906.67
+    ],
+    "requests.threads_search.p50_us": [
+     105.17,
+     106.33
+    ],
+    "requests.threads_search.p95_us": [
+     134.67,
+     136.5
+    ],
+    "requests.threads_search.p99_us": [
+     150.42,
+     152.08
+    ]
+   },
+   "per_run": [
+    {
+     "requests.settings_get.p50_us": 49.75,
+     "requests.settings_get.p95_us": 89.292,
+     "requests.settings_get.p99_us": 95.958,
+     "requests.threads_snapshot.p50_us": 61.083,
+     "requests.threads_snapshot.p95_us": 71.708,
+     "requests.threads_snapshot.p99_us": 81.917,
+     "requests.files_search_entries.p50_us": 10218.541,
+     "requests.files_search_entries.p95_us": 10661.833,
+     "requests.files_search_entries.p99_us": 10889.375,
+     "requests.threads_search.p50_us": 106.333,
+     "requests.threads_search.p95_us": 136.5,
+     "requests.threads_search.p99_us": 151.25
+    },
+    {
+     "requests.settings_get.p50_us": 49.625,
+     "requests.settings_get.p95_us": 77.459,
+     "requests.settings_get.p99_us": 87.125,
+     "requests.threads_snapshot.p50_us": 61.45799999999999,
+     "requests.threads_snapshot.p95_us": 73.166,
+     "requests.threads_snapshot.p99_us": 89.16600000000001,
+     "requests.files_search_entries.p50_us": 9563.833,
+     "requests.files_search_entries.p95_us": 10363.792,
+     "requests.files_search_entries.p99_us": 10906.667,
+     "requests.threads_search.p50_us": 106.292,
+     "requests.threads_search.p95_us": 134.666,
+     "requests.threads_search.p99_us": 150.417
+    },
+    {
+     "requests.settings_get.p50_us": 49.375,
+     "requests.settings_get.p95_us": 82.375,
+     "requests.settings_get.p99_us": 90.083,
+     "requests.threads_snapshot.p50_us": 61.375,
+     "requests.threads_snapshot.p95_us": 72.208,
+     "requests.threads_snapshot.p99_us": 80.375,
+     "requests.files_search_entries.p50_us": 9179.5,
+     "requests.files_search_entries.p95_us": 9969.0,
+     "requests.files_search_entries.p99_us": 10534.417000000001,
+     "requests.threads_search.p50_us": 105.166,
+     "requests.threads_search.p95_us": 135.292,
+     "requests.threads_search.p99_us": 152.083
+    }
+   ]
+  },
+  "start-cold": {
+   "runs": 1,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "startup.init_ms": 963.14,
+    "startup.first_frame_ms": 1078.22,
+    "startup.first_content_ms": 1085.59,
+    "app.rss_mb": 118.7,
+    "app.footprint_mb": 271.0
+   },
+   "range": {
+    "startup.init_ms": null,
+    "startup.first_frame_ms": null,
+    "startup.first_content_ms": null,
+    "app.rss_mb": null,
+    "app.footprint_mb": null
+   },
+   "per_run": [
+    {
+     "startup.init_ms": 963.139,
+     "startup.first_frame_ms": 1078.21775,
+     "startup.first_content_ms": 1085.592,
+     "app.rss_mb": 118.7,
+     "app.footprint_mb": 271.0
+    }
+   ]
+  },
+  "start-warm": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "startup.init_ms": 6.23,
+    "startup.first_frame_ms": 98.62,
+    "startup.first_content_ms": 104.27,
+    "app.rss_mb": 120.0,
+    "app.footprint_mb": 291.2
+   },
+   "range": {
+    "startup.init_ms": [
+     6.16,
+     6.29
+    ],
+    "startup.first_frame_ms": [
+     88.02,
+     99.4
+    ],
+    "startup.first_content_ms": [
+     94.03,
+     105.36
+    ],
+    "app.rss_mb": [
+     116.3,
+     120.1
+    ],
+    "app.footprint_mb": [
+     291.1,
+     293.0
+    ]
+   },
+   "per_run": [
+    {
+     "startup.init_ms": 6.287,
+     "startup.first_frame_ms": 88.022459,
+     "startup.first_content_ms": 94.032209,
+     "app.rss_mb": 116.3,
+     "app.footprint_mb": 293.0
+    },
+    {
+     "startup.init_ms": 6.159,
+     "startup.first_frame_ms": 98.615042,
+     "startup.first_content_ms": 104.268667,
+     "app.rss_mb": 120.1,
+     "app.footprint_mb": 291.2
+    },
+    {
+     "startup.init_ms": 6.226,
+     "startup.first_frame_ms": 99.396041,
+     "startup.first_content_ms": 105.362958,
+     "app.rss_mb": 120.0,
+     "app.footprint_mb": 291.1
+    }
+   ]
+  },
+  "tool-storm": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "replay.elapsed_s": 30.86,
+    "app.cpu_pct": 27.14,
+    "daemon.cpu_pct": 3.68,
+    "providers.cpu_pct": 0.23,
+    "app.cpu_s": 8.39,
+    "daemon.cpu_s": 1.14,
+    "providers.cpu_s": 0.07,
+    "app.intr_wakeups_per_s": 195.7,
+    "daemon.intr_wakeups_per_s": 16.5,
+    "counters.frames_per_s": 48.66,
+    "counters.commits_per_s": 0.28,
+    "counters.peak_commits_per_s": 5,
+    "counters.transcript_renders_per_commit": 141.33,
+    "counters.rows_per_commit_frame": 7.56,
+    "counters.ui_alloc_kb_per_commit": 9.0,
+    "counters.renders.sidebar": 871,
+    "counters.renders.right_panel": 0,
+    "counters.save_ui_ms": 0.0,
+    "app.rss_peak_mb": 138.3,
+    "app.footprint_peak_mb": 331.8,
+    "app.footprint_final_mb": 235.2,
+    "daemon.footprint_final_mb": 66.0,
+    "providers.footprint_final_mb": 44.9,
+    "replay.max_lag_ms": 0.0
+   },
+   "range": {
+    "replay.elapsed_s": [
+     30.86,
+     30.86
+    ],
+    "app.cpu_pct": [
+     26.99,
+     27.14
+    ],
+    "daemon.cpu_pct": [
+     3.66,
+     3.69
+    ],
+    "providers.cpu_pct": [
+     0.21,
+     0.25
+    ],
+    "app.cpu_s": [
+     8.34,
+     8.39
+    ],
+    "daemon.cpu_s": [
+     1.13,
+     1.14
+    ],
+    "providers.cpu_s": [
+     0.07,
+     0.08
+    ],
+    "app.intr_wakeups_per_s": [
+     195.4,
+     199.6
+    ],
+    "daemon.intr_wakeups_per_s": [
+     16.3,
+     16.5
+    ],
+    "counters.frames_per_s": [
+     48.56,
+     49.44
+    ],
+    "counters.commits_per_s": [
+     0.28,
+     0.28
+    ],
+    "counters.peak_commits_per_s": [
+     5,
+     5
+    ],
+    "counters.transcript_renders_per_commit": [
+     141.22,
+     142.11
+    ],
+    "counters.rows_per_commit_frame": [
+     7.56,
+     7.56
+    ],
+    "counters.ui_alloc_kb_per_commit": [
+     9.0,
+     9.2
+    ],
+    "counters.renders.sidebar": [
+     851,
+     876
+    ],
+    "counters.renders.right_panel": [
+     0,
+     0
+    ],
+    "counters.save_ui_ms": [
+     0.0,
+     0.0
+    ],
+    "app.rss_peak_mb": [
+     137.1,
+     138.9
+    ],
+    "app.footprint_peak_mb": [
+     318.0,
+     332.2
+    ],
+    "app.footprint_final_mb": [
+     223.9,
+     235.8
+    ],
+    "daemon.footprint_final_mb": [
+     64.2,
+     66.1
+    ],
+    "providers.footprint_final_mb": [
+     44.6,
+     44.9
+    ],
+    "replay.max_lag_ms": [
+     0.0,
+     0.1
+    ]
+   },
+   "per_run": [
+    {
+     "replay.elapsed_s": 30.86,
+     "app.cpu_pct": 27.14,
+     "daemon.cpu_pct": 3.66,
+     "providers.cpu_pct": 0.21,
+     "app.cpu_s": 8.389,
+     "daemon.cpu_s": 1.132,
+     "providers.cpu_s": 0.066,
+     "app.intr_wakeups_per_s": 195.4,
+     "daemon.intr_wakeups_per_s": 16.5,
+     "counters.frames_per_s": 49.44,
+     "counters.commits_per_s": 0.28,
+     "counters.peak_commits_per_s": 5,
+     "counters.transcript_renders_per_commit": 142.111,
+     "counters.rows_per_commit_frame": 7.56,
+     "counters.ui_alloc_kb_per_commit": 9.2,
+     "counters.renders.sidebar": 851,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 138.9,
+     "app.footprint_peak_mb": 332.2,
+     "app.footprint_final_mb": 235.8,
+     "daemon.footprint_final_mb": 66.0,
+     "providers.footprint_final_mb": 44.9,
+     "replay.max_lag_ms": 0.0
+    },
+    {
+     "replay.elapsed_s": 30.86,
+     "app.cpu_pct": 27.14,
+     "daemon.cpu_pct": 3.68,
+     "providers.cpu_pct": 0.25,
+     "app.cpu_s": 8.39,
+     "daemon.cpu_s": 1.138,
+     "providers.cpu_s": 0.077,
+     "app.intr_wakeups_per_s": 199.6,
+     "daemon.intr_wakeups_per_s": 16.5,
+     "counters.frames_per_s": 48.66,
+     "counters.commits_per_s": 0.28,
+     "counters.peak_commits_per_s": 5,
+     "counters.transcript_renders_per_commit": 141.333,
+     "counters.rows_per_commit_frame": 7.56,
+     "counters.ui_alloc_kb_per_commit": 9.0,
+     "counters.renders.sidebar": 876,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 137.1,
+     "app.footprint_peak_mb": 318.0,
+     "app.footprint_final_mb": 223.9,
+     "daemon.footprint_final_mb": 64.2,
+     "providers.footprint_final_mb": 44.6,
+     "replay.max_lag_ms": 0.0
+    },
+    {
+     "replay.elapsed_s": 30.86,
+     "app.cpu_pct": 26.99,
+     "daemon.cpu_pct": 3.69,
+     "providers.cpu_pct": 0.23,
+     "app.cpu_s": 8.342,
+     "daemon.cpu_s": 1.14,
+     "providers.cpu_s": 0.072,
+     "app.intr_wakeups_per_s": 195.7,
+     "daemon.intr_wakeups_per_s": 16.3,
+     "counters.frames_per_s": 48.56,
+     "counters.commits_per_s": 0.28,
+     "counters.peak_commits_per_s": 5,
+     "counters.transcript_renders_per_commit": 141.222,
+     "counters.rows_per_commit_frame": 7.56,
+     "counters.ui_alloc_kb_per_commit": 9.0,
+     "counters.renders.sidebar": 871,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 138.3,
+     "app.footprint_peak_mb": 331.8,
+     "app.footprint_final_mb": 235.2,
+     "daemon.footprint_final_mb": 66.1,
+     "providers.footprint_final_mb": 44.9,
+     "replay.max_lag_ms": 0.1
+    }
+   ]
+  },
+  "prose": {
+   "runs": 3,
+   "discarded_window_not_drawn": 0,
+   "median": {
+    "replay.elapsed_s": 200.1,
+    "app.cpu_pct": 23.04,
+    "daemon.cpu_pct": 1.44,
+    "providers.cpu_pct": 0.31,
+    "app.cpu_s": 46.09,
+    "daemon.cpu_s": 2.88,
+    "providers.cpu_s": 0.61,
+    "app.intr_wakeups_per_s": 193.9,
+    "daemon.intr_wakeups_per_s": 10.9,
+    "counters.frames_per_s": 33.62,
+    "counters.commits_per_s": 8.0,
+    "counters.peak_commits_per_s": 9,
+    "counters.transcript_renders_per_commit": 4.2,
+    "counters.rows_per_commit_frame": 2.16,
+    "counters.ui_alloc_kb_per_commit": 6.0,
+    "counters.renders.sidebar": 5499,
+    "counters.renders.right_panel": 0,
+    "counters.save_ui_ms": 0.0,
+    "app.rss_peak_mb": 160.4,
+    "app.footprint_peak_mb": 336.4,
+    "app.footprint_final_mb": 243.9,
+    "daemon.footprint_final_mb": 28.7,
+    "providers.footprint_final_mb": 8.5,
+    "replay.max_lag_ms": 0.0
+   },
+   "range": {
+    "replay.elapsed_s": [
+     200.1,
+     200.1
+    ],
+    "app.cpu_pct": [
+     23.04,
+     23.04
+    ],
+    "daemon.cpu_pct": [
+     1.43,
+     1.48
+    ],
+    "providers.cpu_pct": [
+     0.3,
+     0.31
+    ],
+    "app.cpu_s": [
+     46.09,
+     46.1
+    ],
+    "daemon.cpu_s": [
+     2.87,
+     2.96
+    ],
+    "providers.cpu_s": [
+     0.6,
+     0.62
+    ],
+    "app.intr_wakeups_per_s": [
+     193.6,
+     203.1
+    ],
+    "daemon.intr_wakeups_per_s": [
+     10.9,
+     11.7
+    ],
+    "counters.frames_per_s": [
+     33.62,
+     34.04
+    ],
+    "counters.commits_per_s": [
+     7.99,
+     8.08
+    ],
+    "counters.peak_commits_per_s": [
+     9,
+     9
+    ],
+    "counters.transcript_renders_per_commit": [
+     4.2,
+     4.21
+    ],
+    "counters.rows_per_commit_frame": [
+     2.16,
+     2.16
+    ],
+    "counters.ui_alloc_kb_per_commit": [
+     6.0,
+     6.0
+    ],
+    "counters.renders.sidebar": [
+     5498,
+     5680
+    ],
+    "counters.renders.right_panel": [
+     0,
+     0
+    ],
+    "counters.save_ui_ms": [
+     0.0,
+     0.0
+    ],
+    "app.rss_peak_mb": [
+     159.1,
+     160.9
+    ],
+    "app.footprint_peak_mb": [
+     336.1,
+     336.8
+    ],
+    "app.footprint_final_mb": [
+     243.6,
+     244.3
+    ],
+    "daemon.footprint_final_mb": [
+     28.2,
+     29.0
+    ],
+    "providers.footprint_final_mb": [
+     8.5,
+     8.5
+    ],
+    "replay.max_lag_ms": [
+     0.0,
+     0.0
+    ]
+   },
+   "per_run": [
+    {
+     "replay.elapsed_s": 200.1,
+     "app.cpu_pct": 23.04,
+     "daemon.cpu_pct": 1.44,
+     "providers.cpu_pct": 0.3,
+     "app.cpu_s": 46.103,
+     "daemon.cpu_s": 2.879,
+     "providers.cpu_s": 0.603,
+     "app.intr_wakeups_per_s": 193.9,
+     "daemon.intr_wakeups_per_s": 10.9,
+     "counters.frames_per_s": 33.62,
+     "counters.commits_per_s": 8.0,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.197,
+     "counters.rows_per_commit_frame": 2.16,
+     "counters.ui_alloc_kb_per_commit": 6.0,
+     "counters.renders.sidebar": 5498,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 159.1,
+     "app.footprint_peak_mb": 336.1,
+     "app.footprint_final_mb": 243.6,
+     "daemon.footprint_final_mb": 28.7,
+     "providers.footprint_final_mb": 8.5,
+     "replay.max_lag_ms": 0.0
+    },
+    {
+     "replay.elapsed_s": 200.1,
+     "app.cpu_pct": 23.04,
+     "daemon.cpu_pct": 1.48,
+     "providers.cpu_pct": 0.31,
+     "app.cpu_s": 46.095,
+     "daemon.cpu_s": 2.956,
+     "providers.cpu_s": 0.624,
+     "app.intr_wakeups_per_s": 193.6,
+     "daemon.intr_wakeups_per_s": 10.9,
+     "counters.frames_per_s": 33.62,
+     "counters.commits_per_s": 7.99,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.202,
+     "counters.rows_per_commit_frame": 2.16,
+     "counters.ui_alloc_kb_per_commit": 6.0,
+     "counters.renders.sidebar": 5499,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 160.9,
+     "app.footprint_peak_mb": 336.8,
+     "app.footprint_final_mb": 244.3,
+     "daemon.footprint_final_mb": 29.0,
+     "providers.footprint_final_mb": 8.5,
+     "replay.max_lag_ms": 0.0
+    },
+    {
+     "replay.elapsed_s": 200.1,
+     "app.cpu_pct": 23.04,
+     "daemon.cpu_pct": 1.43,
+     "providers.cpu_pct": 0.31,
+     "app.cpu_s": 46.092,
+     "daemon.cpu_s": 2.87,
+     "providers.cpu_s": 0.611,
+     "app.intr_wakeups_per_s": 203.1,
+     "daemon.intr_wakeups_per_s": 11.7,
+     "counters.frames_per_s": 34.04,
+     "counters.commits_per_s": 8.08,
+     "counters.peak_commits_per_s": 9,
+     "counters.transcript_renders_per_commit": 4.211,
+     "counters.rows_per_commit_frame": 2.16,
+     "counters.ui_alloc_kb_per_commit": 6.0,
+     "counters.renders.sidebar": 5680,
+     "counters.renders.right_panel": 0,
+     "counters.save_ui_ms": 0.0,
+     "app.rss_peak_mb": 160.4,
+     "app.footprint_peak_mb": 336.4,
+     "app.footprint_final_mb": 243.9,
+     "daemon.footprint_final_mb": 28.2,
+     "providers.footprint_final_mb": 8.5,
+     "replay.max_lag_ms": 0.0
+    }
+   ]
+  }
+ },
+ "notes": [
+  "prose rerun separately (the full pass discarded all three prose runs: window covered)"
+ ]
+}
