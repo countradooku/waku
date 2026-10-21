@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { FileEntry, ReportedCommand, SlashCommand } from '@waku/client'
+import type { FileEntry, SlashCommand } from '@waku/client/v8'
 import {
   composerAutocompleteRows,
   detectComposerTrigger,
@@ -7,9 +7,9 @@ import {
   expandedComposerSubmission,
   isFastModeToggleSubmission,
   isResumeSubmission,
-  mergeComposerCommands,
   parseGoalSubmission,
   replaceComposerTrigger,
+  sortComposerCommands,
   toggledFastServiceTier,
 } from './composer-autocomplete'
 
@@ -39,36 +39,29 @@ describe('composer autocomplete', () => {
     const trigger = detectComposerTrigger('read @app then', 9)!
     expect(replaceComposerTrigger('read @app then', trigger, {
       kind: 'file',
-      file: { path: 'src/app.ts', is_dir: false },
+      file: { path: 'src/app.ts', isDir: false },
     })).toEqual({ text: 'read @src/app.ts  then', cursor: 17 })
   })
 
-  test('merges live provider commands without losing discovered templates', () => {
+  test('orders built-in and Waku commands first, then project, user and skills', () => {
     const discovered = [
-      command('review', 'Project', 'Review changes', 'Review $ARGUMENTS'),
-      command('deploy', 'Skill', 'Deploy the app', null),
-      command('resume', 'Waku', 'Resume a session', null),
+      command('review', 'project', 'Review changes', 'Review $ARGUMENTS'),
+      command('deploy', 'skill', 'Deploy the app', null),
+      command('resume', 'waku', 'Resume a session', null),
+      command('compact', 'builtin', 'Compact context', null),
+      command('notes', 'user', 'Notes', 'Notes'),
     ]
-    const reported: ReportedCommand[] = [
-      { name: 'review', description: 'Provider review' },
-      { name: 'compact', description: 'Compact context' },
-      { name: 'resume', description: 'Provider resume' },
-    ]
-    expect(mergeComposerCommands(discovered, reported)).toEqual([
-      command('compact', 'Builtin', 'Compact context', null),
-      discovered[2],
-      discovered[0],
-      discovered[1],
-    ])
+    expect(sortComposerCommands(discovered).map((item) => item.name))
+      .toEqual(['compact', 'resume', 'review', 'notes', 'deploy'])
   })
 
   test('recognizes only the resolved Codex fast-mode command', () => {
-    const builtin = command('fast', 'Builtin', 'Toggle fast mode', null)
+    const builtin = command('fast', 'builtin', 'Toggle fast mode', null)
     expect(isFastModeToggleSubmission('codex', '/fast ', [builtin])).toBe(true)
     expect(isFastModeToggleSubmission('claude', '/fast', [builtin])).toBe(false)
     expect(isFastModeToggleSubmission('codex', '/fast now', [builtin])).toBe(false)
     expect(isFastModeToggleSubmission('codex', '/fast', [
-      command('fast', 'Project', 'Project fast command', 'Run fast'),
+      command('fast', 'project', 'Project fast command', 'Run fast'),
     ])).toBe(false)
   })
 
@@ -89,7 +82,7 @@ describe('composer autocomplete', () => {
   test('filters by fuzzy path and caps the result count', () => {
     const files: FileEntry[] = Array.from({ length: 100 }, (_, index) => ({
       path: `src/component-${index}.tsx`,
-      is_dir: false,
+      isDir: false,
     }))
     const trigger = { kind: 'file' as const, query: 'cmp1', start: 0, end: 5 }
     const rows = composerAutocompleteRows(trigger, [], files, 3)
@@ -110,14 +103,14 @@ describe('slash command templates', () => {
   })
 
   test('expands only a known command with a template', () => {
-    const commands = [command('review', 'Project', '', 'Review $ARGUMENTS')]
-    expect(expandedComposerSubmission('openCode', '/review src', commands)).toBe('Review src')
-    expect(expandedComposerSubmission('openCode', '/unknown src', commands)).toBeNull()
-    expect(expandedComposerSubmission('openCode', 'please /review src', commands)).toBeNull()
+    const commands = [command('review', 'project', '', 'Review $ARGUMENTS')]
+    expect(expandedComposerSubmission('opencode', '/review src', commands)).toBe('Review src')
+    expect(expandedComposerSubmission('opencode', '/unknown src', commands)).toBeNull()
+    expect(expandedComposerSubmission('opencode', 'please /review src', commands)).toBeNull()
   })
 
   test('uses each provider native skill invocation', () => {
-    const commands = [command('deploy', 'Skill', '', null)]
+    const commands = [command('deploy', 'skill', '', null)]
     expect(expandedComposerSubmission('fx', '/deploy production', commands))
       .toBe('$deploy production')
     expect(expandedComposerSubmission('pi', '/deploy production', commands))
@@ -131,16 +124,14 @@ function command(
   description: string,
   template: string | null,
 ): SlashCommand {
-  return { name, scope, description, template, argument_hint: null }
+  return template === null ? { name, scope, description } : { name, scope, description, template }
 }
 
 describe('parseGoalSubmission', () => {
   const builtin: SlashCommand = {
     name: 'goal',
     description: '',
-    scope: 'Builtin',
-    argument_hint: null,
-    template: null,
+    scope: 'builtin',
   }
 
   test('parses each goal intent', () => {
@@ -163,7 +154,7 @@ describe('parseGoalSubmission', () => {
     expect(parseGoalSubmission('claude', '/goal', [builtin])).toBeNull()
     const projectOwned: SlashCommand = {
       ...builtin,
-      scope: 'Project',
+      scope: 'project',
       template: 'do project things',
     }
     expect(parseGoalSubmission('codex', '/goal', [projectOwned])).toBeNull()

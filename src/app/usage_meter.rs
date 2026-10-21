@@ -66,30 +66,12 @@ impl Waku {
             self.plan_usage_pending.insert(provider);
             let tx = self.plan_usage_tx.clone();
             let event_wake = self.event_wake_tx.clone();
-            let claude_version = self
-                .provider_versions
-                .get(&ProviderKind::Claude)
-                .cloned()
-                .flatten();
-            let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
-            let daemon = self.daemon.client();
+            // The daemon reads the binary from its settings and the CLI
+            // version from its own probes.
+            let daemon_v8 = self.daemon_v8.clone();
             cx.background_executor()
                 .spawn(async move {
-                    let result = match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::FetchPlanUsage {
-                            provider,
-                            binary_override,
-                            cli_version: claude_version,
-                        },
-                    ) {
-                        Ok(waku_client::ResponsePayload::PlanUsage { usage }) => Ok(usage),
-                        Ok(_) => Err(anyhow::anyhow!(
-                            "the daemon returned an invalid plan usage response"
-                        )),
-                        Err(error) => Err(error),
-                    };
+                    let result = waku_client::surfaces::providers::plan_usage(&daemon_v8, provider);
                     if tx
                         .send((provider, result.map_err(|error| format!("{error:#}"))))
                         .is_ok()

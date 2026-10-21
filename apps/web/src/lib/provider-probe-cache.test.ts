@@ -18,18 +18,14 @@ class MemoryStorage {
 }
 
 const probe: ProviderProbeResult = {
-  provider: 'codex',
   installed: true,
   path: '/usr/local/bin/codex',
   models: [{
     id: 'gpt-5',
     name: 'GPT-5',
-    is_default: true,
-    reasoning_efforts: [],
-    service_tiers: [],
-    context_windows: [],
+    isDefault: true,
   }],
-  agent_presets: [],
+  agentPresets: [],
   version: '1.2.3',
 }
 
@@ -59,7 +55,7 @@ describe('provider probe cache', () => {
     writeProviderProbeCache(storage, 'ws://daemon-a', 'codex', null, probe, 10_000)
     expect(readProviderProbeCache(storage, 'ws://daemon-a', 'codex', null, 31 * 24 * 60 * 60 * 1_000)).toBeUndefined()
 
-    storage.setItem('waku.provider-probes.v1', '{bad json')
+    storage.setItem('waku.provider-probes.v2', '{bad json')
     expect(readProviderProbeCache(storage, 'ws://daemon-a', 'codex')).toBeUndefined()
   })
 })

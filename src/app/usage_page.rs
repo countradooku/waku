@@ -94,7 +94,7 @@ impl Waku {
         self.usage_history_pending_for = Some(window);
         self.usage_history_generation += 1;
         let generation = self.usage_history_generation;
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         let project_roots: Vec<PathBuf> = self
             .state
             .projects
@@ -105,17 +105,11 @@ impl Waku {
             let history = cx
                 .background_executor()
                 .spawn(async move {
-                    match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::LoadUsageHistory {
-                            window,
-                            project_roots,
-                        },
-                    )? {
-                        waku_client::ResponsePayload::UsageHistory { history } => Ok(history),
-                        _ => anyhow::bail!("the daemon returned an invalid usage response"),
-                    }
+                    waku_client::surfaces::providers::usage_history(
+                        &daemon_v8,
+                        window,
+                        &project_roots,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {

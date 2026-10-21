@@ -1,4 +1,5 @@
-import type { AgentSession, Project } from '@waku/client'
+import type { Project } from '@waku/client/v8'
+import type { TaskSummary } from './thread-model'
 import { isProjectlessProject } from './project-presentation'
 
 export type RememberedNavigation =
@@ -34,20 +35,20 @@ export function routeDestinationTransition(
 export function taskRemovalDestination(
   previousProjects: Project[],
   nextProjects: Project[],
-  nextSessions: AgentSession[],
-  removed: AgentSession,
+  nextSessions: TaskSummary[],
+  removed: TaskSummary,
 ): TaskRemovalDestination {
   const nextSession = nextSessions
-    .filter((session) => session.project_id === removed.project_id)
-    .sort((left, right) => right.updated_at - left.updated_at)[0]
+    .filter((session) => session.id !== removed.id && session.projectId === removed.projectId)
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0]
   if (nextSession) return { kind: 'session', sessionId: nextSession.id }
 
-  const removedProject = previousProjects.find((project) => project.id === removed.project_id)
+  const removedProject = previousProjects.find((project) => project.id === removed.projectId)
   if (removedProject && isProjectlessProject(removedProject)) {
     return { kind: 'projectless' }
   }
 
-  const project = nextProjects.find((project) => project.id === removed.project_id)
+  const project = nextProjects.find((project) => project.id === removed.projectId)
   return project ? { kind: 'newTask', project } : { kind: 'none' }
 }
 

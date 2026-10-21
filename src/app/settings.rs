@@ -683,6 +683,15 @@ impl Waku {
                         .text_color(theme.text_secondary)
                         .child(tr!("daemon.external_description")),
                 )
+                .when_some(self.daemon_version.clone(), |card, version| {
+                    card.child(
+                        div()
+                            .mt(px(5.0))
+                            .text_size(sp(12.5))
+                            .text_color(theme.text_tertiary)
+                            .child(tr!("daemon.version", version = version)),
+                    )
+                })
                 .into_any_element();
         }
 
@@ -972,7 +981,16 @@ impl Waku {
                                     .line_height(sp(18.0))
                                     .text_color(theme.text_secondary)
                                     .child(tr!("daemon.expose_description")),
-                            ),
+                            )
+                            .when_some(self.daemon_version.clone(), |column, version| {
+                                column.child(
+                                    div()
+                                        .mt(px(5.0))
+                                        .text_size(sp(12.5))
+                                        .text_color(theme.text_tertiary)
+                                        .child(tr!("daemon.version", version = version)),
+                                )
+                            }),
                     )
                     .child(exposure_toggle),
             )
@@ -2384,21 +2402,13 @@ impl Waku {
         self.computer_permission_request_pending = true;
         let tx = self.computer_permission_tx.clone();
         let event_wake = self.event_wake_tx.clone();
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         std::thread::Builder::new()
             .name("waku-computer-permission-request".into())
             .spawn(move || {
-                let result = match daemon.request(
-                    Uuid::nil(),
-                    Uuid::nil(),
-                    waku_client::Command::ProbeComputerPermissions { prompt },
-                ) {
-                    Ok(waku_client::ResponsePayload::ComputerPermissions { permissions }) => {
-                        Ok(permissions)
-                    }
-                    Ok(_) => Err("the daemon returned an invalid permission response".into()),
-                    Err(error) => Err(error.to_string()),
-                };
+                let result =
+                    waku_client::surfaces::providers::computer_permissions(&daemon_v8, prompt)
+                        .map_err(|error| error.to_string());
                 if tx.send(result).is_ok() {
                     signal_event_pump(&event_wake);
                 }

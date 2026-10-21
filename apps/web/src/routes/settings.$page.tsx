@@ -7,7 +7,7 @@ import {
   isSettingsPageId,
   type SettingsPageId,
 } from '@/components/settings-view'
-import { useTaskState } from '@/hooks/use-daemon-data'
+import { useShell } from '@/hooks/use-daemon-stores'
 import { useDocumentTitle } from '@/hooks/use-document-title'
 import { useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
@@ -46,7 +46,8 @@ function SettingsApp({
   const { phase } = useDaemon()
   const pageMetadata = SETTINGS_PAGES.find((candidate) => candidate.id === page)
   const title = pageMetadata ? t(pageMetadata.labelKey) : t('common.settings')
-  if (phase !== 'connected') return <ConnectionPanel title={title} />
+  // A reconnect keeps the page; the streams resume underneath it.
+  if (phase !== 'connected' && phase !== 'reconnecting') return <ConnectionPanel title={title} />
   return <ConnectedSettings page={page} sessionId={sessionId} />
 }
 
@@ -59,17 +60,18 @@ function ConnectedSettings({
 }) {
   const { t } = useI18n()
   const navigate = useNavigate({ from: '/settings/$page' })
-  const taskState = useTaskState()
+  const { reconnect } = useDaemon()
+  const shell = useShell()
   const pageMetadata = SETTINGS_PAGES.find((candidate) => candidate.id === page)
   useDocumentTitle(pageMetadata ? t(pageMetadata.labelKey) : t('common.settings'))
-  if (!taskState.data) {
-    return <StartupScreen error={taskState.error ? errorMessage(taskState.error) : undefined} onRetry={() => void taskState.refetch()} />
+  if (!shell.ready) {
+    return <StartupScreen error={shell.error ? errorMessage(shell.error) : undefined} onRetry={() => void reconnect().catch(() => {})} />
   }
 
   return (
     <SettingsView
       page={page}
-      projects={taskState.data.projects}
+      projects={shell.projects}
       onBack={() => void navigate({
         to: '/',
         search: { session: sessionId },

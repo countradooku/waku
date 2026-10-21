@@ -5,51 +5,14 @@ import {
   type FileDiffContentsLoader,
   type FileDiffMetadata,
 } from '@pierre/diffs'
-import type { AgentSession, ReviewDiffSource } from '@waku/client'
+import type { DiffSource } from './daemon-api'
 
 const REVIEW_DIFF_CONTEXT_LINES = 3
 
-export function latestReviewTurnSource(session: AgentSession | null): ReviewDiffSource | null {
-  if (!session) return null
-  let turn: AgentSession['turns'][number] | undefined
-  for (let index = session.turns.length - 1; index >= 0; index -= 1) {
-    const candidate = session.turns[index]!
-    if (candidate.turn_count > 0 && candidate.checkpoint?.status === 'ready') {
-      turn = candidate
-      break
-    }
-  }
-  return turn
-    ? {
-        lastTurn: {
-          session_id: session.id,
-          turn_id: turn.id,
-          turn_count: turn.turn_count,
-        },
-      }
-    : null
-}
-
-export function sameReviewDiffSource(
-  left: ReviewDiffSource,
-  right: ReviewDiffSource,
-): boolean {
-  if (typeof left === 'string' || typeof right === 'string') return left === right
-  return left.lastTurn.session_id === right.lastTurn.session_id
-    && left.lastTurn.turn_id === right.lastTurn.turn_id
-    && left.lastTurn.turn_count === right.lastTurn.turn_count
-}
-
 export function reviewDiffSourceLabel(
-  source: ReviewDiffSource,
-  latest: ReviewDiffSource | null,
+  source: DiffSource,
   t?: (key: string, params?: Record<string, string | number>) => string,
 ): string {
-  if (typeof source === 'object') {
-    return latest && sameReviewDiffSource(source, latest)
-      ? t ? t('diff.source_last_turn') : 'Last turn'
-      : t ? t('diff.source_turn', { turn: source.lastTurn.turn_count }) : `Turn ${source.lastTurn.turn_count}`
-  }
   if (t) return t({
     uncommitted: 'diff.source_uncommitted',
     unstaged: 'diff.source_unstaged',

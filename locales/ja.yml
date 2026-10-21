@@ -106,6 +106,7 @@ settings.search: 設定を検索
 daemon.expose_title: 管理対象デーモンを公開
 daemon.expose_description: このマシン以外の Waku クライアントから接続できるようにします。変更時はデーモンだけが再起動します。
 daemon.status_local: このマシンのみ
+daemon.version: "デーモン %{version}"
 daemon.status_exposed: 公開中
 daemon.status_restarting: 再起動中
 daemon.connection_title: リスナーアクセス
@@ -140,6 +141,12 @@ daemon.phase_disconnected: 接続解除済み
 daemon.phase_connecting: 接続中
 daemon.phase_connected: 接続済み
 daemon.phase_error: エラー
+daemon.phase_reconnecting: 再接続中
+transcript.loading_earlier: 以前のメッセージを読み込み中
+common.archive: アーカイブ
+goal.unsupported: このデーモンはまだゴールに対応していません
+errors.archive_task: タスクをアーカイブできませんでした：%{error}
+files.changed_on_disk: ファイルがディスク上で変更されました。最新版を見るには開き直してください。
 daemon.invalid_port: 1 から 65535 のポートを入力してください
 daemon.invalid_settings: デーモン設定が無効です：%{error}
 daemon.stop_active_tasks: デーモンのアクセス設定を変更する前に実行中のタスクを停止してください

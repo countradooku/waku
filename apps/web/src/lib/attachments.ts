@@ -1,75 +1,85 @@
-import { MAX_WIRE_MESSAGE_BYTES, type MessageAttachment, type WakuClient } from '@waku/client'
+// Attachments over protocol v8 (RFC 0003 §5.6): a browser file is uploaded
+// as a blob (`blobs.put` + DATA) and then imported (`attachments.import`); a
+// daemon-host path is imported in place (`attachments.importPath`). Images
+// are downloaded through the `blobDownload` stream.
 
-const MAX_UPLOAD_BYTES = Math.floor((MAX_WIRE_MESSAGE_BYTES * 3) / 4) - 1024 * 1024
+import type { DaemonConnection } from '@waku/client/v8'
+import type * as T from '@waku/client/v8'
+
+/** The attachment store's per-file cap. */
+const MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+
+export type AttachmentClient = Pick<DaemonConnection, 'uploadBlob' | 'call' | 'downloadBlob'>
 
 export async function importFiles(
-  client: WakuClient,
+  connection: AttachmentClient,
   files: File[],
-): Promise<MessageAttachment[]> {
-  const attachments: MessageAttachment[] = []
+): Promise<T.Attachment[]> {
+  const attachments: T.Attachment[] = []
   for (const file of files) {
     if (file.size > MAX_UPLOAD_BYTES) {
       throw new Error(`${file.name} is too large to send to the daemon`)
     }
-    const response = await client.request({
-      type: 'importAttachment',
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    const blob = await connection.uploadBlob(bytes, {
+      mime: file.type || 'application/octet-stream',
       name: file.name,
-      upload: {
-        kind: 'file',
-        data_base64: await fileBase64(file),
-      },
+      sha256: await sha256Hex(bytes),
     })
-    if (response.type !== 'attachmentStored') {
-      throw new Error(`Expected attachmentStored, received ${response.type}`)
-    }
+    const stored = await connection.call('attachments.import', {
+      name: file.name,
+      kind: 'file',
+      parts: [{ relativePath: file.name, blob: blob.reference }],
+    })
     attachments.push({
-      path: response.attachment.path,
-      mention: response.attachment.path,
-      name: response.attachment.name,
-      is_dir: response.attachment.isDir,
-      is_image: file.type.startsWith('image/') || isImageName(file.name),
-      blob_reference: response.attachment.reference,
+      path: stored.path,
+      mention: stored.path,
+      name: stored.name,
+      isDir: stored.isDir,
+      isImage: file.type.startsWith('image/') || isImageName(file.name),
+      blobReference: stored.reference,
     })
   }
   return attachments
 }
 
 export async function importDaemonPathAttachment(
-  client: WakuClient,
+  connection: AttachmentClient,
   path: string,
-): Promise<MessageAttachment> {
-  const response = await client.request({
-    type: 'importPathAttachment',
-    path,
-  })
-  if (response.type !== 'attachmentStored') {
-    throw new Error(`Expected attachmentStored, received ${response.type}`)
-  }
-  const mention = response.attachment.isDir && !path.endsWith('/') ? `${path}/` : path
+): Promise<T.Attachment> {
+  const stored = await connection.call('attachments.importPath', { path })
+  const mention = stored.isDir && !path.endsWith('/') ? `${path}/` : path
   return {
-    path: response.attachment.path,
+    path: stored.path,
     mention,
-    name: response.attachment.name,
-    is_dir: response.attachment.isDir,
-    is_image: !response.attachment.isDir && isImageName(response.attachment.name),
-    blob_reference: response.attachment.reference,
+    name: stored.name,
+    isDir: stored.isDir,
+    isImage: !stored.isDir && isImageName(stored.name),
+    blobReference: stored.reference,
   }
 }
 
+/** A data URL for an image attachment or a `waku-blob:` image reference. */
 export async function readAttachmentImage(
-  client: WakuClient,
-  attachment: MessageAttachment,
+  connection: AttachmentClient,
+  attachment: Pick<T.Attachment, 'blobReference' | 'path' | 'name'>,
 ): Promise<string> {
-  const reference = attachment.blob_reference
+  const reference = attachment.blobReference
   if (!reference) throw new Error('This attachment has no daemon reference')
-  const command = reference.startsWith('waku-blob:')
-    ? ({ type: 'readBlob', reference } as const)
-    : ({ type: 'readAttachment', reference, path: attachment.path } as const)
-  const response = await client.request(command)
-  if (response.type !== 'blobData') {
-    throw new Error(`Expected blobData, received ${response.type}`)
+  const { meta, bytes } = reference.startsWith('waku-blob:')
+    ? await connection.downloadBlob(reference)
+    : await connection.downloadBlob(reference, attachment.path)
+  const mime = meta.type === 'meta' && meta.mime.startsWith('image/') ? meta.mime : imageMimeType(attachment.name)
+  return `data:${mime};base64,${encodeBase64(bytes)}`
+}
+
+/** Draft attachments carry the same fields with the flags required. */
+export function draftAttachment(attachment: T.Attachment): T.DraftAttachment {
+  return {
+    ...attachment,
+    isDir: attachment.isDir ?? false,
+    isImage: attachment.isImage ?? false,
   }
-  return `data:${imageMimeType(attachment.name)};base64,${response.bytes}`
 }
 
 function imageMimeType(name: string): string {
@@ -88,21 +98,21 @@ function imageMimeType(name: string): string {
   )
 }
 
-function fileBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name}`))
-    reader.onload = () => {
-      const result = String(reader.result)
-      const separator = result.indexOf(',')
-      if (separator === -1) reject(new Error(`Could not encode ${file.name}`))
-      else resolve(result.slice(separator + 1))
-    }
-    reader.readAsDataURL(file)
-  })
+async function sha256Hex(bytes: Uint8Array): Promise<string | undefined> {
+  if (!globalThis.crypto?.subtle) return undefined
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-function isImageName(name: string): boolean {
+export function encodeBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000))
+  }
+  return btoa(binary)
+}
+
+export function isImageName(name: string): boolean {
   return ['avif', 'gif', 'heic', 'jpeg', 'jpg', 'png', 'svg', 'webp'].includes(
     name.split('.').at(-1)?.toLowerCase() ?? '',
   )

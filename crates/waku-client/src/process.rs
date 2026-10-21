@@ -15,10 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::DaemonClient;
-use waku_protocol::{
-    APP_EXECUTABLE_ENV, Command, DAEMON_TOKEN_ENV, DaemonReady, DaemonSettings, PROTOCOL_VERSION,
-    ResponsePayload,
-};
+use waku_protocol::{APP_EXECUTABLE_ENV, DAEMON_TOKEN_ENV, DaemonReady, PROTOCOL_VERSION};
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// How often a development supervisor (`watch_for_rebuilds`, which only
@@ -31,8 +28,6 @@ const REBUILD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// unreachable, never while it is healthy.
 const MIN_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(2);
-/// Settings writes that fail are retried after this.
-const SETTINGS_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 pub const DEFAULT_EXPOSED_DAEMON_PORT: u16 = 34_123;
 
 /// Desktop-owned launch configuration for the daemon it supervises.
@@ -138,9 +133,10 @@ pub fn parse_allowed_origins(text: &str) -> anyhow::Result<Vec<String>> {
 pub struct DaemonProcess {
     client: DaemonClient,
     child: Child,
-    /// Where and how a protocol v8 connection reaches this daemon: the same
-    /// socket (the preface tells the protocols apart) and token.
-    endpoint: (String, String),
+    /// Where the desktop reaches this daemon, and its token: what a second,
+    /// protocol v8 connection needs.
+    address: String,
+    token: String,
 }
 
 impl DaemonProcess {
@@ -253,7 +249,8 @@ impl DaemonProcess {
         Ok(Self {
             client,
             child,
-            endpoint: (client_address, token),
+            address: client_address,
+            token,
         })
     }
 
@@ -359,9 +356,6 @@ struct SupervisorInner {
     target: Mutex<DaemonTarget>,
     exposure: Mutex<Option<DaemonExposureSettings>>,
     restart: Mutex<()>,
-    settings: Mutex<DaemonSettings>,
-    persisted_settings: Mutex<Option<DaemonSettings>>,
-    settings_updates: Sender<DaemonSettings>,
     client_updates: Mutex<Vec<Sender<DaemonClient>>>,
     running: AtomicBool,
     /// Wakes the monitor thread: the child exited, the connection closed,
@@ -403,6 +397,14 @@ enum DaemonTarget {
 }
 
 impl DaemonTarget {
+    fn endpoint(&self) -> Option<(String, String)> {
+        match self {
+            Self::Local(process) => Some((process.address.clone(), process.token.clone())),
+            Self::Restarting(_) => None,
+            Self::Remote { address, token, .. } => Some((address.clone(), token.clone())),
+        }
+    }
+
     fn client(&self) -> DaemonClient {
         match self {
             Self::Local(process) => process.client(),
@@ -435,13 +437,11 @@ impl DaemonSupervisor {
     ) -> anyhow::Result<Self> {
         let exposure = exposure.validate()?;
         let process = DaemonProcess::spawn_configured(executable, exposure.clone())?;
-        let settings = read_settings(&process.client())?;
         let initial_stamp = ExecutableStamp::read(executable)?;
         let (supervisor, wake) = Self::from_target(
             DaemonTarget::Local(process),
             Some(executable.to_owned()),
             Some(exposure),
-            settings,
         )?;
         if let DaemonTarget::Local(process) = &*supervisor.inner.target.lock() {
             supervisor.inner.watch_process(process);
@@ -460,7 +460,6 @@ impl DaemonSupervisor {
     /// service manager). Dropping the desktop never shuts this daemon down.
     pub fn connect(address: &str, token: String) -> anyhow::Result<Self> {
         let client = DaemonClient::connect(address, token.clone())?;
-        let settings = read_settings(&client)?;
         let (supervisor, wake) = Self::from_target(
             DaemonTarget::Remote {
                 client: client.clone(),
@@ -469,7 +468,6 @@ impl DaemonSupervisor {
             },
             None,
             None,
-            settings,
         )?;
         supervisor.inner.watch_client(&client);
         let weak_inner = Arc::downgrade(&supervisor.inner);
@@ -484,45 +482,22 @@ impl DaemonSupervisor {
         target: DaemonTarget,
         executable: Option<PathBuf>,
         exposure: Option<DaemonExposureSettings>,
-        settings: DaemonSettings,
     ) -> anyhow::Result<(Self, Receiver<()>)> {
-        let (settings_updates, settings_update_rx) = unbounded();
         let (wake, wake_rx) = unbounded();
         let inner = Arc::new(SupervisorInner {
             executable,
             target: Mutex::new(target),
             exposure: Mutex::new(exposure),
             restart: Mutex::new(()),
-            settings: Mutex::new(settings),
-            // The desktop sends one normalized snapshot after it has migrated
-            // the legacy combined settings document into app.json.
-            persisted_settings: Mutex::new(None),
-            settings_updates,
             client_updates: Mutex::new(Vec::new()),
             running: AtomicBool::new(true),
             wake,
         });
-        let weak_inner = Arc::downgrade(&inner);
-        std::thread::Builder::new()
-            .name("waku-daemon-settings".into())
-            .spawn(move || persist_settings(weak_inner, settings_update_rx))
-            .context("could not start Waku daemon settings writer")?;
         Ok((Self { inner }, wake_rx))
     }
 
     pub fn client(&self) -> DaemonClient {
         self.inner.target.lock().client()
-    }
-
-    /// Open a protocol v8 connection to the current daemon (#55). Fails
-    /// while a managed daemon is restarting; callers retry with backoff.
-    pub fn connect_v8(&self) -> anyhow::Result<crate::V8Client> {
-        let (address, token) = match &*self.inner.target.lock() {
-            DaemonTarget::Local(process) => process.endpoint.clone(),
-            DaemonTarget::Remote { address, token, .. } => (address.clone(), token.clone()),
-            DaemonTarget::Restarting(_) => anyhow::bail!("the Waku daemon is restarting"),
-        };
-        crate::V8Client::connect(&address, token)
     }
 
     /// Subscribe to the active daemon connection. The current client is sent
@@ -542,8 +517,10 @@ impl DaemonSupervisor {
         self.inner.executable.is_none()
     }
 
-    pub fn settings(&self) -> DaemonSettings {
-        self.inner.settings.lock().clone()
+    /// Where the current daemon listens and its token, for a protocol v8
+    /// connection beside this one; `None` while a restart is in progress.
+    pub fn endpoint(&self) -> Option<(String, String)> {
+        self.inner.target.lock().endpoint()
     }
 
     /// Restart only the desktop-managed daemon with a new listener policy.
@@ -566,14 +543,10 @@ impl DaemonSupervisor {
         match replace_local_daemon(&self.inner, &executable, &exposure) {
             Ok(()) => {
                 *self.inner.exposure.lock() = Some(exposure);
-                queue_settings_refresh(&self.inner);
                 Ok(())
             }
             Err(error) => match replace_local_daemon(&self.inner, &executable, &previous) {
-                Ok(()) => {
-                    queue_settings_refresh(&self.inner);
-                    Err(error)
-                }
+                Ok(()) => Err(error),
                 Err(restore_error) => {
                     // The target is left `Restarting`; the monitor retries
                     // with the previous settings from here.
@@ -584,18 +557,6 @@ impl DaemonSupervisor {
                 }
             },
         }
-    }
-
-    /// Queue a daemon settings update without blocking the desktop UI thread.
-    pub fn update_settings(&self, settings: DaemonSettings) -> anyhow::Result<()> {
-        *self.inner.settings.lock() = settings.clone();
-        if self.inner.persisted_settings.lock().as_ref() == Some(&settings) {
-            return Ok(());
-        }
-        self.inner
-            .settings_updates
-            .send(settings)
-            .map_err(|_| anyhow::anyhow!("Waku daemon settings writer is closed"))
     }
 }
 
@@ -769,7 +730,6 @@ fn check_daemon(
         eprintln!("could not restart rebuilt Waku daemon: {error:#}");
         return Check::Retry;
     }
-    queue_settings_refresh(inner);
     if let Some(observed_stamp) = state.observed_stamp {
         *active_stamp = Some(observed_stamp);
     }
@@ -811,64 +771,6 @@ fn replace_local_daemon(
         .lock()
         .retain(|subscriber| subscriber.send(client.clone()).is_ok());
     Ok(())
-}
-
-fn queue_settings_refresh(inner: &SupervisorInner) {
-    let settings = inner.settings.lock().clone();
-    *inner.persisted_settings.lock() = None;
-    let _ = inner.settings_updates.send(settings);
-}
-
-fn read_settings(client: &DaemonClient) -> anyhow::Result<DaemonSettings> {
-    match client.request(Uuid::nil(), Uuid::nil(), Command::GetSettings)? {
-        ResponsePayload::Settings { settings } => Ok(settings),
-        _ => bail!("Waku daemon returned an invalid settings response"),
-    }
-}
-
-fn persist_settings(
-    weak_inner: std::sync::Weak<SupervisorInner>,
-    updates: Receiver<DaemonSettings>,
-) {
-    while let Ok(mut settings) = updates.recv() {
-        while let Ok(newer) = updates.try_recv() {
-            settings = newer;
-        }
-        loop {
-            let Some(inner) = weak_inner.upgrade() else {
-                return;
-            };
-            if !inner.running.load(Ordering::Acquire) {
-                return;
-            }
-            let desired = inner.settings.lock().clone();
-            if desired != settings {
-                settings = desired;
-            }
-            let client = inner.target.lock().client();
-            let result = client.request(
-                Uuid::nil(),
-                Uuid::nil(),
-                Command::UpdateSettings {
-                    settings: settings.clone(),
-                },
-            );
-            match result {
-                Ok(ResponsePayload::Ack) => {
-                    *inner.persisted_settings.lock() = Some(settings);
-                    break;
-                }
-                Ok(_) => {
-                    eprintln!("Waku daemon returned an invalid settings update response");
-                }
-                Err(error) => {
-                    eprintln!("could not persist Waku daemon settings: {error:#}");
-                }
-            }
-            drop(inner);
-            std::thread::sleep(SETTINGS_RETRY_INTERVAL);
-        }
-    }
 }
 
 #[cfg(test)]

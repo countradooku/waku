@@ -1,4 +1,4 @@
-import type { AgentSession, ThreadGoal, ThreadGoalStatus } from '@waku/client'
+import type { ThreadGoal, ThreadGoalStatus } from '@waku/client/v8'
 import { useEffect, useState, type RefObject } from 'react'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils'
 /** Mirror of Codex's `/goal edit` semantics: saving keeps a resumable status
  * but restarts a finished one. */
 function editedGoalStatus(status: ThreadGoalStatus): ThreadGoalStatus {
-  return status === 'complete' || status === 'budgetLimited' ? 'active' : status
+  return status === 'complete' || status === 'budget_limited' ? 'active' : status
 }
 
 export function goalStatusLabel(
@@ -21,9 +21,10 @@ export function goalStatusLabel(
     case 'active': return t('goal.status_active')
     case 'paused': return t('goal.status_paused')
     case 'blocked': return t('goal.status_stalled')
-    case 'usageLimited': return t('goal.status_usage_limited')
-    case 'budgetLimited': return t('goal.status_budget_limited')
+    case 'usage_limited': return t('goal.status_usage_limited')
+    case 'budget_limited': return t('goal.status_budget_limited')
     case 'complete': return t('goal.status_complete')
+    default: return status
   }
 }
 
@@ -33,9 +34,10 @@ export function goalStatusClass(status: ThreadGoalStatus): string {
     case 'active': return 'text-ring'
     case 'paused': return 'text-[var(--text-secondary)]'
     case 'blocked':
-    case 'usageLimited':
-    case 'budgetLimited': return 'text-[var(--warning)]'
+    case 'usage_limited':
+    case 'budget_limited': return 'text-[var(--warning)]'
     case 'complete': return 'text-[var(--success)]'
+    default: return 'text-[var(--text-secondary)]'
   }
 }
 
@@ -65,15 +67,15 @@ export function formatGoalTokens(tokens: number): string {
  * unbudgeted ones elapsed pursuit time — the Codex CLI's own treatment. */
 export function goalUsageReadout(goal: ThreadGoal, liveElapsedSeconds = 0): string | null {
   if (typeof goal.tokenBudget === 'number') {
-    return `${formatGoalTokens(goal.tokensUsed)} / ${formatGoalTokens(goal.tokenBudget)}`
+    return `${formatGoalTokens(goal.tokensUsed ?? 0)} / ${formatGoalTokens(goal.tokenBudget)}`
   }
-  const seconds = goal.timeUsedSeconds + liveElapsedSeconds
+  const seconds = (goal.timeUsedSeconds ?? 0) + liveElapsedSeconds
   return seconds > 0 ? formatGoalElapsed(seconds) : null
 }
 
 export function GoalDialog({
   open,
-  session,
+  goal,
   prefill,
   replace,
   returnFocus,
@@ -83,7 +85,8 @@ export function GoalDialog({
   onOpenChange,
 }: {
   open: boolean
-  session: AgentSession | null
+  /** The provider thread's goal, if it reports one. */
+  goal: ThreadGoal | null
   /** Objective text to start the editor with; `null` prefills the current goal. */
   prefill: string | null
   /** Saving replaces the existing goal and restarts its accounting. */
@@ -97,7 +100,6 @@ export function GoalDialog({
   const { t } = useI18n()
   const [objective, setObjective] = useState('')
   const saveShortcut = usePrimaryShortcut('⌘↩', 'Ctrl+Enter')
-  const goal = session?.thread_goal ?? null
 
   useEffect(() => {
     if (!open) return
@@ -114,7 +116,7 @@ export function GoalDialog({
   const statusAction = goal && !replace
     ? goal.status === 'active'
       ? { status: 'paused' as const, label: t('goal.pause'), icon: 'stop' as WakuIconName }
-      : goal.status === 'paused' || goal.status === 'blocked' || goal.status === 'usageLimited'
+      : goal.status === 'paused' || goal.status === 'blocked' || goal.status === 'usage_limited'
         ? { status: 'active' as const, label: t('goal.resume'), icon: 'arrowUp' as WakuIconName }
         : null
     : null

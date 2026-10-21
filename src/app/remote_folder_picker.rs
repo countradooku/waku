@@ -3,14 +3,13 @@
 //!
 //! The local folder dialog would show this machine's disk, and a path picked
 //! there means nothing to a daemon elsewhere. This modal browses the daemon's
-//! own directories through `BrowseDirectory` instead. Every listing is one
+//! own directories through `fs.browse` instead. Every listing is one
 //! background request; frames read only the listing already in memory, and a
 //! generation counter keeps a slow, superseded response from replacing the
 //! folder the user has since moved to.
 
 use gpui::{KeyBinding, actions};
-use waku_client::workspace::WorkingTreeEntry;
-use waku_client::{WorkspaceOperation, WorkspaceResult};
+use waku_client::v8::DirectoryEntry;
 
 use super::*;
 
@@ -86,7 +85,7 @@ pub(super) struct RemoteFolderPicker {
 /// The folders of a listing, in the daemon's order (case-insensitive by
 /// name), with hidden folders after the rest: they are rarely projects but
 /// must stay reachable. Files are not shown; a project is a folder.
-pub(super) fn folder_rows(entries: Vec<WorkingTreeEntry>) -> Vec<FolderRow> {
+pub(super) fn folder_rows(entries: Vec<DirectoryEntry>) -> Vec<FolderRow> {
     let (hidden, visible): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .filter(|entry| entry.is_dir)
@@ -96,7 +95,7 @@ pub(super) fn folder_rows(entries: Vec<WorkingTreeEntry>) -> Vec<FolderRow> {
         .chain(hidden)
         .map(|entry| FolderRow {
             name: entry.name.into(),
-            path: entry.absolute_path,
+            path: PathBuf::from(entry.path),
         })
         .collect()
 }
@@ -151,14 +150,14 @@ impl Waku {
         picker.generation += 1;
         picker.loading = true;
         let generation = picker.generation;
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(
-                    async move { workspace.request(WorkspaceOperation::BrowseDirectory { path }) },
-                )
-                .await;
+            let result =
+                cx.background_executor()
+                    .spawn(async move {
+                        waku_client::surfaces::files::browse(&daemon_v8, path.as_deref())
+                    })
+                    .await;
             let _ = waku.update(cx, |waku, cx| {
                 let Some(picker) = waku.remote_folder_picker.as_mut() else {
                     return;
@@ -168,29 +167,19 @@ impl Waku {
                 }
                 picker.loading = false;
                 match result {
-                    Ok(WorkspaceResult::Directory {
-                        path,
-                        parent,
-                        home,
-                        entries,
-                        ..
-                    }) => {
-                        let folders = folder_rows(entries);
+                    Ok(directory) => {
+                        let folders = folder_rows(directory.entries);
                         picker
                             .list_state
                             .reset_with_uniform_height(folders.len(), px(ROW_HEIGHT));
                         picker.listing = Some(Listing {
-                            path,
-                            parent,
-                            home,
+                            path: PathBuf::from(directory.path),
+                            parent: directory.parent.map(PathBuf::from),
+                            home: PathBuf::from(directory.home),
                             folders: Rc::new(folders),
                         });
                         picker.highlight = None;
                         picker.error = None;
-                    }
-                    Ok(_) => {
-                        picker.error =
-                            Some("Waku daemon returned an invalid directory listing".into());
                     }
                     // The previous folder stays listed under the error.
                     Err(error) => picker.error = Some(error.to_string()),
@@ -636,14 +625,11 @@ impl Waku {
 mod tests {
     use super::*;
 
-    fn entry(name: &str, is_dir: bool) -> WorkingTreeEntry {
-        WorkingTreeEntry {
-            relative_path: name.into(),
-            absolute_path: PathBuf::from("/srv").join(name),
+    fn entry(name: &str, is_dir: bool) -> DirectoryEntry {
+        DirectoryEntry {
             name: name.into(),
+            path: format!("/srv/{name}"),
             is_dir,
-            expanded: false,
-            depth: 0,
         }
     }
 

@@ -1030,19 +1030,15 @@ impl Waku {
             return;
         }
 
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let labels = cx
                 .background_executor()
                 .spawn(async move {
                     let mut labels = HashMap::new();
                     for path in paths {
-                        let branch = match workspace.request(
-                            waku_client::WorkspaceOperation::InspectBranches { cwd: path.clone() },
-                        ) {
-                            Ok(waku_client::WorkspaceResult::Branches {
-                                snapshot: Some(snapshot),
-                            }) => snapshot.display_branch().map(str::to_owned),
+                        let branch = match waku_client::surfaces::vcs::refs(&daemon_v8, &path) {
+                            Ok(Some(snapshot)) => snapshot.display_branch().map(str::to_owned),
                             _ => None,
                         };
                         if let Some(branch) = branch {

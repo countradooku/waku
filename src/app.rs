@@ -26,7 +26,7 @@ use crate::computer_use::{
     PendingComputerApproval,
 };
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
-use crate::git_branch::BranchSnapshot;
+use crate::git_branch::{BranchSnapshot, DisplayBranch};
 use crate::input::{ComposerAttachmentPaste, ComposerEvent, ComposerInput, InputEvent, TextInput};
 use crate::md;
 use crate::model::{
@@ -53,8 +53,8 @@ use crate::ui::tooltip::Tooltip;
 
 use crate::browser::BrowserView;
 use crate::persistence::{
-    ComposerDraftStore, ComposerDrafts, DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH,
-    PersistedState, PersistedWindowState, SidebarGrouping, SidebarOrdering, StateStore,
+    ComposerDrafts, DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH, PersistedState,
+    PersistedWindowState, SidebarGrouping, SidebarOrdering, StateStore,
 };
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
@@ -125,6 +125,9 @@ const IDLE_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const BACKGROUND_WORK_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const BACKGROUND_WORK_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const PLAN_USAGE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+/// How long a provider probe waits for a just-edited daemon setting (a
+/// binary override) to reach the daemon, which probes what its settings name.
+const PROVIDER_SETTINGS_SETTLE: Duration = Duration::from_secs(3);
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Zed keeps status toasts on screen for ten seconds, pausing the countdown
 /// while the pointer is over the toast so a long message remains readable.
@@ -1037,6 +1040,14 @@ pub struct Waku {
     /// app entity. Debug builds can replace it independently after a rebuild;
     /// all live driver handles below are lightweight RPC proxies.
     daemon: waku_client::DaemonSupervisor,
+    /// The protocol v8 connection of every non-session surface (files,
+    /// version control, terminals, providers, settings, drafts, …). Calls
+    /// on it block, so they run on the background executor.
+    daemon_v8: crate::daemon_v8::DaemonV8,
+    /// Writes the desktop's copy of the daemon settings, off the UI thread.
+    settings_sync: waku_client::surfaces::settings::SettingsSync,
+    /// The connected daemon's version (`daemon.info`), once read.
+    daemon_version: Option<String>,
     /// Cached once at construction for the Daemon settings connection URL;
     /// rendering must not query account or network configuration.
     daemon_hostname: String,
@@ -1057,7 +1068,7 @@ pub struct Waku {
     /// Drafts are independent of transcript persistence: started tasks key by
     /// session id, while blank New Task pages key by project id.
     composer_drafts: ComposerDrafts,
-    composer_draft_store: ComposerDraftStore,
+    composer_draft_store: waku_client::surfaces::drafts::DraftStore,
     composer_draft_save_generation: u64,
     command_palette: command_palette::CommandPaletteUi,
     task_switcher: task_switcher::TaskSwitcherUi,
@@ -1640,6 +1651,7 @@ mod command_palette;
 mod commit_dialog;
 mod components;
 mod composer;
+mod daemon_streams;
 mod dirty;
 mod drafts;
 mod file_search;
@@ -1989,6 +2001,9 @@ impl Waku {
     pub fn new(window: &mut Window, cx: &mut App, loaded: crate::startup::Loaded) -> Entity<Self> {
         let crate::startup::Loaded {
             daemon,
+            daemon_v8,
+            daemon_settings,
+            settings_sync,
             store,
             mut state,
             composer_draft_store,
@@ -1996,10 +2011,8 @@ impl Waku {
         } = loaded;
         let daemon_hostname = crate::daemon::local_hostname().unwrap_or_else(|| "this-mac".into());
         let home_directory = crate::projectless::home_directory();
-        state.apply_daemon_settings(daemon.settings());
-        if let Err(error) = daemon.update_settings(state.daemon_settings()) {
-            eprintln!("could not normalize daemon settings after migration: {error:#}");
-        }
+        state.apply_daemon_settings(daemon_settings);
+        settings_sync.update(state.daemon_settings());
         crate::i18n::set_language(state.language);
         // Chrome text is authored in `sp` rems against the default UI font
         // size, so the window's rem size *is* the UI font size setting.
@@ -2261,21 +2274,13 @@ impl Waku {
         if crate::computer_use::is_available() {
             let computer_permission_tx = computer_permission_tx.clone();
             let event_wake = event_wake_tx.clone();
-            let daemon = daemon.client();
+            let daemon_v8 = daemon_v8.clone();
             std::thread::Builder::new()
                 .name("waku-computer-permission-probe".into())
                 .spawn(move || {
-                    let result = match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::ProbeComputerPermissions { prompt: false },
-                    ) {
-                        Ok(waku_client::ResponsePayload::ComputerPermissions { permissions }) => {
-                            Ok(permissions)
-                        }
-                        Ok(_) => Err("the daemon returned an invalid permission response".into()),
-                        Err(error) => Err(error.to_string()),
-                    };
+                    let result =
+                        waku_client::surfaces::providers::computer_permissions(&daemon_v8, false)
+                            .map_err(|error| error.to_string());
                     if computer_permission_tx.send(result).is_ok() {
                         signal_event_pump(&event_wake);
                     }
@@ -2693,6 +2698,10 @@ impl Waku {
             )
             .detach();
 
+            // Settings and drafts that other clients change (#55).
+            Self::follow_daemon_streams(&settings_sync, &composer_draft_store, cx);
+            Self::load_daemon_info(&daemon_v8, cx);
+
             // Like T3 Code's adapter subscriptions feeding its ingestion
             // worker, provider threads push an edge into this bounded wake
             // channel. The UI does no standing scan: the short follow-up tick
@@ -2799,6 +2808,9 @@ impl Waku {
 
             Self {
                 daemon,
+                daemon_v8,
+                settings_sync,
+                daemon_version: None,
                 daemon_hostname,
                 session_hydrations: HashSet::new(),
                 pending_session_activation: None,

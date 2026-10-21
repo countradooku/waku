@@ -1,6 +1,7 @@
 //! Daemon terminals over a real WebSocket daemon (#60): replay on attach,
-//! several attached clients, resize, clear, restart, exit and the client
-//! link's reattach. The shells are `/bin/sh` scripts, so these run on Unix;
+//! several attached clients, resize, clear, restart and exit. The desktop's
+//! v8 terminal link is exercised in `waku-bench-daemon`'s
+//! `desktop_surfaces` test. The shells are `/bin/sh` scripts, so these run on Unix;
 //! the PTY code itself is shared with Windows.
 
 use std::net::TcpListener;
@@ -10,10 +11,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use crossbeam_channel::{Receiver, unbounded};
+use crossbeam_channel::Receiver;
 use uuid::Uuid;
 use waku_client::DaemonClient;
-use waku_client::terminal::{TerminalLink, TerminalSink, TerminalUpdate};
 use waku_protocol::{Command, ResponsePayload, SequencedEvent, TerminalSnapshot, WireDriverEvent};
 
 use crate::daemon::WakuBackend;
@@ -339,110 +339,4 @@ fn an_exited_terminal_keeps_its_scrollback_for_a_late_attach() {
     };
     assert!(!terminal.exited);
     request(&late, terminal_id, Command::CloseTerminal);
-}
-
-/// Collects a [`TerminalLink`]'s updates for the test thread.
-struct ChannelSink(crossbeam_channel::Sender<TerminalUpdate>);
-
-impl TerminalSink for ChannelSink {
-    fn update(&mut self, update: TerminalUpdate) {
-        let _ = self.0.send(update);
-    }
-}
-
-/// Output from `updates` until `marker` appears, failing on a reset unless
-/// `allow_reset`.
-fn link_output_until(updates: &Receiver<TerminalUpdate>, marker: &[u8]) -> Vec<TerminalUpdate> {
-    let deadline = Instant::now() + TIMEOUT;
-    let mut seen = Vec::new();
-    let mut output = Vec::new();
-    while !contains(&output, marker) {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let update = updates.recv_timeout(remaining).unwrap_or_else(|_| {
-            panic!(
-                "the link never delivered {:?}; saw {seen:?}",
-                String::from_utf8_lossy(marker)
-            )
-        });
-        if let TerminalUpdate::Output(bytes) = &update {
-            output.extend_from_slice(bytes);
-        }
-        seen.push(update);
-    }
-    seen
-}
-
-#[test]
-fn a_link_reattaches_with_scrollback_after_a_reconnect() {
-    let daemon = TestDaemon::start(
-        "printf 'linked\\n'\nwhile IFS= read -r line; do printf 'echo:%s\\n' \"$line\"; done",
-    );
-    let (clients_tx, clients) = unbounded();
-    let first = daemon.connect();
-    clients_tx.send(first.clone()).unwrap();
-    let (updates_tx, updates) = unbounded();
-    let link = TerminalLink::open(
-        clients,
-        daemon.root.clone(),
-        80,
-        24,
-        ChannelSink(updates_tx),
-    )
-    .unwrap();
-    link_output_until(&updates, b"linked");
-    link.write(b"one\r".to_vec());
-    link_output_until(&updates, b"echo:one");
-
-    // Drop the connection under the link; the supervisor publishes a new
-    // one, and the link attaches to the same terminal with its scrollback.
-    first.disconnect();
-    let deadline = Instant::now() + TIMEOUT;
-    while !first.is_disconnected() {
-        assert!(Instant::now() < deadline, "the first client never closed");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    clients_tx.send(daemon.connect()).unwrap();
-    let reattached = link_output_until(&updates, b"echo:one");
-    assert_eq!(reattached.first(), Some(&TerminalUpdate::Reset));
-    let replay = reattached
-        .iter()
-        .find_map(|update| match update {
-            TerminalUpdate::Output(bytes) => Some(bytes.clone()),
-            _ => None,
-        })
-        .unwrap();
-    assert!(contains(&replay, b"linked"), "replay lost earlier output");
-
-    link.write(b"two\r".to_vec());
-    let after = link_output_until(&updates, b"echo:two");
-    assert!(
-        !after.iter().any(
-            |update| matches!(update, TerminalUpdate::Output(bytes) if contains(bytes, b"linked"))
-        ),
-        "output the replay held was delivered again: {after:?}"
-    );
-
-    // Dropping the link closes the daemon terminal.
-    let terminal_id = link.terminal_id();
-    drop(link);
-    let observer = daemon.connect();
-    let deadline = Instant::now() + TIMEOUT;
-    while observer
-        .request(
-            terminal_id,
-            terminal_id,
-            Command::AttachTerminal {
-                cols: None,
-                rows: None,
-                max_replay_bytes: None,
-            },
-        )
-        .is_ok()
-    {
-        assert!(
-            Instant::now() < deadline,
-            "dropping the link left the terminal open"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }

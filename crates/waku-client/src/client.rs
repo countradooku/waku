@@ -55,9 +55,6 @@ struct ClientInner {
     disconnected: AtomicBool,
     /// Run once when the connection closes (see [`DaemonClient::on_disconnect`]).
     disconnect_callbacks: Mutex<Vec<DisconnectCallback>>,
-    /// Connected over the local socket or pipe, so the daemon's files are
-    /// on this machine.
-    local: bool,
 }
 
 type DisconnectCallback = Box<dyn FnOnce() + Send>;
@@ -106,7 +103,6 @@ impl DaemonClient {
             last_sequences: Mutex::new(last_sequences),
             disconnected: AtomicBool::new(false),
             disconnect_callbacks: Mutex::new(Vec::new()),
-            local: matches!(endpoint, Endpoint::Unix(_) | Endpoint::Pipe(_)),
         });
         let hello = ClientMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
@@ -261,56 +257,6 @@ impl DaemonClient {
                 command,
             })))
             .map_err(|_| anyhow!("Waku daemon connection is closed"))
-    }
-
-    /// Read a daemon-owned blob (`waku-blob:`), or a file inside a stored
-    /// attachment (`waku-attachment:` plus its `daemon_path`).
-    ///
-    /// Over the local socket the daemon only says where the file is and
-    /// this process reads it from disk (#22). Otherwise, or when that fails
-    /// (an older daemon, a vanished file), the daemon sends the bytes — as a
-    /// binary frame, without base64, when it supports them. This blocks;
-    /// call it off the UI thread.
-    pub fn read_reference(
-        &self,
-        reference: &str,
-        daemon_path: Option<&std::path::Path>,
-    ) -> anyhow::Result<Vec<u8>> {
-        let (locate, read) = if waku_protocol::blob::is_reference(reference) {
-            (
-                Command::LocateBlob {
-                    reference: reference.to_owned(),
-                },
-                Command::ReadBlob {
-                    reference: reference.to_owned(),
-                },
-            )
-        } else if reference.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME) {
-            let path = daemon_path.context("an attachment read needs the file's daemon path")?;
-            (
-                Command::LocateAttachment {
-                    reference: reference.to_owned(),
-                    path: path.to_owned(),
-                },
-                Command::ReadAttachment {
-                    reference: reference.to_owned(),
-                    path: path.to_owned(),
-                },
-            )
-        } else {
-            bail!("{reference:?} is not a daemon blob or attachment reference");
-        };
-        if self.inner.local
-            && let Ok(ResponsePayload::BlobLocation { path }) =
-                self.request(Uuid::nil(), Uuid::nil(), locate)
-            && let Ok(bytes) = std::fs::read(&path)
-        {
-            return Ok(bytes);
-        }
-        match self.request(Uuid::nil(), Uuid::nil(), read)? {
-            ResponsePayload::BlobData { bytes } => Ok(bytes),
-            _ => bail!("Waku daemon returned an invalid blob response"),
-        }
     }
 
     pub fn last_sequences(&self) -> Vec<ReplayCursor> {

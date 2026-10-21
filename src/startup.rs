@@ -36,8 +36,10 @@ use gpui::{
 };
 
 use crate::app::Waku;
-use crate::persistence::{ComposerDraftStore, ComposerDrafts, PersistedState, StateStore};
+use crate::persistence::{ComposerDrafts, PersistedState, StateStore};
 use snapshot::SidebarSnapshot;
+use waku_client::surfaces::drafts::DraftStore;
+use waku_client::surfaces::settings::SettingsSync;
 
 /// How long [`after_first_frame`] waits for a frame before running anyway,
 /// so a window that launches hidden still gets its deferred work.
@@ -48,11 +50,17 @@ const LAUNCH_SETTLED_TIMEOUT: Duration = Duration::from_secs(5);
 /// Everything `Waku::new` used to fetch from the daemon on the main thread.
 pub struct Loaded {
     pub daemon: waku_client::DaemonSupervisor,
+    /// The protocol v8 connection of every non-session surface.
+    pub daemon_v8: crate::daemon_v8::DaemonV8,
+    /// The daemon's settings as it holds them.
+    pub daemon_settings: waku_client::DaemonSettings,
+    /// Writes the desktop's daemon settings and follows other clients'.
+    pub settings_sync: SettingsSync,
     /// The store that performed the load, so its "task state was loaded"
     /// guard carries over to every later save.
     pub store: StateStore,
     pub state: PersistedState,
-    pub composer_draft_store: ComposerDraftStore,
+    pub composer_draft_store: DraftStore,
     pub composer_drafts: ComposerDrafts,
 }
 
@@ -90,23 +98,50 @@ fn load() -> anyhow::Result<Loaded> {
     let daemon = crate::daemon::start_process().context("failed to start the Waku daemon")?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let store = StateStore::remote(daemon.clone());
-    let composer_draft_store = ComposerDraftStore::remote(daemon.clone());
-    // The drafts do not depend on the task state; overlap the two round
-    // trips instead of paying them back to back.
-    let drafts = std::thread::Builder::new()
-        .name("waku-startup-drafts".into())
+    let daemon_v8 = crate::daemon_v8::for_supervisor(&daemon);
+    let composer_draft_store = DraftStore::new(daemon_v8.clone());
+    // The drafts and settings do not depend on the task state; overlap
+    // their v8 round trips with its load instead of paying them back to
+    // back.
+    let v8_loads = std::thread::Builder::new()
+        .name("waku-startup-v8".into())
         .spawn({
+            let daemon_v8 = daemon_v8.clone();
             let store = composer_draft_store.clone();
-            move || store.load()
+            move || {
+                let settings = waku_client::surfaces::settings::get(&daemon_v8).map(|snapshot| {
+                    waku_client::surfaces::settings::settings_from_wire(&snapshot.settings)
+                });
+                let drafts = store
+                    .load()
+                    .map_err(|error| eprintln!("could not read the composer drafts: {error:#}"))
+                    .ok();
+                (settings, drafts)
+            }
         });
     let state = store.load_or_fresh(cwd);
-    let composer_drafts = match drafts {
-        Ok(drafts) => drafts.join().ok().and_then(Result::ok),
-        Err(_) => composer_draft_store.load().ok(),
-    }
-    .unwrap_or_default();
+    let (daemon_settings, composer_drafts) = match v8_loads {
+        Ok(loads) => loads
+            .join()
+            .map_err(|_| anyhow::anyhow!("the startup thread panicked"))?,
+        Err(_) => (
+            waku_client::surfaces::settings::get(&daemon_v8).map(|snapshot| {
+                waku_client::surfaces::settings::settings_from_wire(&snapshot.settings)
+            }),
+            composer_draft_store.load().ok(),
+        ),
+    };
+    // The desktop edits a copy of these; without them a save would write
+    // defaults over the daemon's settings.
+    let daemon_settings = daemon_settings.context("could not read the daemon settings")?;
+    let composer_drafts = composer_drafts.unwrap_or_default();
+    let settings_sync = SettingsSync::start(daemon_v8.clone(), Some(daemon_settings.clone()))
+        .context("could not start the daemon settings writer")?;
     Ok(Loaded {
         daemon,
+        daemon_v8,
+        daemon_settings,
+        settings_sync,
         store,
         state,
         composer_draft_store,

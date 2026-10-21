@@ -1,4 +1,4 @@
-import type { ProviderAgentPreset } from '@waku/client'
+import type { AgentPreset } from '@waku/client/v8'
 
 type Translator = (key: string) => string
 
@@ -21,14 +21,14 @@ const BUILT_IN_PRESET_KEYS: Record<string, { label: string; description: string 
   },
 }
 
-export function agentPresetLabel(preset: ProviderAgentPreset, t: Translator) {
-  if (preset.is_custom) return preset.name
+export function agentPresetLabel(preset: AgentPreset, t: Translator) {
+  if (preset.isCustom) return preset.name
   const keys = BUILT_IN_PRESET_KEYS[preset.id]
   return keys ? t(keys.label) : preset.name
 }
 
-export function agentPresetDescription(preset: ProviderAgentPreset, t: Translator) {
-  if (preset.is_custom) return preset.description ?? null
+export function agentPresetDescription(preset: AgentPreset, t: Translator) {
+  if (preset.isCustom) return preset.description ?? null
   const keys = BUILT_IN_PRESET_KEYS[preset.id]
   return keys ? t(keys.description) : preset.description ?? null
 }

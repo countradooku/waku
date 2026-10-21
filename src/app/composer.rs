@@ -1,7 +1,6 @@
 use super::*;
 
 use anyhow::Context as _;
-use base64::Engine as _;
 
 const COMPUTER_USE_PREVIEW_WIDTH: f32 = 304.0;
 const COMPUTER_USE_PREVIEW_HEIGHT: f32 = 172.0;
@@ -1941,7 +1940,7 @@ impl Waku {
             return false;
         }
         let paths = paths.to_vec();
-        let daemon = self.daemon.clone();
+        let daemon_v8 = self.daemon_v8.clone();
         let draft_owner = self.selected_composer_draft_key();
         cx.spawn(async move |waku, cx| {
             let result = cx
@@ -1956,16 +1955,9 @@ impl Waku {
                             image_preview::image_format_for_name(&name)
                                 .map(|format| Arc::new(gpui::Image::from_bytes(format, bytes)))
                         });
-                        let response = daemon.client().request(
-                            Uuid::nil(),
-                            Uuid::nil(),
-                            waku_client::Command::ImportAttachment { name, upload },
+                        let attachment = waku_client::surfaces::blobs::upload_attachment(
+                            &daemon_v8, &name, upload,
                         )?;
-                        let waku_client::ResponsePayload::AttachmentStored { attachment } =
-                            response
-                        else {
-                            anyhow::bail!("the daemon returned an invalid attachment response");
-                        };
                         stored.push((attachment, preview_image, is_image));
                     }
                     Ok::<_, anyhow::Error>(stored)
@@ -1979,7 +1971,7 @@ impl Waku {
                     let mut changed = false;
                     for (attachment, preview_image, is_image) in stored {
                         changed |= waku.stage_daemon_attachment(
-                            attachment.path,
+                            PathBuf::from(attachment.path),
                             attachment.name,
                             attachment.is_dir,
                             is_image,
@@ -2057,7 +2049,7 @@ impl Waku {
             return;
         }
 
-        let daemon = self.daemon.clone();
+        let daemon_v8 = self.daemon_v8.clone();
         let draft_owner = self.selected_composer_draft_key();
         cx.spawn(async move |waku, cx| {
             let stored = cx
@@ -2069,33 +2061,28 @@ impl Waku {
                         .enumerate()
                         .map(|(index, image)| {
                             let preview_image = Arc::new(image);
-                            let bytes = preview_image.bytes.clone();
-                            let response = daemon
-                                .client()
-                                .request(
-                                    Uuid::nil(),
-                                    Uuid::nil(),
-                                    waku_client::Command::StoreBlob {
-                                        mime_type: preview_image.format.mime_type().to_owned(),
-                                        bytes,
-                                    },
-                                )
-                                .map_err(|error| error.to_string())?;
-                            let waku_client::ResponsePayload::BlobStored { reference, path } =
-                                response
-                            else {
-                                return Err("the daemon returned an invalid blob response".into());
-                            };
-                            let extension = path
-                                .extension()
-                                .and_then(|extension| extension.to_str())
-                                .unwrap_or("png");
+                            let mime = preview_image.format.mime_type();
+                            let extension = waku_client::surfaces::blobs::image_extension(mime);
                             let name = if image_count == 1 {
                                 format!("image.{extension}")
                             } else {
                                 format!("image-{}.{extension}", index + 1)
                             };
-                            Ok::<_, String>((path, name, reference, preview_image))
+                            // A one-file attachment gives the bytes a path on
+                            // the daemon host, which a provider can open.
+                            let stored = waku_client::surfaces::blobs::store_image(
+                                &daemon_v8,
+                                &preview_image.bytes,
+                                mime,
+                                &name,
+                            )
+                            .map_err(|error| error.to_string())?;
+                            Ok::<_, String>((
+                                PathBuf::from(stored.path),
+                                name,
+                                stored.reference,
+                                preview_image,
+                            ))
                         })
                         .collect::<Result<Vec<_>, _>>()
                 })
@@ -3520,10 +3507,8 @@ pub(super) fn visible_branch_entries(
 /// file is inside it, absolute otherwise, directories with a trailing slash —
 /// the same form the `@` autocomplete inserts. Dropping the root itself keeps
 /// the absolute path rather than producing an empty mention.
-// Base64 keeps the authenticated JSON transport browser-compatible but adds
-// one third of wire overhead. Stay comfortably below tungstenite's default
-// message limit until uploads move to a streaming content endpoint.
-const MAX_ATTACHMENT_BYTES: u64 = waku_client::attachments::MAX_ATTACHMENT_BYTES as u64;
+// The daemon refuses larger attachments (RFC 0003 §5.6, `attachments.import`).
+const MAX_ATTACHMENT_BYTES: u64 = waku_client::v8::MAX_ATTACHMENT_BYTES;
 
 /// Reads a client-local drop into an upload payload. This is the explicit
 /// client/daemon boundary: none of these source paths are persisted or handed
@@ -3532,7 +3517,7 @@ fn attachment_upload_from_path(
     source: &Path,
 ) -> anyhow::Result<(
     String,
-    waku_client::attachments::AttachmentUpload,
+    waku_client::surfaces::blobs::AttachmentSource,
     Option<Vec<u8>>,
 )> {
     let metadata = std::fs::symlink_metadata(source)
@@ -3556,12 +3541,11 @@ fn attachment_upload_from_path(
         let bytes = std::fs::read(source)
             .with_context(|| format!("could not read attachment {}", source.display()))?;
         let is_image = is_image_attachment_path(source);
+        let preview = is_image.then(|| bytes.clone());
         return Ok((
             name,
-            waku_client::attachments::AttachmentUpload::File {
-                data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-            },
-            is_image.then_some(bytes),
+            waku_client::surfaces::blobs::AttachmentSource::File(bytes),
+            preview,
         ));
     }
     if !metadata.is_dir() {
@@ -3594,31 +3578,26 @@ fn attachment_upload_from_path(
             if !metadata.is_file() {
                 continue;
             }
-            if entries.len() >= waku_client::attachments::MAX_ATTACHMENT_FILES {
+            if entries.len() >= waku_client::v8::MAX_ATTACHMENT_PARTS as usize {
                 anyhow::bail!(
                     "attachment directory contains more than {} files",
-                    waku_client::attachments::MAX_ATTACHMENT_FILES
+                    waku_client::v8::MAX_ATTACHMENT_PARTS
                 );
             }
             total_bytes = total_bytes.saturating_add(metadata.len());
             if total_bytes > MAX_ATTACHMENT_BYTES {
                 anyhow::bail!("attachment directory is larger than 32 MB");
             }
-            let relative_path = path
-                .strip_prefix(source)
-                .context("attachment entry escaped its source directory")?
-                .to_path_buf();
+            let relative_path = waku_client::surfaces::files::relative_slash_path(source, &path)
+                .context("attachment entry escaped its source directory")?;
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("could not read attachment {}", path.display()))?;
-            entries.push(waku_client::attachments::AttachmentUploadEntry {
-                relative_path,
-                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-            });
+            entries.push((relative_path, bytes));
         }
     }
     Ok((
         name,
-        waku_client::attachments::AttachmentUpload::Directory { entries },
+        waku_client::surfaces::blobs::AttachmentSource::Directory(entries),
         None,
     ))
 }

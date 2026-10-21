@@ -17,6 +17,7 @@ mod process;
 pub mod projection;
 /// The client-side projection store the desktop renders from (#55).
 pub mod store;
+pub mod surfaces;
 pub mod terminal;
 /// Render views of the v8 projections.
 pub mod thread_view;
@@ -35,12 +36,22 @@ pub use waku_protocol::*;
 pub use workspace_client::WorkspaceClient;
 
 pub mod git_branch {
-    pub use waku_protocol::git::{BranchEntry, BranchSnapshot};
+    pub use crate::v8::{BranchEntry, BranchSnapshot};
+
+    /// The branch a snapshot shows: the current one, else the detached head.
+    pub trait DisplayBranch {
+        fn display_branch(&self) -> Option<&str>;
+    }
+
+    impl DisplayBranch for BranchSnapshot {
+        fn display_branch(&self) -> Option<&str> {
+            crate::surfaces::vcs::display_branch(self)
+        }
+    }
 }
 
 pub mod git_commit {
-    pub use waku_protocol::git::AgentInvocation;
-    pub use waku_protocol::git::CommitSnapshot as Snapshot;
+    pub use crate::v8::CommitSnapshot as Snapshot;
 }
 
 pub mod worktree {

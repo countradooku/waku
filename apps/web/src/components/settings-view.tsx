@@ -1,9 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query'
-import type {
-  DaemonSettings,
-  Project,
-  ProviderKind,
-} from '@waku/client'
+import type * as T from '@waku/client/v8'
 import { useEffect, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { ControlMenu } from '@/components/control-menu'
@@ -11,7 +7,7 @@ import { SkillsSettings } from '@/components/skills-settings'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { UsageSettings } from '@/components/usage-settings'
-import { ProviderIcon, PROVIDERS, WakuIcon, type WakuIconName } from '@/components/waku-icon'
+import { ProviderIcon, PROVIDERS, WakuIcon, type ProviderKind, type WakuIconName } from '@/components/waku-icon'
 import {
   useDaemonSettings,
   useProviderProbes,
@@ -69,7 +65,7 @@ export function SettingsView({
   onPageChange,
 }: {
   page: SettingsPageId
-  projects: Project[]
+  projects: T.Project[]
   onBack: () => void
   onPageChange: (page: SettingsPageId) => void
 }) {
@@ -241,7 +237,7 @@ function AppearanceSettings() {
 
 function ProvidersSettings() {
   const { t } = useI18n()
-  const { client, config } = useDaemon()
+  const { connection, config } = useDaemon()
   const queryClient = useQueryClient()
   const settings = useDaemonSettings()
   const probes = useProviderProbes()
@@ -252,11 +248,11 @@ function ProvidersSettings() {
     ...Object.values(probes.states).map((state) => state.dataUpdatedAt),
   )
 
-  async function apply(next: DaemonSettings) {
-    if (!client || !config) return
+  async function apply(patch: T.SettingsPatch) {
+    if (!connection || !config) return
     try {
-      await updateDaemonSettings(client, next)
-      queryClient.setQueryData(daemonKeys.settings(config.address), next)
+      // The settings stream carries the result back.
+      await updateDaemonSettings(connection, patch)
       await queryClient.invalidateQueries({ queryKey: daemonKeys.providers(config.address) })
     } catch (error) {
       toast.error(errorMessage(error))
@@ -265,18 +261,18 @@ function ProvidersSettings() {
 
   function applyProviderPath(provider: ProviderKind, value: string) {
     if (!settings.data) return
-    const overrides = { ...(settings.data.provider_binary_overrides ?? {}) }
+    const overrides = { ...(settings.data.providerBinaryOverrides ?? {}) }
     const trimmed = value.trim()
     if (trimmed) overrides[provider] = trimmed
     else delete overrides[provider]
     setPaths((current) => ({ ...current, [provider]: trimmed }))
-    void apply({ ...settings.data, provider_binary_overrides: overrides })
+    void apply({ providerBinaryOverrides: overrides })
   }
 
   function toggleExpandedProvider(provider: ProviderKind) {
     if (expanded) {
       const pending = paths[expanded]
-      const applied = settings.data?.provider_binary_overrides?.[expanded] ?? ''
+      const applied = settings.data?.providerBinaryOverrides?.[expanded] ?? ''
       if (pending !== undefined && pending.trim() !== applied) {
         applyProviderPath(expanded, pending)
       }
@@ -284,7 +280,7 @@ function ProvidersSettings() {
     if (expanded !== provider) {
       setPaths((current) => ({
         ...current,
-        [provider]: settings.data?.provider_binary_overrides?.[provider] ?? '',
+        [provider]: settings.data?.providerBinaryOverrides?.[provider] ?? '',
       }))
     }
     setExpanded(expanded === provider ? null : provider)
@@ -322,7 +318,7 @@ function ProvidersSettings() {
           const probe = probes.data[provider.id]
           const probeState = probes.states[provider.id]
           const installed = probe?.installed ?? false
-          const disabled = settings.data?.disabled_providers.includes(provider.id) ?? false
+          const disabled = settings.data?.disabledProviders?.includes(provider.id) ?? false
           const open = expanded === provider.id
           const detail = providerProbeDetail(provider.command, probe, probeState, disabled, t)
           const dotColor = probeState.error
@@ -363,10 +359,11 @@ function ProvidersSettings() {
                     label={t(disabled ? 'providers.enable' : 'providers.disable', { provider: provider.name })}
                     onChange={(enabled) => {
                       if (!settings.data) return
+                      const current = settings.data.disabledProviders ?? []
                       const disabledProviders = enabled
-                        ? settings.data.disabled_providers.filter((kind) => kind !== provider.id)
-                        : [...new Set([...settings.data.disabled_providers, provider.id])]
-                      void apply({ ...settings.data, disabled_providers: disabledProviders })
+                        ? current.filter((kind) => kind !== provider.id)
+                        : [...new Set([...current, provider.id])]
+                      void apply({ disabledProviders })
                     }}
                   />
                 )}
@@ -382,14 +379,14 @@ function ProvidersSettings() {
                       autoFocus
                       className="h-[29px] max-w-[430px] flex-1 bg-[var(--inset)] font-mono text-[11px]"
                       placeholder={t('input.detected_automatically')}
-                      value={paths[provider.id] ?? settings.data.provider_binary_overrides?.[provider.id] ?? ''}
+                      value={paths[provider.id] ?? settings.data.providerBinaryOverrides?.[provider.id] ?? ''}
                       onChange={(event) => setPaths((current) => ({ ...current, [provider.id]: event.target.value }))}
                       onKeyDown={(event) => {
                         if (event.key !== 'Enter') return
                         applyProviderPath(provider.id, event.currentTarget.value)
                       }}
                     />
-                    {settings.data.provider_binary_overrides?.[provider.id] && (
+                    {settings.data.providerBinaryOverrides?.[provider.id] && (
                       <button
                         className="h-[29px] shrink-0 rounded-[7px] border border-input px-2.5 text-[10.5px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
                         type="button"
@@ -399,8 +396,8 @@ function ProvidersSettings() {
                       </button>
                     )}
                   </div>
-                  <p className="truncate text-[10px] text-[var(--text-ghost)]" title={providerProbeCaption(provider.command, probe, Boolean(settings.data.provider_binary_overrides?.[provider.id]), t)}>
-                    {providerProbeCaption(provider.command, probe, Boolean(settings.data.provider_binary_overrides?.[provider.id]), t)}
+                  <p className="truncate text-[10px] text-[var(--text-ghost)]" title={providerProbeCaption(provider.command, probe, Boolean(settings.data.providerBinaryOverrides?.[provider.id]), t)}>
+                    {providerProbeCaption(provider.command, probe, Boolean(settings.data.providerBinaryOverrides?.[provider.id]), t)}
                   </p>
                 </div>
               )}
@@ -484,7 +481,7 @@ function DaemonSettings() {
             secret={Boolean(config?.token)}
             value={config?.token ?? t('daemon.not_configured')}
           />
-          <DetailRow label={t('daemon.status')} value={t(`daemon.phase_${phase}`)} />
+          <DetailRow label={t('daemon.status')} value={t(`daemon.phase_${phase === 'reconnecting' ? 'connecting' : phase}`)} />
         </div>
         {error && <p className="mt-3 text-[11.5px] text-destructive">{error}</p>}
         <div className="mt-4 flex flex-wrap justify-end gap-2">

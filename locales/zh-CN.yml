@@ -102,6 +102,7 @@ settings.search: 搜索设置
 daemon.expose_title: 暴露由 Waku 管理的守护进程
 daemon.expose_description: 允许本机之外的 Waku 客户端连接。更改此项只会重启守护进程。
 daemon.status_local: 仅本机
+daemon.version: "守护进程 %{version}"
 daemon.status_exposed: 已暴露
 daemon.status_restarting: 正在重启
 daemon.connection_title: 监听访问
@@ -136,6 +137,12 @@ daemon.phase_disconnected: 已断开
 daemon.phase_connecting: 正在连接
 daemon.phase_connected: 已连接
 daemon.phase_error: 错误
+daemon.phase_reconnecting: 正在重新连接
+transcript.loading_earlier: 正在加载更早的消息
+common.archive: 归档
+goal.unsupported: 此守护进程尚不支持目标
+errors.archive_task: 无法归档任务：%{error}
+files.changed_on_disk: 文件已在磁盘上更改。请重新打开以查看最新版本。
 daemon.invalid_port: 请输入 1 到 65535 之间的端口
 daemon.invalid_settings: 守护进程设置无效：%{error}
 daemon.stop_active_tasks: 更改守护进程访问设置前请先停止进行中的任务

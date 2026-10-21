@@ -1,17 +1,10 @@
-import type { AgentSession, ProviderKind, ProviderSessionSummary, SessionMessageMatch } from '@waku/client'
+import type * as T from '@waku/client/v8'
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { ProviderIcon, PROVIDERS, providerMeta, WakuIcon, type WakuIconName } from '@/components/waku-icon'
+import { ProviderIcon, PROVIDERS, providerMeta, WakuIcon, type ProviderKind, type WakuIconName } from '@/components/waku-icon'
 import type { SettingsPageId } from '@/components/settings-view'
 import { SETTINGS_PAGES } from '@/components/settings-view'
-import {
-  displayTitle,
-  listProviderSessions,
-  providerSessionNativeId,
-  sameProviderSession,
-  searchSessionMessages,
-  type TaskState,
-} from '@/lib/daemon-api'
+import { listProviderSessions, searchThreads } from '@/lib/daemon-api'
 import { useDaemon } from '@/lib/daemon-context'
 import { useDaemonSettings } from '@/hooks/use-daemon-data'
 import { useI18n } from '@/lib/i18n'
@@ -19,20 +12,22 @@ import { fuzzyScore, shouldKeepPreviousPaletteItems } from '@/lib/palette-search
 import { useMacLikePlatform } from '@/lib/platform'
 import { projectDisplayName } from '@/lib/project-presentation'
 import { formatTimeAgo, sessionHasStarted } from '@/lib/sidebar-presentation'
+import { displayTitle, type TaskSummary } from '@/lib/thread-model'
 import { cn } from '@/lib/utils'
 
 type PaletteSection = 'suggested' | 'tasks' | 'sessions' | 'providers' | 'commands' | 'settings'
 export type CommandPaletteView = 'commands' | 'resume' | 'resumeProviders'
 type Translator = (key: string, params?: Record<string, string | number>) => string
+type ProviderSessionSummary = T.ProviderSessionSummary
 
 interface PaletteItem {
   id: string
   section: PaletteSection
   label: string
   detail?: string
-  content?: { source: string; snippet: string }
+  content?: { source?: string; snippet: string }
   icon?: WakuIconName
-  provider?: AgentSession['provider']
+  provider?: ProviderKind
   shortcut?: string
   pending?: boolean
   closeOnRun?: boolean
@@ -49,13 +44,14 @@ export interface CommandPaletteActions {
   toggleSidebar: () => void
   toggleRightPanel: () => void
   openSettings: (page: SettingsPageId) => void
-  selectTask: (sessionId: string) => void
+  selectTask: (threadId: string) => void
   resumeProviderSession: (summary: ProviderSessionSummary) => Promise<void>
 }
 
 export function CommandPalette({
   open,
-  taskState,
+  projects,
+  tasks,
   selectedSessionId,
   sidebarVisible,
   rightPanelVisible,
@@ -67,7 +63,8 @@ export function CommandPalette({
   onOpenChange,
 }: {
   open: boolean
-  taskState: TaskState
+  projects: T.Project[]
+  tasks: TaskSummary[]
   selectedSessionId?: string
   sidebarVisible: boolean
   rightPanelVisible: boolean
@@ -79,12 +76,12 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void
 }) {
   const { t } = useI18n()
-  const { client } = useDaemon()
+  const { connection } = useDaemon()
   const settings = useDaemonSettings()
   const [view, setView] = useState<CommandPaletteView>(initialView)
   const [resumeProvider, setResumeProvider] = useState<ProviderKind>(currentProvider)
   const [query, setQuery] = useState('')
-  const [matches, setMatches] = useState<SessionMessageMatch[]>([])
+  const [matches, setMatches] = useState<T.ThreadSearchHit[]>([])
   const [matchesQuery, setMatchesQuery] = useState<string | null>(null)
   const [searchPending, setSearchPending] = useState(false)
   const [providerSessions, setProviderSessions] = useState<ProviderSessionSummary[]>([])
@@ -96,7 +93,7 @@ export function CommandPalette({
   const input = useRef<HTMLInputElement>(null)
   const resumeProviderButton = useRef<HTMLButtonElement>(null)
   const previousFocus = useRef<HTMLElement | null>(null)
-  const messageSearchCache = useRef(new Map<string, SessionMessageMatch[]>())
+  const messageSearchCache = useRef(new Map<string, T.ThreadSearchHit[]>())
   const macShortcuts = useMacLikePlatform()
 
   function restorePreviousFocus() {
@@ -130,7 +127,7 @@ export function CommandPalette({
   }, [currentProvider, initialView, open])
 
   useEffect(() => {
-    if (!open || view !== 'commands' || !client || !query.trim()) {
+    if (!open || view !== 'commands' || !connection || !query.trim()) {
       setMatchesQuery(null)
       setSearchPending(false)
       return
@@ -147,8 +144,8 @@ export function CommandPalette({
     }
     let current = true
     const timer = window.setTimeout(() => {
-      void searchSessionMessages(client, normalized, 50)
-        .then((next) => {
+      void searchThreads(connection, normalized, 50)
+        .then((next: T.ThreadSearchHit[]) => {
           if (!current) return
           messageSearchCache.current.set(normalized, next)
           while (messageSearchCache.current.size > 24) {
@@ -171,11 +168,11 @@ export function CommandPalette({
       current = false
       window.clearTimeout(timer)
     }
-  }, [client, open, query, view])
+  }, [connection, open, query, view])
 
   useEffect(() => {
     if (!open || view !== 'resume') return
-    if (!client) {
+    if (!connection) {
       setProviderSessions([])
       setProviderSessionsPending(false)
       setProviderSessionError('The daemon is disconnected')
@@ -185,7 +182,7 @@ export function CommandPalette({
     setProviderSessions([])
     setProviderSessionsPending(true)
     setProviderSessionError(null)
-    void listProviderSessions(client, resumeProvider)
+    void listProviderSessions(connection, resumeProvider)
       .then((sessions) => {
         if (!current) return
         setProviderSessions(sessions)
@@ -200,7 +197,7 @@ export function CommandPalette({
     return () => {
       current = false
     }
-  }, [client, open, resumeProvider, view])
+  }, [connection, open, resumeProvider, view])
 
   function openResumeView() {
     setResumeProvider(currentProvider)
@@ -236,8 +233,7 @@ export function CommandPalette({
 
   async function resumeProviderSession(summary: ProviderSessionSummary) {
     if (providerSessionImport) return
-    const identity = providerSessionNativeId(summary.cursor)
-    setProviderSessionImport(`${summary.cursor.provider}:${identity}`)
+    setProviderSessionImport(`${summary.instanceId}:${summary.nativeId}`)
     setProviderSessionError(null)
     try {
       await actions.resumeProviderSession(summary)
@@ -253,10 +249,9 @@ export function CommandPalette({
   }
 
   const selectableResumeProviders = PROVIDERS.filter(({ id }) =>
-    id === resumeProvider || !settings.data?.disabled_providers.includes(id))
+    id === resumeProvider || !settings.data?.disabledProviders?.includes(id))
   const nextItems = view === 'resume'
     ? buildResumeItems({
-        taskState,
         query,
         sessions: providerSessions,
         importing: providerSessionImport,
@@ -271,7 +266,8 @@ export function CommandPalette({
           t,
         })
     : buildItems({
-        taskState,
+        projects,
+        tasks,
         query,
         matches: matchesQuery === query.trim() ? matches : [],
         selectedSessionId,
@@ -371,7 +367,7 @@ export function CommandPalette({
               const nextQuery = event.target.value
               setPreviousItems(items)
               setQuery(nextQuery)
-              setSearchPending(view === 'commands' && Boolean(client && nextQuery.trim()))
+              setSearchPending(view === 'commands' && Boolean(connection && nextQuery.trim()))
               setSelected(0)
             }}
             onKeyDown={(event) => {
@@ -532,7 +528,7 @@ function PaletteRows({
             </span>
             {item.content && (
               <span className="mt-0.5 block truncate text-[11.5px] text-[var(--text-tertiary)]">
-                <span className="font-medium text-[var(--text-secondary)]">{item.content.source}: </span>
+                {item.content.source && <span className="font-medium text-[var(--text-secondary)]">{item.content.source}: </span>}
                 <Highlighted text={item.content.snippet} query={query} />
               </span>
             )}
@@ -557,7 +553,8 @@ function Highlighted({ text, query }: { text: string; query: string }) {
 }
 
 function buildItems({
-  taskState,
+  projects,
+  tasks: taskSummaries,
   query,
   matches,
   selectedSessionId,
@@ -570,9 +567,10 @@ function buildItems({
   openResume,
   t,
 }: {
-  taskState: TaskState
+  projects: T.Project[]
+  tasks: TaskSummary[]
   query: string
-  matches: SessionMessageMatch[]
+  matches: T.ThreadSearchHit[]
   selectedSessionId?: string
   sidebarVisible: boolean
   rightPanelVisible: boolean
@@ -618,32 +616,58 @@ function buildItems({
   }
 
   if (!searching) return commands
-  const matchBySession = new Map(matches.map((match) => [match.session_id, match]))
-  const projectById = new Map(taskState.projects.map((project) => [project.id, project]))
-  const tasks = taskState.sessions
-    .filter(sessionHasStarted)
+  const matchByThread = new Map(matches.map((match) => [match.threadId, match]))
+  const projectById = new Map(projects.map((project) => [project.id, project]))
+  // Search hits can name threads the shell does not list; show those too.
+  const candidates: Array<{
+    id: string
+    title: string
+    projectId: string
+    branch?: string
+    provider?: string
+    model?: string
+    recency: number
+  }> = [
+    ...taskSummaries.filter(sessionHasStarted).map((session) => ({
+      id: session.id,
+      title: displayTitle(session),
+      projectId: session.projectId,
+      branch: session.branch,
+      provider: session.selection.instance,
+      model: session.selection.model,
+      recency: session.updatedAt,
+    })),
+    ...matches
+      .filter((match) => !taskSummaries.some((session) => session.id === match.threadId))
+      .map((match) => ({ id: match.threadId, title: match.title, projectId: match.projectId, recency: match.activityAt })),
+  ]
+  const tasks = candidates
     .map((session, order) => {
-      const project = projectById.get(session.project_id)
+      const project = projectById.get(session.projectId)
       const projectName = project
         ? projectDisplayName(project, t('project.no_project_name'))
         : t('sidebar.unknown_project')
-      const match = matchBySession.get(session.id)
-      const branch = session.workspace?.kind === 'worktree' ? session.workspace.branch : null
+      const match = matchByThread.get(session.id)
+      const branch = session.branch ?? null
       const detail = [projectName, branch ? `#${branch}` : null, session.id === selectedSessionId ? t('command_palette.current') : null].filter(Boolean).join(' · ')
-      const keywords = `${displayTitle(session)} ${project?.name ?? ''} ${project?.path ?? ''} ${branch ?? ''} ${session.provider} ${session.model ?? ''} task session chat conversation`
+      const keywords = `${session.title} ${project?.name ?? ''} ${project?.path ?? ''} ${branch ?? ''} ${session.provider ?? ''} ${session.model ?? ''} task session chat conversation`
       const metadataScore = fuzzyScore(query, keywords)
       const contentScore = match ? fuzzyScore(query, match.snippet) ?? 0 : null
       const score = Math.max(metadataScore ?? -1, contentScore ?? -1)
       return score < 0 ? null : {
         id: `task-${session.id}`,
         section: 'tasks' as const,
-        label: displayTitle(session),
+        label: session.title,
         detail,
-        content: match ? { source: t(match.source === 'user' ? 'command_palette.you' : 'command_palette.agent'), snippet: match.snippet } : undefined,
+        // A title hit is the label itself; a message or plan hit shows its snippet.
+        content: match && match.source !== 'title'
+          ? { source: match.source === 'plan' ? t('activity.action_plan') : undefined, snippet: match.snippet }
+          : undefined,
         provider: session.provider,
+        icon: session.provider ? undefined : 'search' as WakuIconName,
         keywords,
         run: () => actions.selectTask(session.id),
-        recency: session.updated_at,
+        recency: session.recency,
         order,
         score,
       }
@@ -723,29 +747,24 @@ function buildResumeProviderItems({
 }
 
 function buildResumeItems({
-  taskState,
   query,
   sessions,
   importing,
   resume,
 }: {
-  taskState: TaskState
   query: string
   sessions: ProviderSessionSummary[]
   importing: string | null
   resume: (summary: ProviderSessionSummary) => Promise<void>
 }): PaletteItem[] {
   const normalized = query.trim()
-  const now = Math.floor(Date.now() / 1_000)
+  const now = Date.now()
+  // The daemon leaves out conversations a thread already holds.
   return sessions
-    .filter((summary) => !taskState.sessions.some((session) =>
-      session.provider_cursor
-        ? sameProviderSession(session.provider_cursor, summary.cursor)
-        : false))
     .map((summary, order) => {
-      const provider = providerMeta(summary.cursor.provider)
-      const nativeId = providerSessionNativeId(summary.cursor)
-      const identity = `${summary.cursor.provider}:${nativeId}`
+      const provider = providerMeta(summary.instanceId)
+      const nativeId = summary.nativeId
+      const identity = `${summary.instanceId}:${nativeId}`
       const keywords = `${summary.title} ${summary.cwd} ${provider.shortName} ${provider.name} ${nativeId} resume continue terminal cli session conversation`
       return {
         summary,
@@ -755,8 +774,8 @@ function buildResumeItems({
           id: `provider-session-${identity}`,
           section: 'sessions' as const,
           label: summary.title,
-          detail: `${provider.shortName} · ${summary.cwd} · ${formatTimeAgo(Math.max(0, now - summary.updated_at))}`,
-          provider: summary.cursor.provider,
+          detail: `${provider.shortName} · ${summary.cwd} · ${formatTimeAgo(Math.max(0, Math.floor((now - summary.updatedAt) / 1_000)))}`,
+          provider: summary.instanceId,
           pending: importing === identity,
           closeOnRun: false,
           keywords,
@@ -768,9 +787,9 @@ function buildResumeItems({
       candidate.score !== null)
     .sort((left, right) => normalized
       ? right.score - left.score
-        || right.summary.updated_at - left.summary.updated_at
+        || right.summary.updatedAt - left.summary.updatedAt
         || left.order - right.order
-      : right.summary.updated_at - left.summary.updated_at
+      : right.summary.updatedAt - left.summary.updatedAt
         || left.order - right.order)
     .slice(0, 30)
     .map(({ item }) => item)

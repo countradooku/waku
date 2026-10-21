@@ -9,7 +9,7 @@ import {
 import type { ReactNode } from 'react'
 import { Toaster } from 'sonner'
 import { DaemonProvider } from '@/lib/daemon-context'
-import { RuntimeProvider } from '@/lib/runtime-context'
+import { TaskActionsProvider } from '@/lib/task-actions'
 import appCss from '@/styles.css?url'
 
 const TITLE = 'Waku Web'
@@ -66,7 +66,7 @@ function RootDocument({ children }: { children: ReactNode }) {
       </head>
       <body>
         <DaemonProvider>
-          <RuntimeProvider>{children}</RuntimeProvider>
+          <TaskActionsProvider>{children}</TaskActionsProvider>
         </DaemonProvider>
         <Toaster position="top-center" richColors closeButton />
         <Scripts />
