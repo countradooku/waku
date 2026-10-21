@@ -28,7 +28,7 @@ mod selection;
 mod session;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, LineDirection};
@@ -293,20 +293,10 @@ impl DriverV2 for AcpDriver {
 // -- the v1 desktop -----------------------------------------------------------------
 
 /// The runtime ACP sessions run on until the daemon's tokio runtime (#18)
-/// hosts drivers. Its threads unblock SIGCHLD so agents can reap children.
+/// hosts drivers: the one shared by every bridged driver, whose threads
+/// unblock SIGCHLD so agents can reap children.
 fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("waku-acp")
-            .on_thread_start(|| {
-                let _ = crate::command_env::unblock_sigchld_for_current_thread();
-            })
-            .enable_all()
-            .build()
-            .expect("the ACP driver runtime starts")
-    })
+    crate::driver::bridge_runtime()
 }
 
 /// Starts an ACP session for the desktop: the `DriverV2` behind `V1Bridge`.

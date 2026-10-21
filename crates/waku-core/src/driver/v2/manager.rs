@@ -584,6 +584,7 @@ impl ProviderSessionManager {
                 self.terminal_signal.notify_waiters();
             }
             other => {
+                let other = self.merge_bound_thread(live, other);
                 if let AdapterEvent::ProviderTurnUpdated { turn } = &other
                     && turn.run_attempt_id.is_none()
                 {
@@ -592,6 +593,53 @@ impl ProviderSessionManager {
                 let released = throttle.offer(other);
                 self.persist(live, released).await;
             }
+        }
+    }
+
+    /// A driver's snapshot of the session's bound provider thread is partial:
+    /// it reports what the driver knows (the resume cursor, the native
+    /// title, the conversation head). It is merged onto the stored row, so
+    /// lineage, ordinals and handoffs survive (#47).
+    fn merge_bound_thread(&self, live: &Live, event: AdapterEvent) -> AdapterEvent {
+        let AdapterEvent::ProviderThreadUpdated {
+            thread,
+            retained_native_turn_ids,
+        } = event
+        else {
+            return event;
+        };
+        let bound = live
+            .bound
+            .lock()
+            .as_ref()
+            .is_some_and(|bound| bound.provider_thread_id == thread.id);
+        let stored = (bound && thread.owner_node_id.is_none())
+            .then(|| self.deps.orchestrator.thread(live.thread_id).ok())
+            .flatten()
+            .and_then(|projection| projection.provider_threads.get(&thread.id).cloned());
+        let Some(mut merged) = stored else {
+            return AdapterEvent::ProviderThreadUpdated {
+                thread,
+                retained_native_turn_ids,
+            };
+        };
+        if let Some(incoming) = thread.native_metadata {
+            let metadata = merged.native_metadata.get_or_insert_with(Default::default);
+            metadata.title = incoming.title.or(metadata.title.take());
+            metadata.resume_cursor = incoming.resume_cursor.or(metadata.resume_cursor.take());
+            metadata.updated_at = incoming.updated_at.or(metadata.updated_at);
+        }
+        if thread.native_conversation_head_ref.is_some() {
+            merged.native_conversation_head_ref = thread.native_conversation_head_ref;
+        }
+        merged.updated_at = thread.updated_at.max(merged.updated_at);
+        let reference = ProviderThreadRef::from_row(&merged);
+        if reference.is_bound() {
+            *live.bound.lock() = Some(reference);
+        }
+        AdapterEvent::ProviderThreadUpdated {
+            thread: merged,
+            retained_native_turn_ids,
         }
     }
 

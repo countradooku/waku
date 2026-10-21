@@ -17,8 +17,10 @@ use anyhow::anyhow;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use waku_protocol::model::{
-    ActivityKind, DriverEvent, GoalOperation, PermissionOption as LegacyOption,
-    ProviderResumeCursor, ThreadGoal as LegacyGoal, ThreadGoalStatus as LegacyGoalStatus,
+    ActivityFileChange, ActivityItem, ActivityKind, BackgroundWorkEvent,
+    BackgroundWorkItem as LegacyWork, BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus,
+    DriverEvent, GoalOperation, PermissionOption as LegacyOption, ProviderResumeCursor,
+    ThreadGoal as LegacyGoal, ThreadGoalStatus as LegacyGoalStatus,
     UserInputAnswer as LegacyAnswer, UserInputOption as LegacyInputOption,
     UserInputQuestion as LegacyQuestion,
 };
@@ -51,6 +53,10 @@ enum BridgeCommand {
         usize,
         std_mpsc::Sender<anyhow::Result<ProviderResumeCursor>>,
     ),
+    StopBackgroundWork {
+        key: BackgroundWorkKey,
+        control_id: String,
+    },
 }
 
 /// What the event translator and the actor share.
@@ -424,10 +430,54 @@ impl BridgeActor {
                 BridgeCommand::Fork(turns, reply) => {
                     let _ = reply.send(self.fork(turns).await);
                 }
+                BridgeCommand::StopBackgroundWork { key, control_id } => {
+                    self.stop_background_work(key, control_id).await;
+                }
             }
         }
         // Every `DriverControl` handle is gone: shut the session down.
         let _ = self.session.close().await;
+    }
+
+    async fn stop_background_work(&self, key: BackgroundWorkKey, control_id: String) {
+        let result = if key.kind == BackgroundWorkKind::Subagent {
+            self.session
+                .stop_subagent(SubagentRef {
+                    node_id: NodeId(uuid::Uuid::nil()),
+                    native_task_id: control_id,
+                })
+                .await
+                .and_then(|outcome| match outcome {
+                    SubagentStopOutcome::Stopped => Ok(()),
+                    SubagentStopOutcome::AlreadyFinished => Err(DriverError::Protocol {
+                        reason: ProtocolReason::UnexpectedFrame,
+                        detail: "the task is no longer running".to_owned(),
+                    }),
+                })
+        } else {
+            let provider_thread_id = self
+                .shared
+                .lock()
+                .thread
+                .as_ref()
+                .map_or(ProviderThreadId(uuid::Uuid::nil()), |thread| {
+                    thread.provider_thread_id
+                });
+            self.session
+                .stop_background_work(BackgroundWorkRef {
+                    provider_thread_id,
+                    task_id: control_id,
+                })
+                .await
+        };
+        if let Err(error) = result {
+            self.emit(DriverEvent::BackgroundWork(
+                BackgroundWorkEvent::StopFailed {
+                    key,
+                    message: error.to_string(),
+                },
+            ));
+        }
     }
 
     async fn respond(&self, native: String, reply: RuntimeReply) {
@@ -469,48 +519,98 @@ fn legacy_goal(goal: &ThreadGoal) -> LegacyGoal {
     }
 }
 
-/// The legacy activity a tool row stands for.
-fn activity(item: &TurnItem) -> Option<(ActivityKind, String, Option<String>)> {
-    match &item.kind {
-        TurnItemKind::CommandExecution { input, output, .. } => Some((
+/// The legacy rich activity a tool row stands for: the same `tool_activity`
+/// normalization the v1 drivers ran on native tool input and output,
+/// rebuilt from the row.
+fn rich_activity(item: &TurnItem) -> Option<ActivityItem> {
+    use serde_json::{Value, json};
+    let complete = item.status.is_terminal();
+    let failed = matches!(item.status, ItemStatus::Failed);
+    let source_id = item
+        .native_item_ref
+        .as_ref()
+        .and_then(|reference| reference.native_id.clone())
+        .or_else(|| Some(item.id.to_string()));
+    let parse = |text: &str| {
+        serde_json::from_str::<Value>(text).unwrap_or_else(|_| Value::String(text.to_owned()))
+    };
+    let (kind, tool_name, arguments, output, change) = match &item.kind {
+        TurnItemKind::CommandExecution { input, output, .. } => (
             ActivityKind::Command,
-            item.title.clone().unwrap_or_else(|| input.clone()),
-            output.clone(),
-        )),
+            None,
+            json!({ "command": input }),
+            output.clone().map(Value::String),
+            None,
+        ),
         TurnItemKind::FileChange {
-            file_name, diff, ..
-        } => Some((
+            file_name,
+            old_text,
+            new_text,
+            diff,
+            ..
+        } => (
             ActivityKind::FileChange,
-            item.title.clone().unwrap_or_else(|| file_name.clone()),
-            diff.clone(),
-        )),
-        TurnItemKind::FileSearch { pattern, .. } => Some((
+            None,
+            json!({ "file_path": file_name, "old_string": old_text, "new_string": new_text }),
+            None,
+            diff.clone().map(|diff| (file_name.clone(), diff)),
+        ),
+        TurnItemKind::FileSearch { pattern, .. } => (
             ActivityKind::FileSearch,
-            item.title
-                .clone()
-                .or_else(|| pattern.clone())
-                .unwrap_or_default(),
             None,
-        )),
-        TurnItemKind::WebSearch { patterns, .. } => Some((
+            json!({ "pattern": pattern }),
+            None,
+            None,
+        ),
+        TurnItemKind::WebSearch { patterns, .. } => (
             ActivityKind::Search,
-            item.title.clone().unwrap_or_else(|| patterns.join(", ")),
             None,
-        )),
+            json!({ "query": patterns.join(", ") }),
+            None,
+            None,
+        ),
         TurnItemKind::DynamicTool {
-            tool_name, output, ..
-        } => Some((
+            tool_name,
+            input,
+            output,
+            ..
+        } => (
             tool_name
                 .as_deref()
                 .map_or(ActivityKind::Tool, ActivityKind::from_tool_name),
-            item.title
-                .clone()
-                .or_else(|| tool_name.clone())
-                .unwrap_or_default(),
-            output.as_ref().map(|output| output.0.clone()),
-        )),
-        _ => None,
+            tool_name.clone(),
+            parse(&input.0),
+            output.as_ref().map(|output| parse(&output.0)),
+            None,
+        ),
+        _ => return None,
+    };
+    let title = item
+        .title
+        .clone()
+        .or_else(|| tool_name.clone())
+        .unwrap_or_else(|| format!("{kind:?}"));
+    let mut activity = crate::driver::activity::tool_activity(
+        source_id,
+        kind,
+        title,
+        (!complete).then_some(&arguments),
+        output.as_ref(),
+        output.as_ref(),
+        failed,
+        complete,
+    )
+    .with_tool_name(tool_name.as_deref());
+    if let Some((path, diff)) = change {
+        activity.file_changes = vec![ActivityFileChange {
+            path,
+            additions: None,
+            deletions: None,
+            status: None,
+            diff: Some(diff),
+        }];
     }
+    Some(activity)
 }
 
 /// The new part of a growing snapshot, or the whole text after a rewrite.
@@ -568,7 +668,8 @@ impl Translator {
                     .native_metadata
                     .as_ref()
                     .and_then(|metadata| metadata.title.clone());
-                if title != self.title {
+                // A snapshot without a title leaves the known one alone.
+                if title.is_some() && title != self.title {
                     self.title = title.clone();
                     out.push(DriverEvent::AutoTitleUpdated(title));
                 }
@@ -632,20 +733,10 @@ impl Translator {
                 } = &item.kind
                 {
                     self.prompts.insert(*request_id, prompt.clone());
-                } else if let Some((kind, title, detail)) = activity(&item) {
+                } else if let Some(activity) = rich_activity(&item) {
                     let complete = item.status.is_terminal();
                     if self.activities.insert(item.id, complete) != Some(complete) {
-                        out.push(DriverEvent::Activity {
-                            id: item
-                                .native_item_ref
-                                .as_ref()
-                                .and_then(|reference| reference.native_id.clone())
-                                .or_else(|| Some(item.id.to_string())),
-                            kind,
-                            title,
-                            detail,
-                            complete,
-                        });
+                        out.push(DriverEvent::RichActivity(activity));
                     }
                 }
             }
@@ -752,13 +843,66 @@ impl Translator {
                     }
                 }
             }
-            // Background work and subagents keep their v1 events in the
-            // unported drivers; a port that needs them on the bridge maps
-            // them when it lands (#71).
+            // Detached processes and monitors (#47). A subagent's row comes
+            // from `SubagentUpdated`, so its level entry is not repeated.
+            AdapterEvent::BackgroundWorkUpdated { work } => {
+                let kind = match work.task.kind {
+                    PendingTaskKind::Monitor => BackgroundWorkKind::Monitor,
+                    PendingTaskKind::Subagent => return out,
+                    _ => BackgroundWorkKind::Process,
+                };
+                let status = match (work.live, kind) {
+                    (true, BackgroundWorkKind::Monitor) => BackgroundWorkStatus::Monitoring,
+                    (true, _) => BackgroundWorkStatus::Running,
+                    (false, _) => BackgroundWorkStatus::Completed,
+                };
+                let mut item = LegacyWork::new(
+                    kind,
+                    work.task.task_id.clone(),
+                    work.task.description.clone().unwrap_or_default(),
+                    status,
+                );
+                item.background = true;
+                item.can_stop = work.live;
+                item.control_id = Some(work.task.task_id);
+                out.push(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                    item,
+                )));
+            }
+            AdapterEvent::SubagentUpdated { subagent } => {
+                let Some(task_id) = subagent
+                    .native_task_ref
+                    .as_ref()
+                    .and_then(|reference| reference.native_id.clone())
+                else {
+                    return out;
+                };
+                let status = match subagent.status {
+                    SubagentStatus::Completed => BackgroundWorkStatus::Completed,
+                    SubagentStatus::Failed => BackgroundWorkStatus::Failed,
+                    SubagentStatus::Cancelled | SubagentStatus::Interrupted => {
+                        BackgroundWorkStatus::Stopped
+                    }
+                    _ => BackgroundWorkStatus::Running,
+                };
+                let mut item = LegacyWork::new(
+                    BackgroundWorkKind::Subagent,
+                    task_id.clone(),
+                    subagent.title.clone().unwrap_or_default(),
+                    status,
+                );
+                item.can_stop = status.is_live();
+                item.control_id = Some(task_id);
+                item.command = (!subagent.prompt.is_empty()).then(|| subagent.prompt.clone());
+                item.detail = subagent.progress.clone();
+                item.output = subagent.result.clone();
+                item.model = subagent.model.clone();
+                out.push(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                    item,
+                )));
+            }
             AdapterEvent::NodeUpdated { .. }
-            | AdapterEvent::SubagentUpdated { .. }
             | AdapterEvent::PlanUpdated { .. }
-            | AdapterEvent::BackgroundWorkUpdated { .. }
             | AdapterEvent::CommandOutputDelta { .. } => {}
         }
         out
@@ -800,6 +944,12 @@ impl DriverControl for V1Bridge {
         if let Some(control) = self.session.computer_use() {
             control.cancel_computer_use();
         }
+    }
+
+    fn stop_background_work(&self, key: BackgroundWorkKey, control_id: String) {
+        let _ = self
+            .commands
+            .send(BridgeCommand::StopBackgroundWork { key, control_id });
     }
 
     fn respond(&self, request_id: String, option_id: String) {

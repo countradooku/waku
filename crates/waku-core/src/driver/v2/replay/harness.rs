@@ -46,9 +46,6 @@ pub struct ScenarioInput {
     /// Merged into the instance's `extra` (driver profile switches).
     #[serde(default)]
     pub instance: Option<serde_json::Value>,
-    /// The main thread's runtime mode (full access when absent).
-    #[serde(default)]
-    pub runtime_mode: Option<RuntimeMode>,
     pub steps: Vec<ScenarioStep>,
 }
 
@@ -147,7 +144,9 @@ pub enum ScenarioStep {
         #[serde(default)]
         thread: Option<String>,
     },
-    /// Sets the thread's runtime mode (`ask` for a supervised approval).
+    /// Sets the thread's runtime mode (threads start in Full Access; `ask`
+    /// for a supervised approval). The one runtime-mode mechanism: a
+    /// scenario that needs it from the start makes it the first step.
     RuntimeMode {
         mode: RuntimeMode,
         #[serde(default)]
@@ -667,19 +666,19 @@ impl ReplayHarness {
                     model_selection,
                 })?;
             }
-            ScenarioStep::Compact { thread } => {
-                let thread_id = self.thread(thread)?;
-                let manager = self.manager.clone();
-                self.runtime
-                    .block_on(manager.compact(thread_id))
-                    .map_err(harness_error)?;
-            }
             ScenarioStep::RuntimeMode { mode, thread } => {
                 let thread_id = self.thread(thread)?;
                 self.dispatch(Command::ThreadSetRuntimeMode {
                     thread_id,
                     runtime_mode: *mode,
                 })?;
+            }
+            ScenarioStep::Compact { thread } => {
+                let thread_id = self.thread(thread)?;
+                let manager = self.manager.clone();
+                self.runtime
+                    .block_on(manager.compact(thread_id))
+                    .map_err(harness_error)?;
             }
             ScenarioStep::ReleaseIdle => {
                 let manager = self.manager.clone();
@@ -721,13 +720,6 @@ impl ReplayHarness {
     pub fn run(&mut self, input: &ScenarioInput) -> Result<ScenarioResult, ReplayError> {
         let mut forks = Vec::new();
         self.settle()?;
-        if let Some(runtime_mode) = input.runtime_mode {
-            let thread_id = self.thread(&None)?;
-            self.dispatch(Command::ThreadSetRuntimeMode {
-                thread_id,
-                runtime_mode,
-            })?;
-        }
         for step in &input.steps {
             self.step(step, &mut forks)?;
         }

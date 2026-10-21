@@ -3,7 +3,7 @@
 pub mod acp;
 mod activity;
 mod amp;
-mod claude;
+pub mod claude;
 pub mod codex;
 mod computer_use;
 mod deepseek;
@@ -210,6 +210,25 @@ pub struct SessionOptions {
     pub context_window: Option<String>,
 }
 
+/// The one runtime every `V1Bridge`-served `DriverV2` session (Codex, the
+/// ACP family, Claude) runs on until the daemon moves onto one tokio runtime
+/// (RFC 0002 "Interim before #18"). Its threads unblock SIGCHLD: agents
+/// spawned from them inherit the mask and must be able to reap children.
+pub(crate) fn bridge_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .thread_name("waku-driver-v2")
+            .on_thread_start(|| {
+                let _ = crate::command_env::unblock_sigchld_for_current_thread();
+            })
+            .enable_all()
+            .build()
+            .expect("the driver runtime starts")
+    })
+}
+
 pub(crate) fn start_local(
     provider: ProviderKind,
     mut options: DriverStartOptions,
@@ -242,7 +261,22 @@ pub(crate) fn start_local(
         // Claude serves a realtime stream of user messages on stdin — the same
         // transport the Agent SDK drives — which is what lets its Supervised
         // mode ask rather than decide alone.
-        ProviderKind::Claude => Arc::new(claude::ClaudeDriver::start(options, events)?),
+        // On `DriverV2` (#47), served behind the old interface until the
+        // orchestrator cutover (#165).
+        ProviderKind::Claude => {
+            let mut instance = claude::claude_instance();
+            instance.provider_home = std::env::var_os("CLAUDE_CONFIG_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from);
+            Arc::new(v2::bridge::V1Bridge::start(
+                Arc::new(claude::ClaudeDriver),
+                instance,
+                options,
+                events,
+                Arc::new(v2::ProcessTransportFactory),
+                bridge_runtime().handle().clone(),
+            )?)
+        }
         // Amp reads newline-delimited user messages on stdin and stays alive
         // until stdin closes, so it too serves the whole conversation.
         ProviderKind::Amp => Arc::new(amp::AmpDriver::start(options, events)?),

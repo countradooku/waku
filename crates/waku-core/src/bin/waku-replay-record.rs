@@ -10,15 +10,18 @@
 //! `input.json`) against the provider through its `DriverV2`, writes
 //! `<fixtures>/<scenario>/<provider>.ndjson` sanitized, fails closed on any
 //! leaked secret, then replays the file and keeps it only if replay passes.
-//! Only drivers ported to `DriverV2` can record: the in-repo `fake` provider
-//! and `codex` (#46). `--script` plays a transcript's inbound frames to the
-//! driver instead of the live CLI (Codex only; see `driver::codex::script`).
+//! Only drivers ported to `DriverV2` can record: the in-repo `fake` provider,
+//! `codex` (#46) and `claude` (#47, against the real CLI: `--binary`, default
+//! `claude` on the search path). `--script` plays a transcript's inbound
+//! frames to the driver instead of the live CLI (Codex only; see
+//! `driver::codex::script`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
+use waku_core::driver::claude::{CLAUDE_PROTOCOL, CLAUDE_PROVIDER, ClaudeDriver, claude_instance};
 use waku_core::driver::codex::script::ScriptedAppServer;
 use waku_core::driver::codex::{
     CODEX_FIXTURE_VERSION, CODEX_PROTOCOL, CODEX_PROVIDER, CodexDriver, codex_instance,
@@ -152,9 +155,26 @@ fn main() -> ExitCode {
             };
             (Arc::new(CodexDriver::new()), instance, live, CODEX_PROTOCOL)
         }
+        CLAUDE_PROVIDER => {
+            if args.script.is_some() {
+                eprintln!("waku-replay-record: --script is Codex only");
+                return ExitCode::from(2);
+            }
+            let mut instance = claude_instance();
+            if let Some(binary) = &args.binary {
+                instance.binary = binary.clone();
+            }
+            metadata.insert("minCliVersion".to_owned(), Value::from("1.0.0"));
+            (
+                Arc::new(ClaudeDriver),
+                instance,
+                Arc::new(ProcessTransportFactory),
+                CLAUDE_PROTOCOL,
+            )
+        }
         other => {
             eprintln!(
-                "waku-replay-record: {other} has no DriverV2 port yet; recording arrives with its port (#47-#52)"
+                "waku-replay-record: {other} has no DriverV2 port yet; recording arrives with its port (#48-#52)"
             );
             return ExitCode::from(2);
         }

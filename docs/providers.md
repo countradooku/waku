@@ -22,7 +22,7 @@ session that spans the whole conversation**:
 | Agent Client Protocol (JSON-RPC over stdio) | [driver/acp.rs](../crates/waku-core/src/driver/acp.rs) | Cursor CLI, Fx, Grok Build, Kimi Code |
 | OpenCode background service (HTTP + server-sent events) | [driver/opencode.rs](../crates/waku-core/src/driver/opencode.rs) | OpenCode |
 | Pi RPC mode (NDJSON request/response over stdio) | [driver/pi.rs](../crates/waku-core/src/driver/pi.rs) | Pi, Oh My Pi |
-| Claude streaming-input session (NDJSON over stdio) | [driver/claude.rs](../crates/waku-core/src/driver/claude.rs) | Claude Code |
+| Claude streaming-input session (NDJSON over stdio) | [driver/claude/](../crates/waku-core/src/driver/claude/mod.rs) | Claude Code |
 | Amp streaming-JSON session (NDJSON over stdio) | [driver/amp.rs](../crates/waku-core/src/driver/amp.rs) | Amp |
 | Harness client API (typed HTTP + downlink streams) | [driver/deepseek.rs](../crates/waku-core/src/driver/deepseek.rs) | DeepSeek Harness |
 
@@ -403,7 +403,7 @@ ships its own `/computer` instead, so the flag is never passed to it.
 **Launch** — `claude -p --input-format stream-json --output-format stream-json
 --verbose --include-partial-messages --replay-user-messages
 --permission-prompt-tool stdio --permission-mode <mode>`
-([driver/claude.rs](../crates/waku-core/src/driver/claude.rs)), plus `--model`, `--effort`,
+([driver/claude/](../crates/waku-core/src/driver/claude/mod.rs)), plus `--model`, `--effort`,
 and `--session-id` or `--resume`.
 
 This is the transport the Claude Agent SDK's `query()` drives; the SDK is a
@@ -412,6 +412,26 @@ to use instead. Both `--input-format stream-json` and `--permission-prompt-tool`
 were verified against the real binary — **the latter is undocumented and absent
 from `claude --help`**, and without it the CLI decides permissions itself and
 only reports denials after the fact on `result`.
+
+**`DriverV2` (#47)** — the driver is a `DriverV2` session actor
+(`mod.rs`), with the frames in `protocol.rs` and the stream state machine in
+`normalize.rs`; until the orchestrator cutover the daemon serves it behind
+`V1Bridge`. `ensure_thread` only picks the `--session-id`; the process starts
+with the first turn (so `ContextKind::System` blocks of that turn ride
+`--append-system-prompt`) and a turn starts at its echoed prompt. Capabilities
+are fixed (`fixtures/capabilities_claude.json`); the replay fixtures under
+`fixtures/replay/*/claude.ndjson` are hand-authored (no live recording) and
+their sources are in `fixtures/replay/README.md`.
+
+| Capability | Claude |
+| --- | --- |
+| Turn ids | weak: the uuid of the assistant message that ended the turn |
+| Steering | native, folded at the next model call; running tools are **not** cancelled (`active_steering_interrupts_tools = false`) |
+| Rollback, fork | yes, by copying the native transcript (`replaced: true`); native `--fork-session` / `--resume-session-at` are present in CLI 2.1.304 but unproven, so unused |
+| Runtime-mode switch in session | no: `set_permission_mode` exists in the CLI's control schema but is unproven, so a mode change restarts the session |
+| Usage limits | `rate_limit_event` `rejected` (reset from `resetsAt`, epoch seconds) or an assistant `error: "rate_limit"` / `api_error_status: 429` fail the turn as `UsageLimit` |
+| Subagents | `Agent`/`Task` tool calls become subagents with one child turn each; `stop_task` stops them and detached tasks |
+| Plans | `TodoWrite` → todo list, `ExitPlanMode` → proposed plan |
 
 **Lifetime** — long-lived. One process serves the conversation, with turns fed
 as newline-delimited user messages on stdin.
@@ -430,7 +450,9 @@ as newline-delimited user messages on stdin.
 | `user` with `tool_result` | completes the matching activity |
 | `user` with `isReplay: true` | ignored — Waku's own prompt echoed by `--replay-user-messages` |
 | `result` | `TurnFinished` |
-| `system` status/thinking-token notices, `rate_limit_event` | ignored |
+| `system` `task_started` / `task_progress` / `task_updated` / `task_notification` / `background_tasks_changed` | subagents (with a child turn) and background work |
+| `rate_limit_event` | usage-limit evidence for the turn's `result` |
+| `system` status/thinking-token notices | ignored |
 
 **Approvals** — `control_request` / `subtype: "can_use_tool"` carries the tool
 name, input, `tool_use_id`, the `blocked_path` that tripped the check, and
@@ -464,9 +486,12 @@ does.
 transcript into a *new* session file, truncated at the checkpoint and re-keyed
 with fresh uuids; the returned id map is applied to Waku's retained turns.
 Rewinding to turn zero clears the cursor and starts clean. The CLI also exposes
-`--fork-session` (with `--resume`), which likely replaces this hand-rolled
-rewrite — unverified, and the reason it is still hand-rolled is that the flag was
-found after the fork code was written.
+`--fork-session` (with `--resume`) and the hidden `--resume-session-at`
+(`requires --resume`, print mode only, per the 2.1.304 binary); `--session-id`
+may be combined with `--resume` only together with `--fork-session`. None of
+this is proven against a live run, so the `DriverV2` port keeps the
+hand-rolled copy, now written with derived ids so a replayed fork is
+deterministic.
 
 **Models** — the sessionless SDK `initialize` control response publishes the
 same account- and configuration-aware list used by `/model`, including custom

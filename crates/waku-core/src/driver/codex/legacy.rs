@@ -145,17 +145,9 @@ impl Drop for ComputerUse {
 }
 
 /// The bridge's runtime: drivers are async (RFC 0002 D-2) and the daemon
-/// that calls `start_local` is not.
+/// that calls `start_local` is not. Shared with every bridged driver.
 fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("waku-codex")
-            .enable_all()
-            .build()
-            .expect("the Codex driver runtime starts")
-    })
+    crate::driver::bridge_runtime()
 }
 
 /// What the raw-frame observer and the `DriverControl` wrapper share.
@@ -283,23 +275,24 @@ impl Sidecar {
         }
     }
 
-    /// The bridge's plain activity, replaced by the old presentation of the
-    /// same item. Items the old driver did not present stay hidden.
+    /// The bridge's generic activity (`RichActivity` rebuilt from the tool
+    /// row since #47, plain `Activity` before), replaced by the old
+    /// presentation of the same item. Items the old driver did not present
+    /// stay hidden. The bridge's background-work rows are dropped: this
+    /// sidecar reports Codex's own (item-keyed commands with their output,
+    /// subagents) from the raw frames, and `CodexV1` handles stop/refresh.
     fn rewrite(&self, event: DriverEvent) -> Option<DriverEvent> {
-        match event {
-            DriverEvent::Activity {
-                id: Some(id),
-                complete,
-                ..
-            } => self
-                .rich
-                .lock()
-                .get(&(id, complete))
-                .cloned()
-                .map(DriverEvent::RichActivity),
-            DriverEvent::Activity { id: None, .. } => None,
-            other => Some(other),
-        }
+        let (id, complete) = match &event {
+            DriverEvent::Activity { id, complete, .. } => (id.clone()?, *complete),
+            DriverEvent::RichActivity(item) => (item.source_id.clone()?, item.complete),
+            DriverEvent::BackgroundWork(_) => return None,
+            _ => return Some(event),
+        };
+        self.rich
+            .lock()
+            .get(&(id, complete))
+            .cloned()
+            .map(DriverEvent::RichActivity)
     }
 }
 
@@ -1265,6 +1258,37 @@ mod tests {
                     detail: None,
                     complete: true,
                 })
+                .is_none()
+        );
+        // The bridge's own rich presentation (#47) is replaced the same way.
+        let bridged = crate::driver::activity::tool_activity(
+            Some("cua-call".into()),
+            ActivityKind::Tool,
+            "js".into(),
+            None,
+            None,
+            None,
+            false,
+            true,
+        );
+        let Some(DriverEvent::RichActivity(item)) =
+            sidecar.rewrite(DriverEvent::RichActivity(bridged))
+        else {
+            panic!("expected the old presentation");
+        };
+        assert_eq!(item.title, "List running apps via CUA");
+        assert_eq!(item.mcp_server.as_deref(), Some("waku_js_repl"));
+        // Its background-work rows are the sidecar's, not the bridge's.
+        assert!(
+            sidecar
+                .rewrite(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                    BackgroundWorkItem::new(
+                        BackgroundWorkKind::Process,
+                        "process-1",
+                        "ls",
+                        BackgroundWorkStatus::Running,
+                    )
+                )))
                 .is_none()
         );
         assert!(received.try_recv().is_err());

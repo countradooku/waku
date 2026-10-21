@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+use waku_core::driver::claude::{
+    CLAUDE_PROVIDER, ClaudeDriver, claude_capabilities, claude_instance,
+};
 use waku_core::driver::codex::{CODEX_PROVIDER, CodexDriver, codex_capabilities, codex_instance};
 use waku_core::driver::v2::fake::{
     FAKE_PROVIDER, FakeDriver, FakeProfile, fake_capabilities, fake_instance,
@@ -45,6 +48,7 @@ fn driver_for(provider: &str) -> Arc<dyn DriverV2> {
             Arc::new(waku_core::driver::acp::AcpDriver::new())
         }
         CODEX_PROVIDER => Arc::new(CodexDriver::new()),
+        CLAUDE_PROVIDER => Arc::new(ClaudeDriver),
         other => panic!("no DriverV2 for {other} yet"),
     }
 }
@@ -57,8 +61,10 @@ fn is_acp(provider: &str) -> bool {
 
 fn instance_of(provider: &str) -> InstanceConfig {
     match provider {
+        FAKE_PROVIDER => fake_instance(FakeProfile::default()),
         CODEX_PROVIDER => codex_instance(),
-        _ => fake_instance(FakeProfile::default()),
+        CLAUDE_PROVIDER => claude_instance(),
+        other => panic!("no DriverV2 instance for {other} here"),
     }
 }
 
@@ -87,7 +93,8 @@ fn replay(scenario: &str) -> ScenarioResult {
 fn replay_as(scenario: &str, provider: &str) -> ScenarioResult {
     let transcript =
         read_transcript(&fixtures().join(scenario).join(format!("{provider}.ndjson"))).unwrap();
-    run_transcript(scenario, transcript).unwrap_or_else(|error| panic!("{error}"))
+    run_transcript(scenario, transcript)
+        .unwrap_or_else(|error| panic!("{scenario}/{provider}: {error}"))
 }
 
 /// Every `(scenario, provider)` fixture, sorted.
@@ -689,6 +696,7 @@ fn every_fixture_has_assertions() {
         match provider {
             FAKE_PROVIDER => &fake,
             CODEX_PROVIDER => &codex::COVERED,
+            CLAUDE_PROVIDER => &claude::COVERED,
             other => panic!("{other} fixtures have no assertions"),
         }
     };
@@ -714,7 +722,7 @@ fn every_fixture_has_assertions() {
             "{name} has no recorded fixture"
         );
     }
-    for provider in [FAKE_PROVIDER, CODEX_PROVIDER] {
+    for provider in [FAKE_PROVIDER, CODEX_PROVIDER, CLAUDE_PROVIDER] {
         for scenario in covered(provider) {
             assert!(
                 recorded.contains(&(scenario.to_string(), provider.to_owned())),
@@ -1281,6 +1289,495 @@ mod codex {
         assert_eq!(
             work,
             [("26567".to_owned(), true), ("26567".to_owned(), false)]
+        );
+    }
+}
+
+// -- Claude Code (#47) -------------------------------------------------------------
+
+/// The Claude Code fixtures (`<scenario>/claude.ndjson`), hand-authored from
+/// the stream-json protocol (see `fixtures/replay/README.md`).
+mod claude {
+    use super::*;
+
+    pub const COVERED: [&str; 16] = [
+        "simple",
+        "multi_turn",
+        "tool_call_read_only",
+        "tool_call_approval",
+        "plan_questions",
+        "turn_interrupt",
+        "turn_interrupt_mid_tool",
+        "message_steering",
+        "provider_thread_resume",
+        "thread_rollback",
+        "thread_fork_native",
+        "usage_limit",
+        "runtime_exit_unexpected",
+        "background_work",
+        "subagent",
+        "model_switch",
+    ];
+
+    fn claude(scenario: &str) -> ScenarioResult {
+        replay_as(scenario, CLAUDE_PROVIDER)
+    }
+
+    #[test]
+    fn claude_fixtures_replay() {
+        let mut failures = Vec::new();
+        for scenario in COVERED {
+            let transcript =
+                read_transcript(&fixtures().join(scenario).join("claude.ndjson")).unwrap();
+            if let Err(error) = run_transcript(scenario, transcript) {
+                failures.push(format!("{scenario}: {error}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    }
+
+    fn native_turn_ids(projection: &ThreadProjection) -> Vec<(u32, Option<String>, RefStrength)> {
+        provider_turns(projection)
+            .iter()
+            .map(|turn| {
+                let reference = turn.native_turn_ref.as_ref();
+                (
+                    turn.ordinal,
+                    reference.and_then(|reference| reference.native_id.clone()),
+                    reference.map_or(RefStrength::None, |reference| reference.strength),
+                )
+            })
+            .collect()
+    }
+
+    fn resume_cursor(thread: &ProviderThread) -> Option<String> {
+        thread
+            .native_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.resume_cursor.as_ref())
+            .map(|cursor| cursor.0.clone())
+    }
+
+    #[test]
+    fn claude_simple() {
+        let result = claude("simple");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["fixture simple ok"]
+        );
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::Reasoning { text, streaming: false } if text == "The user wants an echo."
+        )));
+        // The turn's weak native id is the assistant uuid that ended it.
+        assert_eq!(
+            native_turn_ids(main),
+            [(
+                1,
+                Some("00000000-0000-4000-8000-000000000001".to_owned()),
+                RefStrength::Weak
+            )]
+        );
+        let run = runs(main)[0];
+        let thread = &main.provider_threads[&run.provider_thread_id.unwrap()];
+        assert_eq!(
+            thread
+                .native_thread_ref
+                .as_ref()
+                .map(|reference| (reference.native_id.as_deref(), reference.strength)),
+            Some((
+                Some("00000000-0000-7000-8000-000000000002"),
+                RefStrength::Strong
+            ))
+        );
+        // The cursor keeps the resume point (today's `resume_at`).
+        assert_eq!(
+            resume_cursor(thread).as_deref(),
+            Some(
+                "{\"provider\":\"claude\",\"sessionId\":\"00000000-0000-7000-8000-000000000002\",\"resumeAt\":\"00000000-0000-4000-8000-000000000001\"}"
+            )
+        );
+        let session = main.provider_sessions.values().next().unwrap();
+        assert_eq!(session.capabilities, claude_capabilities());
+        assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+        // Usage: the last call's context and the model's window from `result`.
+        let turn = provider_turns(main)[0];
+        assert_eq!(
+            turn.token_usage
+                .as_ref()
+                .map(|usage| (usage.used, usage.max)),
+            Some((1512, Some(200_000)))
+        );
+    }
+
+    #[test]
+    fn claude_multi_turn_keeps_one_process() {
+        let result = claude("multi_turn");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["Echo: first", "Echo: second"]
+        );
+        assert_eq!(main.provider_sessions.len(), 1);
+        let turns = provider_turns(main);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].provider_thread_id, turns[1].provider_thread_id);
+    }
+
+    #[test]
+    fn claude_read_only_tool() {
+        let result = claude("tool_call_read_only");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let rows = items(&result, main_id(&result));
+        let command = rows
+            .iter()
+            .find(|item| matches!(item.kind, TurnItemKind::CommandExecution { .. }))
+            .expect("a command row");
+        assert_eq!(command.status, ItemStatus::Completed);
+        assert!(matches!(
+            &command.kind,
+            TurnItemKind::CommandExecution { input, output: Some(output), .. }
+                if input == "ls" && output == "README.md\n"
+        ));
+        assert_eq!(
+            command
+                .native_item_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.as_deref()),
+            Some("toolu_ls")
+        );
+        assert!(main.runtime_requests.is_empty(), "Full Access asks nothing");
+    }
+
+    #[test]
+    fn claude_tool_call_approval() {
+        let result = claude("tool_call_approval");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let request = main.runtime_requests.values().next().unwrap();
+        assert_eq!(request.kind, RuntimeRequestKind::CommandApproval);
+        assert_eq!(request.status, RequestStatus::Resolved);
+        assert_eq!(
+            request
+                .native_request_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.as_deref()),
+            Some("perm-1")
+        );
+        assert_eq!(
+            request
+                .options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["allow", "deny"]
+        );
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::ApprovalRequest { prompt: Some(prompt), .. } if prompt == "ls"
+        )));
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["Listed the files."]
+        );
+    }
+
+    #[test]
+    fn claude_plan_and_structured_questions() {
+        let result = claude("plan_questions");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let mut kinds = main
+            .plans
+            .values()
+            .map(|plan| plan.kind.type_name())
+            .collect::<Vec<_>>();
+        kinds.sort();
+        assert_eq!(kinds, ["proposed_plan", "todo_list"]);
+        assert!(main.plans.values().any(|plan| matches!(
+            &plan.kind,
+            PlanKind::TodoList { steps, .. } if steps.len() == 2 && steps[0].status == PlanStepStatus::Running
+        )));
+        let request = main.runtime_requests.values().next().unwrap();
+        assert_eq!(request.kind, RuntimeRequestKind::UserInput);
+        assert_eq!(request.status, RequestStatus::Resolved);
+        assert_eq!(request.questions[0].id, "Which color should the button be?");
+        assert_eq!(request.questions[0].options.len(), 2);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["You chose Blue."]
+        );
+    }
+
+    #[test]
+    fn claude_turn_interrupt() {
+        let result = claude("turn_interrupt");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Interrupted]);
+        assert_eq!(terminals(&result), [TurnOutcome::Interrupted]);
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::AssistantMessage { streaming: false, text, .. } if text == "Working"
+        ) && item.status == ItemStatus::Interrupted));
+        assert_eq!(
+            provider_turns(main)[0].status,
+            ProviderTurnStatus::Interrupted
+        );
+    }
+
+    #[test]
+    fn claude_turn_interrupt_mid_tool() {
+        let result = claude("turn_interrupt_mid_tool");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Interrupted]);
+        assert_eq!(terminals(&result), [TurnOutcome::Interrupted]);
+        let rows = items(&result, main_id(&result));
+        let command = rows
+            .iter()
+            .find(|item| matches!(item.kind, TurnItemKind::CommandExecution { .. }))
+            .expect("the running command");
+        assert_eq!(command.status, ItemStatus::Interrupted);
+    }
+
+    #[test]
+    fn claude_message_steering_is_native() {
+        let result = claude("message_steering");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let run = runs(main)[0];
+        let attempts = main
+            .attempts
+            .values()
+            .filter(|attempt| attempt.run_id == run.id)
+            .count();
+        assert_eq!(attempts, 1, "native steering keeps one attempt");
+        assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["Working", "Steered: use tabs"]
+        );
+    }
+
+    #[test]
+    fn claude_resumes_an_unloaded_thread() {
+        let result = claude("provider_thread_resume");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+        assert_eq!(main.provider_sessions.len(), 2);
+        let all = runs(main);
+        assert_eq!(all[0].provider_thread_id, all[1].provider_thread_id);
+        let transcript =
+            read_transcript(&fixtures().join("provider_thread_resume/claude.ndjson")).unwrap();
+        let spawns = transcript
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ReplayEntry::ExpectOutbound { frame, .. } if frame["type"] == "process_start" => {
+                    Some(frame["args"].clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            spawns[0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|arg| arg == "--session-id")
+        );
+        assert!(
+            spawns[1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|arg| arg == "--resume")
+        );
+    }
+
+    #[test]
+    fn claude_rollback_replaces_the_thread() {
+        let result = claude("thread_rollback");
+        let main = &result.projection;
+        assert_eq!(
+            statuses(main),
+            [
+                RunStatus::Completed,
+                RunStatus::RolledBack,
+                RunStatus::Completed
+            ]
+        );
+        let all = runs(main);
+        assert_ne!(all[0].provider_thread_id, all[2].provider_thread_id);
+        let replacement = &main.provider_threads[&all[2].provider_thread_id.unwrap()];
+        assert_eq!(
+            replacement
+                .forked_from
+                .as_ref()
+                .map(|fork| fork.provider_thread_id),
+            all[0].provider_thread_id
+        );
+        assert_eq!(
+            replacement
+                .native_thread_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.as_deref()),
+            Some("00000000-0000-7000-8000-000000000003")
+        );
+        assert_eq!(
+            main.thread.active_provider_thread_id,
+            all[2].provider_thread_id
+        );
+    }
+
+    #[test]
+    fn claude_fork_copies_the_conversation() {
+        let result = claude("thread_fork_native");
+        assert!(matches!(result.forks[..], [ForkResult::Native { .. }]));
+        let main = &result.projection;
+        let fork = &result.threads["fork-a"];
+        let forked = &fork.provider_threads[&fork.thread.active_provider_thread_id.unwrap()];
+        assert_eq!(
+            forked
+                .forked_from
+                .as_ref()
+                .map(|from| from.provider_thread_id),
+            main.thread.active_provider_thread_id
+        );
+        assert_eq!(statuses(fork), [RunStatus::Completed]);
+        assert_eq!(
+            assistant_texts(&result, fork.thread.id),
+            ["Echo: in the fork"]
+        );
+    }
+
+    #[test]
+    fn claude_usage_limit_carries_the_reset_time() {
+        let result = claude("usage_limit");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Failed]);
+        let failure = runs(main)[0].failure.clone().unwrap();
+        assert_eq!(failure.class, FailureClass::UsageLimit);
+        // `resetsAt` is epoch seconds on the wire.
+        assert_eq!(failure.reset_at, Some(1_767_240_000_000));
+        assert_eq!(
+            main.thread.limit_recovery.clone().unwrap().reset_at,
+            Some(1_767_240_000_000)
+        );
+    }
+
+    #[test]
+    fn claude_unexpected_exit_fails_the_turn() {
+        let result = claude("runtime_exit_unexpected");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Failed]);
+        let failure = runs(main)[0].failure.clone().unwrap();
+        assert_eq!(failure.class, FailureClass::TransportError);
+        assert_eq!(failure.code.as_deref(), Some("process_exit"));
+        assert!(matches!(
+            terminals(&result)[..],
+            [TurnOutcome::Failed { .. }]
+        ));
+    }
+
+    #[test]
+    fn claude_background_work_parks_the_turn() {
+        let result = claude("background_work");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+        let parked = result.adapter_events.iter().find_map(|event| match event {
+            AdapterEvent::TurnTerminal { terminal } => Some(terminal.background_pending),
+            _ => None,
+        });
+        assert_eq!(parked, Some(true), "the reply with a live task parks");
+        let work = result
+            .adapter_events
+            .iter()
+            .filter_map(|event| match event {
+                AdapterEvent::BackgroundWorkUpdated { work } => {
+                    Some((work.task.task_id.clone(), work.task.kind, work.live))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            work,
+            [
+                ("bkbuild1".to_owned(), PendingTaskKind::Command, true),
+                ("bkbuild1".to_owned(), PendingTaskKind::Command, false),
+            ]
+        );
+        // The task settled during the next turn and left the thread.
+        assert_eq!(terminals(&result).len(), 2);
+        let thread = &main.provider_threads[&runs(main)[0].provider_thread_id.unwrap()];
+        assert!(thread.pending_background_tasks.is_empty());
+    }
+
+    #[test]
+    fn claude_subagents_are_child_turns() {
+        let result = claude("subagent");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let subagent = main.subagents.values().next().unwrap();
+        assert_eq!(subagent.status, SubagentStatus::Completed);
+        assert_eq!(subagent.result.as_deref(), Some("Found it."));
+        assert_eq!(subagent.title.as_deref(), Some("Search the repo"));
+        assert_eq!(
+            subagent
+                .native_task_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.as_deref()),
+            Some("agent-1")
+        );
+        let child_thread = main
+            .provider_threads
+            .values()
+            .find(|thread| thread.owner_node_id == Some(subagent.id))
+            .expect("the subagent's provider thread");
+        let child_turn = main
+            .provider_turns
+            .values()
+            .find(|turn| turn.provider_thread_id == child_thread.id)
+            .unwrap();
+        assert_eq!(child_turn.status, ProviderTurnStatus::Completed);
+        assert_eq!(
+            terminals(&result),
+            [TurnOutcome::Completed, TurnOutcome::Completed]
+        );
+        // The subagent's own frames never reach the parent's transcript.
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["Echo: [subagent] delegate the search"]
+        );
+    }
+
+    #[test]
+    fn claude_model_switch_is_in_session() {
+        let result = claude("model_switch");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+        assert_eq!(
+            runs(main)[1].model_selection.model.as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(main.provider_sessions.len(), 1, "set_model, no restart");
+    }
+
+    #[test]
+    fn claude_capabilities_match_the_snapshot() {
+        let path = fixtures().join("../capabilities_claude.json");
+        let expected: Capabilities =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(claude_capabilities(), expected);
+        assert_eq!(
+            ClaudeDriver.capabilities(&claude_instance()),
+            claude_capabilities()
         );
     }
 }
