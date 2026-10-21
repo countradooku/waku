@@ -1,0 +1,5 @@
+{"type": "system", "content": "Grok system prompt"}
+{"type": "user", "prompt_index": 0, "content": "one"}
+{"type": "assistant", "content": "first answer"}
+{"type": "user", "prompt_index": 1, "content": "two"}
+{"type": "assistant", "content": "second answer"}

@@ -1,0 +1,13 @@
+{"type":"transcript_start","provider":"cursor","protocol":"acp.stdio","version":"0.0.0","scenario":"turn_interrupt_mid_tool","metadata":{"recordedBy":"acp_fixtures.py","source":"written from the ACP spec (tool_call kinds, session/cancel)","synthetic":true,"ignore":["/params/clientInfo/version"]}}
+{"type":"expect_outbound","label":"process_start","frame":{"type":"process_start","program":"cursor-agent","args":["acp"],"env":{}}}
+{"type":"expect_outbound","label":"initialize","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,"_meta":{"parameterizedModelPicker":true}},"clientInfo":{"name":"waku","version":"0.0.0"}}}}
+{"type":"emit_inbound","label":"initialize","frame":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":false,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":false,"sse":false}},"authMethods":[]}}}
+{"type":"expect_outbound","label":"session/new","frame":{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"<workspace>","mcpServers":[]}}}
+{"type":"emit_inbound","label":"session/new","frame":{"jsonrpc":"2.0","id":2,"result":{"sessionId":"acp-session-1"}}}
+{"type":"expect_outbound","label":"session/prompt","frame":{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"acp-session-1","prompt":[{"type":"text","text":"Run sleep 30, then answer: interrupt fixture should not finish naturally"}]}}}
+{"type":"emit_inbound","label":"session/update","frame":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session-1","update":{"sessionUpdate":"tool_call","toolCallId":"call-sleep","title":"sleep 30","kind":"execute","status":"pending","rawInput":{"command":"sleep 30"}}}}}
+{"type":"emit_inbound","label":"session/update","frame":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-sleep","status":"in_progress"}}}}
+{"type":"expect_outbound","label":"session/cancel","frame":{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"acp-session-1"}}}
+{"type":"emit_inbound","label":"session/update","frame":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-sleep","status":"failed","content":[{"type":"content","content":{"type":"text","text":"Interrupted"}}]}}}}
+{"type":"emit_inbound","label":"session/prompt","frame":{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}}
+{"type":"runtime_exit","status":"success"}

@@ -126,6 +126,12 @@ pub enum ScenarioStep {
         #[serde(default)]
         thread: Option<String>,
     },
+    /// Sets the thread's runtime mode (`ask` for a supervised approval).
+    RuntimeMode {
+        mode: RuntimeMode,
+        #[serde(default)]
+        thread: Option<String>,
+    },
     /// Releases sessions idle past the manager's limits.
     ReleaseIdle,
     /// Unloads a thread's session.
@@ -646,6 +652,13 @@ impl ReplayHarness {
                 self.runtime
                     .block_on(manager.compact(thread_id))
                     .map_err(harness_error)?;
+            }
+            ScenarioStep::RuntimeMode { mode, thread } => {
+                let thread_id = self.thread(thread)?;
+                self.dispatch(Command::ThreadSetRuntimeMode {
+                    thread_id,
+                    runtime_mode: *mode,
+                })?;
             }
             ScenarioStep::ReleaseIdle => {
                 let manager = self.manager.clone();

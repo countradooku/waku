@@ -40,6 +40,10 @@ fn input(scenario: &str) -> ScenarioInput {
 fn driver_for(provider: &str) -> Arc<dyn DriverV2> {
     match provider {
         FAKE_PROVIDER => Arc::new(FakeDriver),
+        // The ACP family (#48); its fixtures' assertions are in `replay_acp.rs`.
+        "acp" | "cursor" | "grok" | "kimi" | "fx" => {
+            Arc::new(waku_core::driver::acp::AcpDriver::new())
+        }
         other => panic!("no DriverV2 for {other} yet"),
     }
 }
@@ -643,12 +647,23 @@ fn every_fixture_has_assertions() {
     ];
     for entry in std::fs::read_dir(fixtures()).unwrap() {
         let entry = entry.unwrap();
+        if !entry.path().is_dir() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
-        assert!(covered.contains(&name.as_str()), "{name} has no assertions");
-        assert!(
-            entry.path().join("fake.ndjson").exists(),
-            "{name} has no recorded fixture"
-        );
+        let transcripts = std::fs::read_dir(entry.path())
+            .unwrap()
+            .map(|file| file.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|file| file.ends_with(".ndjson"))
+            .collect::<Vec<_>>();
+        assert!(!transcripts.is_empty(), "{name} has no recorded fixture");
+        for transcript in &transcripts {
+            // Every provider id names a ported driver.
+            let _ = driver_for(transcript.trim_end_matches(".ndjson"));
+        }
+        if entry.path().join("fake.ndjson").exists() {
+            assert!(covered.contains(&name.as_str()), "{name} has no assertions");
+        }
     }
 }
 
@@ -656,7 +671,9 @@ fn every_fixture_has_assertions() {
 fn replay_is_deterministic() {
     let mut scenarios = std::fs::read_dir(fixtures())
         .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.join("fake.ndjson").exists())
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     scenarios.sort();
     for scenario in scenarios.iter().map(String::as_str) {

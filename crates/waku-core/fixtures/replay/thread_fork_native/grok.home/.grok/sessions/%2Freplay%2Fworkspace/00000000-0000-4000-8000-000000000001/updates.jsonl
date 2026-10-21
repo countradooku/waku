@@ -1,0 +1,4 @@
+{"method": "session/update", "params": {"sessionId": "00000000-0000-4000-8000-000000000001", "update": {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "one"}}}}
+{"method": "session/update", "params": {"sessionId": "00000000-0000-4000-8000-000000000001", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "first answer"}}}}
+{"method": "session/update", "params": {"sessionId": "00000000-0000-4000-8000-000000000001", "update": {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "two"}}}}
+{"method": "session/update", "params": {"sessionId": "00000000-0000-4000-8000-000000000001", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "second answer"}}}}

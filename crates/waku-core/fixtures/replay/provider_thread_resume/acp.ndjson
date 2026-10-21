@@ -1,0 +1,21 @@
+{"type":"transcript_start","provider":"acp","protocol":"acp.stdio","version":"0.0.0","scenario":"provider_thread_resume","metadata":{"recordedBy":"acp_fixtures.py","source":"written from the ACP spec (session/resume for Grok, session/load elsewhere)","synthetic":true,"ignore":["/params/clientInfo/version"]}}
+{"type":"expect_outbound","label":"process_start","frame":{"type":"process_start","program":"acp-agent","args":[],"env":{}}}
+{"type":"expect_outbound","label":"initialize","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"waku","version":"0.0.0"}}}}
+{"type":"emit_inbound","label":"initialize","frame":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":false,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":false,"sse":false}},"authMethods":[]}}}
+{"type":"expect_outbound","label":"session/new","frame":{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"<workspace>","mcpServers":[]}}}
+{"type":"emit_inbound","label":"session/new","frame":{"jsonrpc":"2.0","id":2,"result":{"sessionId":"acp-session-1"}}}
+{"type":"expect_outbound","label":"session/prompt","frame":{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"acp-session-1","prompt":[{"type":"text","text":"one"}]}}}
+{"type":"emit_inbound","label":"session/update","frame":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first answer"}}}}}
+{"type":"emit_inbound","label":"session/prompt","frame":{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}}
+{"type":"runtime_exit","status":"success"}
+{"type":"expect_outbound","label":"process_start","frame":{"type":"process_start","program":"acp-agent","args":[],"env":{}},"channel":"main#2"}
+{"type":"expect_outbound","label":"initialize","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"waku","version":"0.0.0"}}},"channel":"main#2"}
+{"type":"emit_inbound","label":"initialize","frame":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":false,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":false,"sse":false}},"authMethods":[]}},"channel":"main#2"}
+{"type":"expect_outbound","label":"session/load","frame":{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"acp-session-1","cwd":"<workspace>","mcpServers":[]}},"channel":"main#2"}
+{"type":"emit_inbound","label":"session/update","frame":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session-1","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"one"}}}},"channel":"main#2"}
+{"type":"emit_inbound","label":"session/update","frame":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first answer"}}}},"channel":"main#2"}
+{"type":"emit_inbound","label":"session/load","frame":{"jsonrpc":"2.0","id":2,"result":{}},"channel":"main#2"}
+{"type":"expect_outbound","label":"session/prompt","frame":{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"acp-session-1","prompt":[{"type":"text","text":"two"}]}},"channel":"main#2"}
+{"type":"emit_inbound","label":"session/update","frame":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second answer"}}}},"channel":"main#2"}
+{"type":"emit_inbound","label":"session/prompt","frame":{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}},"channel":"main#2"}
+{"type":"runtime_exit","status":"success","channel":"main#2"}
