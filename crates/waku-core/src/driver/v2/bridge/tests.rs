@@ -1,10 +1,9 @@
-//! The bridge drives an existing driver behind the old interface unchanged.
+//! The bridge serves a `DriverV2` driver behind the old interface.
 //!
-//! Amp, the simplest driver, runs twice against a scripted `amp`: once
-//! directly through `DriverControl`, once wrapped as a `DriverSession` (a
-//! test-only shim that applies RFC 0002's `DriverEvent` → `AdapterEvent`
-//! table) and served back through `V1Bridge`. The two event streams must
-//! tell the same story.
+//! Amp, the simplest driver, runs against a scripted `amp` through
+//! `V1Bridge` and real processes: the legacy event stream must tell the
+//! story of two turns on one process. (Amp itself is not served through the
+//! bridge in the daemon: decision D6.)
 
 #![cfg(unix)]
 
@@ -13,15 +12,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
-use serde_json::Value;
 
 use super::*;
-use crate::driver::amp::AmpDriver;
+use crate::driver::amp::{AmpDriver, amp_instance};
 use crate::driver::test_event_channel;
 use waku_protocol::model::RuntimeMode as LegacyMode;
 
 const AMP_SCRIPT: &str = r#"#!/bin/sh
-if [ "$1" = "threads" ]; then echo '[]'; exit 0; fi
+if [ "$1 $2" = "threads new" ]; then echo 'T-fake-1'; exit 0; fi
 n=0
 while IFS= read -r line; do
   n=$((n+1))
@@ -132,365 +130,11 @@ fn drive(control: Box<dyn DriverControl>, events: Receiver<DriverEvent>) -> Vec<
     seen
 }
 
-// -- the shim: an unported driver as a DriverSession --------------------------------
-
-#[derive(Default)]
-struct ShimState {
-    run: Option<RunRef>,
-    thread: Option<ProviderThreadRef>,
-    turn: Option<ProviderTurnRef>,
-    text: String,
-    reasoning: String,
-    ordinal: u32,
-}
-
-struct AmpShim;
-
-struct ShimSession {
-    control: Mutex<Option<Arc<dyn DriverControl>>>,
-    state: Arc<Mutex<ShimState>>,
-    capabilities: Capabilities,
-}
-
-fn shim_capabilities() -> Capabilities {
-    let mut caps = Capabilities::default();
-    caps.turns.active_steering = true;
-    caps.turns.interrupt = true;
-    caps.turns.emits_turn_started = true;
-    caps
-}
-
-fn template_row(thread: &ProviderThreadRef, thread_id: ThreadId) -> ProviderThread {
-    ProviderThread {
-        id: thread.provider_thread_id,
-        driver: orch::DriverKind::Amp,
-        provider_instance_id: ProviderInstanceId::new("amp"),
-        provider_session_id: None,
-        app_thread_id: Some(thread_id),
-        owner_node_id: None,
-        native_thread_ref: None,
-        native_conversation_head_ref: None,
-        status: ProviderThreadStatus::Active,
-        first_run_ordinal: None,
-        last_run_ordinal: None,
-        handoff_ids: Vec::new(),
-        forked_from: None,
-        pending_background_tasks: Vec::new(),
-        context_usage: None,
-        goal: None,
-        native_metadata: None,
-        created_at: 0,
-        updated_at: 0,
-    }
-}
-
-/// RFC 0002's `DriverEvent` → `AdapterEvent` table, for the shim.
-fn forward(event: DriverEvent, state: &Mutex<ShimState>, thread_id: ThreadId) -> Vec<AdapterEvent> {
-    let mut state = state.lock();
-    let item = |id: TurnItemId, run: &RunRef, status: ItemStatus, kind: TurnItemKind| TurnItem {
-        id,
-        thread_id,
-        run_id: Some(run.run_id),
-        node_id: Some(run.root_node_id),
-        provider_thread_id: None,
-        provider_turn_id: None,
-        native_item_ref: None,
-        parent_item_id: None,
-        position: 0,
-        status,
-        title: None,
-        tool: None,
-        stream_rev: 0,
-        started_at: None,
-        completed_at: None,
-        updated_at: 0,
-        kind,
-    };
-    match event {
-        DriverEvent::Connected { provider_cursor } => {
-            let Some(thread) = state.thread.clone() else {
-                return Vec::new();
-            };
-            let mut reference = thread;
-            if let Some(cursor) = provider_cursor {
-                reference.native = NativeRef::strong(cursor_native_id(&cursor));
-                reference.cursor = Some(cursor);
-            }
-            state.thread = Some(reference.clone());
-            let mut row = template_row(&reference, thread_id);
-            reference.apply_to(&mut row);
-            vec![AdapterEvent::ProviderThreadUpdated {
-                thread: row,
-                retained_native_turn_ids: None,
-            }]
-        }
-        DriverEvent::TurnStarted => {
-            let (Some(run), Some(thread)) = (state.run, state.thread.clone()) else {
-                return Vec::new();
-            };
-            state.ordinal += 1;
-            state.text.clear();
-            state.reasoning.clear();
-            let id = ProviderTurnId(uuid::Uuid::new_v5(
-                &thread.provider_thread_id.0,
-                format!("turn:{}", state.ordinal).as_bytes(),
-            ));
-            let reference = ProviderTurnRef {
-                provider_turn_id: id,
-                native: NativeRef::weak(state.ordinal.to_string()),
-                ordinal: state.ordinal,
-            };
-            state.turn = Some(reference.clone());
-            vec![AdapterEvent::ProviderTurnUpdated {
-                turn: ProviderTurn {
-                    id,
-                    provider_thread_id: thread.provider_thread_id,
-                    node_id: run.root_node_id,
-                    run_attempt_id: Some(run.attempt_id),
-                    native_turn_ref: Some(reference.native.to_provider_ref(orch::DriverKind::Amp)),
-                    ordinal: reference.ordinal,
-                    status: ProviderTurnStatus::Running,
-                    started_at: None,
-                    completed_at: None,
-                    token_usage: None,
-                    turn_token_usage: None,
-                },
-            }]
-        }
-        DriverEvent::TextDelta(text) => {
-            let Some(run) = state.run else {
-                return Vec::new();
-            };
-            state.text.push_str(&text);
-            vec![AdapterEvent::MessageUpdated {
-                message: Message {
-                    id: MessageId(uuid::Uuid::new_v5(&run.attempt_id.0, b"assistant")),
-                    thread_id,
-                    run_id: Some(run.run_id),
-                    node_id: Some(run.root_node_id),
-                    role: MessageRole::Assistant,
-                    created_by: Actor::Agent,
-                    creation_source: CreationSource::Provider,
-                    text: state.text.clone(),
-                    display_text: None,
-                    attachments: Vec::new(),
-                    context: Vec::new(),
-                    notification: None,
-                    sender_thread_id: None,
-                    streaming: true,
-                    created_at: 0,
-                    updated_at: 0,
-                },
-            }]
-        }
-        DriverEvent::ReasoningDelta(text) => {
-            let Some(run) = state.run else {
-                return Vec::new();
-            };
-            state.reasoning.push_str(&text);
-            vec![AdapterEvent::TurnItemUpdated {
-                item: item(
-                    TurnItemId(uuid::Uuid::new_v5(&run.attempt_id.0, b"reasoning")),
-                    &run,
-                    ItemStatus::Running,
-                    TurnItemKind::Reasoning {
-                        text: state.reasoning.clone(),
-                        streaming: true,
-                    },
-                ),
-            }]
-        }
-        DriverEvent::RichActivity(activity) => {
-            let Some(run) = state.run else {
-                return Vec::new();
-            };
-            let source = activity.source_id.clone().unwrap_or_default();
-            let mut row = item(
-                TurnItemId(uuid::Uuid::new_v5(&run.attempt_id.0, source.as_bytes())),
-                &run,
-                if activity.complete {
-                    ItemStatus::Completed
-                } else {
-                    ItemStatus::Running
-                },
-                TurnItemKind::DynamicTool {
-                    tool_name: activity.tool_name.clone().or(Some(activity.title.clone())),
-                    input: JsonText(activity.arguments.clone().unwrap_or_default()),
-                    output: activity.output.clone().map(JsonText),
-                    output_omitted: false,
-                    viewed_image_path: None,
-                },
-            );
-            row.title = Some(activity.title);
-            row.native_item_ref = Some(ProviderRef::strong(orch::DriverKind::Amp, source));
-            vec![AdapterEvent::TurnItemUpdated { item: row }]
-        }
-        DriverEvent::TurnFinished { success, summary } => {
-            let Some(run) = state.run.take() else {
-                return Vec::new();
-            };
-            vec![AdapterEvent::TurnTerminal {
-                terminal: TurnTerminal {
-                    run,
-                    provider_turn: state.turn.take(),
-                    outcome: if success {
-                        TurnOutcome::Completed
-                    } else {
-                        TurnOutcome::Failed {
-                            failure: ProviderFailure::new(
-                                FailureClass::Unknown,
-                                summary.clone().unwrap_or_default(),
-                            ),
-                        }
-                    },
-                    thread_disposition: ThreadDisposition::Reusable,
-                    child_turns_continue: false,
-                    background_pending: false,
-                    summary,
-                },
-            }]
-        }
-        _ => Vec::new(),
-    }
-}
-
-#[async_trait::async_trait]
-impl DriverV2 for AmpShim {
-    fn kind(&self) -> DriverFamily {
-        DriverFamily::Amp
-    }
-
-    fn capabilities(&self, _cfg: &InstanceConfig) -> Capabilities {
-        shim_capabilities()
-    }
-
-    fn plan_selection_transition(
-        &self,
-        _caps: &Capabilities,
-        _from: &Selection,
-        _to: &Selection,
-    ) -> TransitionPlan {
-        TransitionPlan::RestartSession
-    }
-
-    async fn open_session(&self, ctx: SessionContext) -> DriverResult<OpenedSession> {
-        let (legacy, legacy_events) = test_event_channel();
-        let control: Arc<dyn DriverControl> = Arc::new(
-            AmpDriver::start(options(&ctx.instance.binary, &ctx.cwd), legacy)
-                .map_err(|error| DriverError::Io(std::io::Error::other(error.to_string())))?,
-        );
-        let (events, receiver) = adapter_channel();
-        let state = Arc::new(Mutex::new(ShimState::default()));
-        let pump_state = state.clone();
-        let thread_id = ctx.thread_id;
-        std::thread::spawn(move || {
-            while let Ok(event) = legacy_events.recv() {
-                if matches!(event, DriverEvent::ProcessExited) {
-                    return;
-                }
-                for event in forward(event, &pump_state, thread_id) {
-                    if events.blocking_send(event).is_err() {
-                        return;
-                    }
-                }
-            }
-        });
-        Ok(OpenedSession {
-            session: Arc::new(ShimSession {
-                control: Mutex::new(Some(control)),
-                state,
-                capabilities: shim_capabilities(),
-            }),
-            events: receiver,
-            capabilities: shim_capabilities(),
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl DriverSession for ShimSession {
-    fn capabilities(&self) -> &Capabilities {
-        &self.capabilities
-    }
-
-    async fn ensure_thread(&self, req: EnsureThread) -> DriverResult<ProviderThreadRef> {
-        // Amp creates its thread with the first message.
-        let thread = req
-            .existing
-            .unwrap_or_else(|| ProviderThreadRef::unbound(ProviderThreadId(uuid::Uuid::nil())));
-        self.state.lock().thread = Some(thread.clone());
-        Ok(thread)
-    }
-
-    async fn resume_thread(&self, req: ResumeThread) -> DriverResult<ProviderThreadRef> {
-        self.state.lock().thread = Some(req.thread.clone());
-        Ok(req.thread)
-    }
-
-    async fn start_turn(&self, req: TurnStart) -> DriverResult<TurnAccepted> {
-        self.state.lock().run = Some(req.run);
-        let control = self.control.lock().clone();
-        match control {
-            Some(control) => control.prompt(req.message.text),
-            None => {
-                return Err(DriverError::SessionLost {
-                    detail: "closed".to_owned(),
-                });
-            }
-        }
-        Ok(TurnAccepted::default())
-    }
-
-    async fn steer_turn(&self, req: Steer) -> DriverResult<()> {
-        if let Some(control) = self.control.lock().clone() {
-            control.steer(req.message.text);
-        }
-        Ok(())
-    }
-
-    async fn interrupt_turn(&self, _req: Interrupt) -> DriverResult<()> {
-        if let Some(control) = self.control.lock().clone() {
-            control.cancel();
-        }
-        Ok(())
-    }
-
-    async fn respond(&self, _req: RuntimeResponse) -> DriverResult<()> {
-        Ok(())
-    }
-
-    async fn read_snapshot(&self, _thread: &ProviderThreadRef) -> DriverResult<ThreadSnapshot> {
-        Err(DriverError::Unsupported {
-            operation: "read_snapshot",
-        })
-    }
-
-    async fn rollback(&self, _req: Rollback) -> DriverResult<RollbackOutcome> {
-        Err(DriverError::Unsupported {
-            operation: "rollback",
-        })
-    }
-
-    async fn fork(&self, _req: ForkRequest) -> DriverResult<ProviderThreadRef> {
-        Err(DriverError::Unsupported { operation: "fork" })
-    }
-
-    async fn close(&self) -> DriverResult<()> {
-        // Dropping the last handle shuts Amp's stdin.
-        self.control.lock().take();
-        Ok(())
-    }
-}
-
 #[test]
-fn the_bridge_serves_amp_behind_the_old_interface_unchanged() {
+fn the_bridge_serves_amp_behind_the_old_interface() {
     let dir = tempfile::tempdir().unwrap();
     let binary = write_script(dir.path());
     let cwd = dir.path().canonicalize().unwrap();
-
-    let (events, received) = test_event_channel();
-    let direct = AmpDriver::start(options(&binary, &cwd), events).unwrap();
-    let direct = observe(drive(Box::new(direct), received));
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -498,10 +142,10 @@ fn the_bridge_serves_amp_behind_the_old_interface_unchanged() {
         .build()
         .unwrap();
     let (events, received) = test_event_channel();
-    let mut instance = InstanceConfig::new("amp", orch::DriverKind::Amp);
-    instance.extra = Value::Null;
+    let mut instance = amp_instance();
+    instance.binary = binary.clone();
     let bridged = V1Bridge::start(
-        Arc::new(AmpShim),
+        Arc::new(AmpDriver::new()),
         instance,
         options(&binary, &cwd),
         events,
@@ -510,44 +154,29 @@ fn the_bridge_serves_amp_behind_the_old_interface_unchanged() {
     )
     .unwrap();
     assert!(bridged.supports_steer());
-    let bridged = observe(drive(Box::new(bridged), received));
-
-    assert_eq!(
-        bridged, direct,
-        "the bridged stream must match the direct one"
-    );
-    // And the story is the expected one.
-    assert_eq!(
-        direct,
+    let observed = observe(drive(Box::new(bridged), received));
+    let turn = |n: u32| {
         vec![
             Observed::TurnStarted,
-            Observed::Connected(Some(
-                "{\"provider\":\"amp\",\"threadId\":\"T-fake-1\"}".to_owned()
-            )),
             Observed::Reasoning("Thinking it over.".to_owned()),
             Observed::Activity {
-                id: Some("tool-1".to_owned()),
-                complete: false
+                id: Some(format!("tool-{n}")),
+                complete: false,
             },
             Observed::Activity {
-                id: Some("tool-1".to_owned()),
-                complete: true
+                id: Some(format!("tool-{n}")),
+                complete: true,
             },
-            Observed::Text("Hello from amp 1".to_owned()),
+            Observed::Text(format!("Hello from amp {n}")),
             Observed::TurnFinished(true),
-            Observed::TurnStarted,
-            Observed::Reasoning("Thinking it over.".to_owned()),
-            Observed::Activity {
-                id: Some("tool-2".to_owned()),
-                complete: false
-            },
-            Observed::Activity {
-                id: Some("tool-2".to_owned()),
-                complete: true
-            },
-            Observed::Text("Hello from amp 2".to_owned()),
-            Observed::TurnFinished(true),
-            Observed::ProcessExited,
         ]
-    );
+    };
+    let story = observed
+        .into_iter()
+        .filter(|event| !matches!(event, Observed::Connected(_)))
+        .collect::<Vec<_>>();
+    let mut expected = turn(1);
+    expected.extend(turn(2));
+    expected.push(Observed::ProcessExited);
+    assert_eq!(story, expected);
 }

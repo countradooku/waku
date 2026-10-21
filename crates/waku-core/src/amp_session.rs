@@ -1,4 +1,8 @@
-//! Amp native-session history helpers.
+//! Amp native-session discovery and history import.
+//!
+//! Branch prompts the v1 driver seeded (`WAKU_AMP_BRANCH_CONTEXT_V1`) are
+//! still expanded when an exported thread contains them; Waku no longer
+//! writes them (portable forks are the orchestrator's, RFC 0002 D-6).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -124,7 +128,7 @@ fn message_timestamp(message: &Value, fallback: u64) -> u64 {
     if timestamp == 0 { fallback } else { timestamp }
 }
 
-fn history_from_export(export: &Value) -> anyhow::Result<ProviderSessionHistory> {
+pub(crate) fn history_from_export(export: &Value) -> anyhow::Result<ProviderSessionHistory> {
     let fallback = timestamp(export.get("created").unwrap_or(&Value::Null));
     let messages = logical_messages(export, None)?;
     let mut history = ProviderSessionHistory::default();
@@ -198,75 +202,6 @@ pub fn provider_session_history(
     Ok(history)
 }
 
-pub fn fork_session_at_turn(
-    binary: &Path,
-    cwd: &Path,
-    source_thread_id: &str,
-    pending_context: Option<&str>,
-    retained_turns: usize,
-) -> anyhow::Result<ProviderResumeCursor> {
-    let export = export_thread(binary, cwd, source_thread_id)?;
-    let messages = logical_messages(&export, pending_context)?;
-    let retained = retain_through_turn(&messages, retained_turns)?;
-    let fork_context = (!retained.is_empty())
-        .then(|| serde_json::to_string(&retained))
-        .transpose()?;
-    let thread_id = create_thread(binary, cwd)?;
-    Ok(ProviderResumeCursor::Amp {
-        thread_id,
-        fork_context,
-    })
-}
-
-pub fn prompt_with_fork_context(context: &str, prompt: &str) -> String {
-    format!(
-        "{CONTEXT_PREFIX}{}\n{context}{CONTEXT_GUIDANCE}{PROMPT_PREFIX}{}\n{prompt}",
-        context.len(),
-        prompt.len()
-    )
-}
-
-/// Amp does not put its generated thread title on the streaming channel. The
-/// native thread index is its authoritative metadata surface instead.
-pub fn thread_title(binary: &Path, cwd: &Path, thread_id: &str) -> anyhow::Result<Option<String>> {
-    let mut command = crate::command_env::command(binary);
-    let command = command
-        .args([
-            "threads",
-            "list",
-            "--json",
-            "--include-archived",
-            "--limit",
-            "100",
-        ])
-        .current_dir(cwd)
-        .stdin(Stdio::null());
-    let output =
-        crate::command_env::output(command).context("failed to read Amp thread metadata")?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        bail!("Amp could not list its threads: {}", detail.trim());
-    }
-    let threads: Value =
-        serde_json::from_slice(&output.stdout).context("Amp returned an invalid thread list")?;
-    Ok(title_from_thread_list(&threads, thread_id))
-}
-
-fn title_from_thread_list(threads: &Value, thread_id: &str) -> Option<String> {
-    threads.as_array()?.iter().find_map(|thread| {
-        (thread.get("id").and_then(Value::as_str) == Some(thread_id))
-            .then(|| {
-                thread
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|title| !title.is_empty())
-                    .map(str::to_owned)
-            })
-            .flatten()
-    })
-}
-
 fn export_thread(binary: &Path, cwd: &Path, thread_id: &str) -> anyhow::Result<Value> {
     let mut command = crate::command_env::command(binary);
     let command = command
@@ -279,26 +214,6 @@ fn export_thread(binary: &Path, cwd: &Path, thread_id: &str) -> anyhow::Result<V
         bail!("Amp could not export thread {thread_id}: {}", detail.trim());
     }
     serde_json::from_slice(&output.stdout).context("Amp returned an invalid thread export")
-}
-
-fn create_thread(binary: &Path, cwd: &Path) -> anyhow::Result<String> {
-    let mut command = crate::command_env::command(binary);
-    let command = command
-        .args(["threads", "new"])
-        .current_dir(cwd)
-        .stdin(Stdio::null());
-    let output =
-        crate::command_env::output(command).context("failed to create the Amp branch thread")?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        bail!("Amp could not create the branch thread: {}", detail.trim());
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("T-") && !line.chars().any(char::is_whitespace))
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("Amp returned no branch thread ID"))
 }
 
 fn logical_messages(export: &Value, pending_context: Option<&str>) -> anyhow::Result<Vec<Value>> {
@@ -337,24 +252,6 @@ fn expand_seeded_messages(messages: &[Value]) -> anyhow::Result<Vec<Value>> {
         expanded.push(current);
     }
     Ok(expanded)
-}
-
-fn retain_through_turn(messages: &[Value], retained_turns: usize) -> anyhow::Result<Vec<Value>> {
-    let mut retained = Vec::new();
-    let mut turns = 0;
-    for message in messages {
-        if is_user_prompt(message) {
-            if turns == retained_turns {
-                break;
-            }
-            turns += 1;
-        }
-        retained.push(message.clone());
-    }
-    if turns < retained_turns {
-        bail!("Amp has only {turns} native turns, but Waku needs {retained_turns}");
-    }
-    Ok(retained)
 }
 
 fn is_user_prompt(message: &Value) -> bool {
@@ -436,27 +333,21 @@ mod tests {
 
     use super::*;
 
+    /// The v1 branch envelope, which exported threads may still contain.
+    fn prompt_with_fork_context(context: &str, prompt: &str) -> String {
+        format!(
+            "{CONTEXT_PREFIX}{}\n{context}{CONTEXT_GUIDANCE}{PROMPT_PREFIX}{}\n{prompt}",
+            context.len(),
+            prompt.len()
+        )
+    }
+
     fn prompt(id: u64, text: &str) -> Value {
         json!({
             "role": "user",
             "messageId": id,
             "content": [{"type": "text", "text": text}]
         })
-    }
-
-    #[test]
-    fn retains_complete_amp_tool_loops_through_the_requested_prompt() {
-        let messages = vec![
-            prompt(1, "one"),
-            json!({"role":"assistant","messageId":2,"content":[{"type":"tool_use"}]}),
-            json!({"role":"user","messageId":3,"content":[{"type":"tool_result"}]}),
-            json!({"role":"assistant","messageId":4,"content":[{"type":"text","text":"done"}]}),
-            prompt(5, "two"),
-            json!({"role":"assistant","messageId":6,"content":[{"type":"text","text":"done"}]}),
-        ];
-        let retained = retain_through_turn(&messages, 1).unwrap();
-        assert_eq!(retained.len(), 4);
-        assert_eq!(retained.last().unwrap()["messageId"], 4);
     }
 
     #[test]
@@ -474,25 +365,6 @@ mod tests {
         let expanded = expand_seeded_messages(&[prompt(3, &seeded)]).unwrap();
         assert_eq!(expanded.len(), 3);
         assert_eq!(user_prompt_text(&expanded[2]), Some("two 🚀"));
-    }
-
-    #[test]
-    fn rejects_a_checkpoint_beyond_the_exported_thread() {
-        let error = retain_through_turn(&[prompt(1, "one")], 2).unwrap_err();
-        assert!(error.to_string().contains("only 1 native turns"));
-    }
-
-    #[test]
-    fn reads_the_generated_title_for_the_exact_amp_thread() {
-        let threads = json!([
-            {"id":"T-other","title":"Another task"},
-            {"id":"T-target","title":"  Fix streaming titles  "}
-        ]);
-        assert_eq!(
-            title_from_thread_list(&threads, "T-target").as_deref(),
-            Some("Fix streaming titles")
-        );
-        assert_eq!(title_from_thread_list(&threads, "T-missing"), None);
     }
 
     #[test]

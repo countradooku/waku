@@ -154,7 +154,13 @@ struct State {
     error: Option<ReplayError>,
     /// Bumped whenever the cursor moves; the harness watches it for idleness.
     progress: u64,
+    /// The spawn each synthetic pid names, so a signal reaches its channel.
+    pids: HashMap<u32, String>,
 }
+
+/// Replay's processes get pids no real process has, so a signal can be
+/// matched to its spawn.
+const SYNTHETIC_PID_BASE: u32 = 0x7F00_0000;
 
 pub struct ReplayTransportFactory {
     state: Mutex<State>,
@@ -195,6 +201,7 @@ impl ReplayTransportFactory {
                 channels: HashMap::new(),
                 error: None,
                 progress: 0,
+                pids: HashMap::new(),
             }),
             advance: Mutex::new(None),
         })
@@ -418,13 +425,15 @@ impl TransportFactory for Arc<ReplayTransportFactory> {
         let (mut agent_stdout, driver_stdout) = tokio::io::duplex(64 * 1024);
         let (stdout_lines, mut stdout_queue) = mpsc::unbounded_channel::<String>();
         let (exit_sender, exit_receiver) = oneshot::channel();
-        let channel = {
+        let (channel, pid) = {
             let mut state = self.state.lock();
             let channel = spawn_channel(&mut state.spawns, channel);
             state
                 .channels
                 .insert(channel.clone(), Channel::stdio(stdout_lines, exit_sender));
-            channel
+            let pid = SYNTHETIC_PID_BASE + state.pids.len() as u32 + 1;
+            state.pids.insert(pid, channel.clone());
+            (channel, pid)
         };
         // The spawn itself is the channel's first outbound frame.
         self.outbound(&channel, process_start_frame(&spec));
@@ -462,8 +471,18 @@ impl TransportFactory for Arc<ReplayTransportFactory> {
             stdout: Box::new(driver_stdout),
             stderr: Box::new(tokio::io::empty()),
             exit: Box::pin(async move { Ok(exit_receiver.await.unwrap_or(failed)) }),
-            pid: None,
+            pid: Some(pid),
         })
+    }
+
+    async fn interrupt(&self, channel: &str, pid: Option<u32>) -> io::Result<()> {
+        let name = {
+            let state = self.state.lock();
+            pid.and_then(|pid| state.pids.get(&pid).cloned())
+                .unwrap_or_else(|| channel.to_owned())
+        };
+        self.outbound(&name, json!({ "type": "signal", "signal": "SIGINT" }));
+        Ok(())
     }
 
     async fn http(&self, channel: &str, _base: Url) -> io::Result<Arc<dyn HttpTransport>> {

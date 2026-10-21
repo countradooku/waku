@@ -2,15 +2,15 @@
 
 pub mod acp;
 mod activity;
-mod amp;
+pub mod amp;
 pub mod claude;
 pub mod codex;
 mod computer_use;
 pub mod deepseek;
+mod history;
 pub mod opencode;
-mod pi;
+pub mod pi;
 mod support;
-mod title_refresh;
 mod tool_items;
 pub mod v2;
 
@@ -45,23 +45,6 @@ impl DriverEventSender {
         self.events.send(event)?;
         let _ = self.wake.try_send(());
         Ok(())
-    }
-}
-
-pub(crate) trait DriverEventSink {
-    fn send(&self, event: DriverEvent) -> Result<(), SendError<DriverEvent>>;
-}
-
-impl DriverEventSink for DriverEventSender {
-    fn send(&self, event: DriverEvent) -> Result<(), SendError<DriverEvent>> {
-        DriverEventSender::send(self, event)
-    }
-}
-
-#[cfg(test)]
-impl DriverEventSink for Sender<DriverEvent> {
-    fn send(&self, event: DriverEvent) -> Result<(), SendError<DriverEvent>> {
-        Sender::send(self, event)
     }
 }
 
@@ -210,6 +193,15 @@ pub struct SessionOptions {
     pub context_window: Option<String>,
 }
 
+/// Drivers that exist only on `DriverV2` (decision D6: no compatibility
+/// layer) cannot be started through the legacy `DriverControl` path.
+fn not_until_cutover(provider: ProviderKind) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} is not available until the orchestrator cut-over: its driver runs on DriverV2 only",
+        provider.display_name()
+    )
+}
+
 pub(crate) fn start_local(
     provider: ProviderKind,
     mut options: DriverStartOptions,
@@ -224,10 +216,9 @@ pub(crate) fn start_local(
     let inner: Arc<dyn DriverControl> = match provider {
         // Codex runs as a `DriverV2` session behind `V1Bridge` (#46).
         ProviderKind::Codex => codex::start_local(options, events)?,
-        ProviderKind::Pi => Arc::new(pi::PiDriver::start(pi::PiFlavor::Pi, options, events)?),
-        ProviderKind::OhMyPi => {
-            Arc::new(pi::PiDriver::start(pi::PiFlavor::OhMyPi, options, events)?)
-        }
+        // Ported to `DriverV2` only (#50, D6: no `V1Bridge`). The desktop
+        // reaches them once it starts sessions through the orchestrator.
+        ProviderKind::Pi | ProviderKind::OhMyPi => return Err(not_until_cutover(provider)),
         // Cursor, Fx, Grok, and Kimi Code all serve a long-lived ACP session,
         // which is the only way their Supervised mode can actually ask the user
         // rather than silently forcing or denying.
@@ -279,9 +270,8 @@ pub(crate) fn start_local(
                 v2::bridge::runtime(),
             )?)
         }
-        // Amp reads newline-delimited user messages on stdin and stays alive
-        // until stdin closes, so it too serves the whole conversation.
-        ProviderKind::Amp => Arc::new(amp::AmpDriver::start(options, events)?),
+        // Ported to `DriverV2` only (#51, D6: no `V1Bridge`).
+        ProviderKind::Amp => return Err(not_until_cutover(provider)),
     };
     Ok(DriverHandle { inner })
 }
@@ -289,6 +279,36 @@ pub(crate) fn start_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D6: the drivers that exist only on `DriverV2` are not bridged back to
+    /// `DriverControl`; the legacy path refuses them without spawning.
+    #[test]
+    fn driver_v2_only_providers_wait_for_the_orchestrator_cut_over() {
+        for provider in [ProviderKind::Pi, ProviderKind::OhMyPi, ProviderKind::Amp] {
+            let (events, _received) = test_event_channel();
+            let options = DriverStartOptions {
+                binary: PathBuf::from("/nonexistent/agent"),
+                cwd: std::env::temp_dir(),
+                mode: RuntimeMode::FullAccess,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            };
+            let error = start_local(provider, options, events)
+                .err()
+                .expect("refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains("not available until the orchestrator cut-over"),
+                "{provider:?}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn provider_events_coalesce_wakes_without_dropping_payloads() {

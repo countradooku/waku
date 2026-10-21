@@ -14,12 +14,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+use waku_core::driver::amp::{AMP_PROVIDER, AmpDriver, amp_capabilities, amp_instance};
 use waku_core::driver::claude::{
     CLAUDE_PROVIDER, ClaudeDriver, claude_capabilities, claude_instance,
 };
 use waku_core::driver::codex::{CODEX_PROVIDER, CodexDriver, codex_capabilities, codex_instance};
 use waku_core::driver::deepseek::{DEEPSEEK_PROVIDER, DeepSeekDriver, deepseek_replay_instance};
 use waku_core::driver::opencode::{OPENCODE_PROVIDER, OpenCodeDriver, opencode_replay_instance};
+use waku_core::driver::pi::{
+    OHMYPI_PROVIDER, PI_PROVIDER, PiDriver, PiFlavor, pi_capabilities, pi_replay_instance,
+};
 use waku_core::driver::v2::fake::{
     FAKE_PROVIDER, FakeDriver, FakeProfile, fake_capabilities, fake_instance,
 };
@@ -53,6 +57,8 @@ fn driver_for(provider: &str) -> Arc<dyn DriverV2> {
         CLAUDE_PROVIDER => Arc::new(ClaudeDriver),
         OPENCODE_PROVIDER => Arc::new(OpenCodeDriver),
         DEEPSEEK_PROVIDER => Arc::new(DeepSeekDriver),
+        PI_PROVIDER | OHMYPI_PROVIDER => Arc::new(PiDriver::new()),
+        AMP_PROVIDER => Arc::new(AmpDriver::new()),
         other => panic!("no DriverV2 for {other} yet"),
     }
 }
@@ -72,6 +78,9 @@ fn instance_of(provider: &str) -> InstanceConfig {
         // starting) a real service.
         OPENCODE_PROVIDER => opencode_replay_instance(),
         DEEPSEEK_PROVIDER => deepseek_replay_instance(),
+        PI_PROVIDER => pi_replay_instance(PiFlavor::Pi),
+        OHMYPI_PROVIDER => pi_replay_instance(PiFlavor::OhMyPi),
+        AMP_PROVIDER => amp_instance(),
         other => panic!("no DriverV2 instance for {other} here"),
     }
 }
@@ -707,6 +716,8 @@ fn every_fixture_has_assertions() {
             CLAUDE_PROVIDER => &claude::COVERED,
             OPENCODE_PROVIDER => opencode::COVERED,
             DEEPSEEK_PROVIDER => deepseek::COVERED,
+            PI_PROVIDER | OHMYPI_PROVIDER => pi::COVERED,
+            AMP_PROVIDER => amp::COVERED,
             other => panic!("{other} fixtures have no assertions"),
         }
     };
@@ -738,6 +749,9 @@ fn every_fixture_has_assertions() {
         CLAUDE_PROVIDER,
         OPENCODE_PROVIDER,
         DEEPSEEK_PROVIDER,
+        PI_PROVIDER,
+        OHMYPI_PROVIDER,
+        AMP_PROVIDER,
     ] {
         for scenario in covered(provider) {
             assert!(
@@ -2371,5 +2385,642 @@ mod deepseek {
         let subagent = main.subagents.values().next().unwrap();
         assert_eq!(subagent.status, SubagentStatus::Completed);
         assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+    }
+}
+
+// -- Pi and Oh My Pi (#50): RPC over stdio ----------------------------------------
+
+/// The Pi and Oh My Pi fixtures (`<scenario>/pi.ndjson`, `ohmypi.ndjson`),
+/// hand-derived (see `fixtures/replay/README.md`). Every scenario is
+/// recorded for both flavors, and every assertion runs for both.
+mod pi {
+    use super::*;
+
+    pub const COVERED: &[&str] = &[
+        "simple",
+        "multi_turn",
+        "tool_call_read_only",
+        "tool_call_approval",
+        "plan_questions",
+        "turn_interrupt",
+        "turn_interrupt_mid_tool",
+        "message_steering",
+        "provider_thread_resume",
+        "thread_rollback",
+        "thread_fork_native",
+        "usage_limit",
+        "runtime_exit_unexpected",
+    ];
+
+    const FLAVORS: [&str; 2] = [PI_PROVIDER, OHMYPI_PROVIDER];
+    const SESSION_A: &str = "00000000-0000-4000-8000-000000000002";
+    const SESSION_C: &str = "00000000-0000-4000-8000-000000000004";
+
+    fn each(scenario: &str, check: impl Fn(&str, ScenarioResult)) {
+        for provider in FLAVORS {
+            check(provider, replay_as(scenario, provider));
+        }
+    }
+
+    fn native_of(thread: &ProviderThread) -> Option<(String, RefStrength)> {
+        thread
+            .native_thread_ref
+            .as_ref()
+            .and_then(|reference| Some((reference.native_id.clone()?, reference.strength)))
+    }
+
+    #[test]
+    fn pi_fixtures_replay() {
+        let mut failures = Vec::new();
+        for provider in FLAVORS {
+            for scenario in COVERED {
+                let transcript =
+                    read_transcript(&fixtures().join(scenario).join(format!("{provider}.ndjson")))
+                        .unwrap();
+                if let Err(error) = run_transcript(scenario, transcript) {
+                    failures.push(format!("{scenario}/{provider}: {error}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    }
+
+    #[test]
+    fn pi_simple() {
+        each("simple", |provider, result| {
+            let main = &result.projection;
+            assert_eq!(statuses(main), [RunStatus::Completed], "{provider}");
+            assert_eq!(
+                assistant_texts(&result, main_id(&result)),
+                ["fixture simple ok"]
+            );
+            let rows = items(&result, main_id(&result));
+            assert!(rows.iter().any(|item| matches!(
+                &item.kind,
+                TurnItemKind::Reasoning { text, streaming: false }
+                    if text == "The user wants me to respond with a specific text."
+            )));
+            // The session id is the thread's strong native id; Pi's events
+            // carry no turn id, so the turn binds by ordinal.
+            let run = runs(main)[0];
+            let thread = &main.provider_threads[&run.provider_thread_id.unwrap()];
+            assert_eq!(
+                native_of(thread),
+                Some((SESSION_A.to_owned(), RefStrength::Strong))
+            );
+            let cursor = thread
+                .native_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.resume_cursor.as_ref())
+                .map(|cursor| cursor.0.clone())
+                .unwrap();
+            assert!(
+                cursor.contains("/pi-sessions/session-a.jsonl"),
+                "{provider}: {cursor}"
+            );
+            let turn = provider_turns(main)[0];
+            assert!(turn.native_turn_ref.is_none());
+            assert_eq!(
+                turn.token_usage
+                    .as_ref()
+                    .map(|usage| (usage.used, usage.max)),
+                Some((1814, Some(1_048_576)))
+            );
+            let session = main.provider_sessions.values().next().unwrap();
+            assert_eq!(session.capabilities, pi_capabilities(PiFlavor::Pi));
+            assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+        });
+    }
+
+    #[test]
+    fn pi_multi_turn_keeps_one_agent() {
+        each("multi_turn", |_, result| {
+            let main = &result.projection;
+            assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+            assert_eq!(
+                assistant_texts(&result, main_id(&result)),
+                ["Echo: first", "Echo: second"]
+            );
+            assert_eq!(main.provider_sessions.len(), 1);
+            let turns = provider_turns(main);
+            assert_eq!(
+                turns.iter().map(|turn| turn.ordinal).collect::<Vec<_>>(),
+                [1, 2]
+            );
+            assert_eq!(turns[0].provider_thread_id, turns[1].provider_thread_id);
+        });
+    }
+
+    #[test]
+    fn pi_read_only_tool() {
+        each("tool_call_read_only", |_, result| {
+            assert_eq!(statuses(&result.projection), [RunStatus::Completed]);
+            let rows = items(&result, main_id(&result));
+            assert!(rows.iter().any(|item| matches!(
+                &item.kind,
+                TurnItemKind::DynamicTool { tool_name: Some(name), output: Some(_), .. }
+                    if name == "read"
+            ) && item.status == ItemStatus::Completed));
+            assert_eq!(
+                assistant_texts(&result, main_id(&result)),
+                ["The README is a title."]
+            );
+        });
+    }
+
+    #[test]
+    fn pi_approvals_pass_native_options_through() {
+        each("tool_call_approval", |provider, result| {
+            let main = &result.projection;
+            assert_eq!(statuses(main), [RunStatus::Completed]);
+            let request = main.runtime_requests.values().next().unwrap();
+            assert_eq!(request.kind, RuntimeRequestKind::CommandApproval);
+            assert_eq!(request.status, RequestStatus::Resolved);
+            let (allow, deny) = if provider == PI_PROVIDER {
+                ("allow", "deny")
+            } else {
+                ("Approve", "Deny")
+            };
+            assert_eq!(
+                request
+                    .options
+                    .iter()
+                    .map(|option| option.id.as_str())
+                    .collect::<Vec<_>>(),
+                [allow, deny]
+            );
+            assert_eq!(
+                request.response,
+                Some(RuntimeResponse::Approval {
+                    option_id: allow.into()
+                })
+            );
+            assert_eq!(
+                request
+                    .native_request_ref
+                    .as_ref()
+                    .map(|reference| (reference.native_id.as_deref(), reference.strength)),
+                Some((Some("dialog-1"), RefStrength::Strong))
+            );
+            let rows = items(&result, main_id(&result));
+            assert!(rows.iter().any(|item| matches!(
+                &item.kind,
+                TurnItemKind::ApprovalRequest { prompt: Some(prompt), .. } if prompt == "ls"
+            )));
+            assert!(rows.iter().any(|item| matches!(
+                &item.kind,
+                TurnItemKind::CommandExecution { output: Some(output), .. } if output == "README.md\n"
+            ) && item.status == ItemStatus::Completed));
+            assert_eq!(
+                assistant_texts(&result, main_id(&result)),
+                ["Listed the files."]
+            );
+        });
+    }
+
+    #[test]
+    fn pi_extension_dialogs_are_structured_questions() {
+        each("plan_questions", |_, result| {
+            let main = &result.projection;
+            assert_eq!(statuses(main), [RunStatus::Completed]);
+            let request = main.runtime_requests.values().next().unwrap();
+            assert_eq!(request.kind, RuntimeRequestKind::UserInput);
+            assert_eq!(request.status, RequestStatus::Resolved);
+            assert_eq!(request.questions[0].id, "dialog-1");
+            assert_eq!(
+                request.questions[0]
+                    .options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["Red", "Blue"]
+            );
+            assert_eq!(
+                assistant_texts(&result, main_id(&result)),
+                ["You chose Blue."]
+            );
+        });
+    }
+
+    #[test]
+    fn pi_turn_interrupt() {
+        each("turn_interrupt", |_, result| {
+            let main = &result.projection;
+            assert_eq!(statuses(main), [RunStatus::Interrupted]);
+            assert_eq!(terminals(&result), [TurnOutcome::Interrupted]);
+            let rows = items(&result, main_id(&result));
+            assert!(rows.iter().any(|item| matches!(
+                &item.kind,
+                TurnItemKind::AssistantMessage { streaming: false, text, .. } if text == "Working"
+            ) && item.status == ItemStatus::Interrupted));
+            assert_eq!(
+                provider_turns(main)[0].status,
+                ProviderTurnStatus::Interrupted
+            );
+            // The agent keeps the session: one process for the scenario.
+            assert_eq!(main.provider_sessions.len(), 1);
+        });
+    }
+
+    #[test]
+    fn pi_turn_interrupt_mid_tool() {
+        each("turn_interrupt_mid_tool", |_, result| {
+            let main = &result.projection;
+            assert_eq!(statuses(main), [RunStatus::Interrupted]);
+            assert_eq!(terminals(&result), [TurnOutcome::Interrupted]);
+            let rows = items(&result, main_id(&result));
+            let command = rows
+                .iter()
+                .find(|item| matches!(item.kind, TurnItemKind::CommandExecution { .. }))
+                .expect("the running command");
+            assert_eq!(command.status, ItemStatus::Interrupted);
+        });
+    }
+
+    #[test]
+    fn pi_message_steering_is_native() {
+        each("message_steering", |_, result| {
+            let main = &result.projection;
+            assert_eq!(statuses(main), [RunStatus::Completed]);
+            let run = runs(main)[0];
+            let attempts = main
+                .attempts
+                .values()
+                .filter(|attempt| attempt.run_id == run.id)
+                .count();
+            assert_eq!(attempts, 1, "native steering keeps one attempt");
+            assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+            assert_eq!(
+                assistant_texts(&result, main_id(&result)),
+                ["Working", "Steered: use tabs"]
+            );
+        });
+    }
+
+    #[test]
+    fn pi_resumes_an_unloaded_thread_by_its_session_file() {
+        each("provider_thread_resume", |provider, result| {
+            let main = &result.projection;
+            assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+            assert_eq!(main.provider_sessions.len(), 2);
+            let all = runs(main);
+            assert_eq!(all[0].provider_thread_id, all[1].provider_thread_id);
+            assert_eq!(
+                native_thread(main, all[1]).as_deref(),
+                Some(SESSION_A),
+                "{provider}"
+            );
+            assert_eq!(
+                assistant_texts(&result, main_id(&result)),
+                ["Echo: one", "Echo: two"]
+            );
+        });
+    }
+
+    #[test]
+    fn pi_rollback_replaces_the_thread() {
+        each("thread_rollback", |provider, result| {
+            let main = &result.projection;
+            assert_eq!(
+                statuses(main),
+                [
+                    RunStatus::Completed,
+                    RunStatus::RolledBack,
+                    RunStatus::Completed
+                ],
+                "{provider}"
+            );
+            let all = runs(main);
+            assert_ne!(all[0].provider_thread_id, all[2].provider_thread_id);
+            let replacement = &main.provider_threads[&all[2].provider_thread_id.unwrap()];
+            assert_eq!(
+                replacement
+                    .forked_from
+                    .as_ref()
+                    .map(|fork| fork.provider_thread_id),
+                all[0].provider_thread_id
+            );
+            assert_eq!(
+                native_of(replacement),
+                Some((SESSION_C.to_owned(), RefStrength::Strong))
+            );
+            assert_eq!(
+                main.thread.active_provider_thread_id,
+                all[2].provider_thread_id
+            );
+            // One agent served it all: the live session was branched.
+            assert_eq!(main.provider_sessions.len(), 1);
+        });
+    }
+
+    #[test]
+    fn pi_fork_copies_the_session_out_of_process() {
+        each("thread_fork_native", |provider, result| {
+            assert!(
+                matches!(result.forks[..], [ForkResult::Native { .. }]),
+                "{provider}"
+            );
+            let main = &result.projection;
+            let fork = &result.threads["fork-a"];
+            let forked = &fork.provider_threads[&fork.thread.active_provider_thread_id.unwrap()];
+            assert_eq!(
+                forked
+                    .forked_from
+                    .as_ref()
+                    .map(|from| from.provider_thread_id),
+                main.thread.active_provider_thread_id
+            );
+            assert_eq!(
+                native_of(forked),
+                Some((SESSION_C.to_owned(), RefStrength::Strong))
+            );
+            assert_eq!(statuses(fork), [RunStatus::Completed]);
+            assert_eq!(
+                assistant_texts(&result, fork.thread.id),
+                ["Echo: in the fork"]
+            );
+            // The source thread is untouched.
+            assert_eq!(
+                native_thread(main, runs(main)[1]).as_deref(),
+                Some(SESSION_A)
+            );
+        });
+    }
+
+    #[test]
+    fn pi_usage_limit_takes_the_reset_from_the_retry_wait() {
+        each("usage_limit", |provider, result| {
+            let main = &result.projection;
+            assert_eq!(statuses(main), [RunStatus::Failed]);
+            let failure = runs(main)[0].failure.clone().unwrap();
+            assert_eq!(failure.class, FailureClass::UsageLimit, "{provider}");
+            // `auto_retry_start.delayMs` (one hour) after the frame arrived
+            // (the harness clock moves a few milliseconds per step).
+            let reset = failure.reset_at.unwrap();
+            assert!(
+                (1_767_229_200_000..1_767_229_200_100).contains(&reset),
+                "{provider}: {reset}"
+            );
+            assert_eq!(
+                main.thread.limit_recovery.clone().unwrap().reset_at,
+                Some(reset)
+            );
+        });
+    }
+
+    #[test]
+    fn pi_unexpected_exit_fails_the_turn_once() {
+        each("runtime_exit_unexpected", |_, result| {
+            let main = &result.projection;
+            assert_eq!(statuses(main), [RunStatus::Failed]);
+            let failure = runs(main)[0].failure.clone().unwrap();
+            assert_eq!(failure.class, FailureClass::TransportError);
+            assert_eq!(failure.code.as_deref(), Some("process_exit"));
+            assert!(matches!(
+                terminals(&result)[..],
+                [TurnOutcome::Failed { .. }]
+            ));
+        });
+    }
+
+    #[test]
+    fn pi_capabilities_match_the_snapshots() {
+        for (provider, flavor) in [
+            (PI_PROVIDER, PiFlavor::Pi),
+            (OHMYPI_PROVIDER, PiFlavor::OhMyPi),
+        ] {
+            let path = fixtures().join(format!("../capabilities_{provider}.json"));
+            let expected: Capabilities =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(pi_capabilities(flavor), expected, "{provider}");
+            assert_eq!(
+                PiDriver::new().capabilities(&pi_replay_instance(flavor)),
+                expected
+            );
+        }
+    }
+}
+
+// -- Amp (#51): stream-json over stdio ---------------------------------------------
+
+/// The Amp fixtures (`<scenario>/amp.ndjson`), hand-derived (see
+/// `fixtures/replay/README.md`). Amp has no approvals, questions, native
+/// rollback or fork, so only the R rows and steering are recorded.
+mod amp {
+    use super::*;
+
+    pub const COVERED: &[&str] = &[
+        "simple",
+        "multi_turn",
+        "tool_call_read_only",
+        "turn_interrupt",
+        "turn_interrupt_mid_tool",
+        "message_steering",
+        "provider_thread_resume",
+        "usage_limit",
+        "runtime_exit_unexpected",
+    ];
+
+    const THREAD: &str = "T-7f3c2a10-5b1e-4c8d-9a2f-000000000001";
+
+    fn amp(scenario: &str) -> ScenarioResult {
+        replay_as(scenario, AMP_PROVIDER)
+    }
+
+    fn spawns(scenario: &str) -> Vec<Value> {
+        read_transcript(&fixtures().join(scenario).join("amp.ndjson"))
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ReplayEntry::ExpectOutbound { frame, .. } if frame["type"] == "process_start" => {
+                    Some(frame["args"].clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn amp_fixtures_replay() {
+        let mut failures = Vec::new();
+        for scenario in COVERED {
+            let transcript =
+                read_transcript(&fixtures().join(scenario).join("amp.ndjson")).unwrap();
+            if let Err(error) = run_transcript(scenario, transcript) {
+                failures.push(format!("{scenario}: {error}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    }
+
+    #[test]
+    fn amp_simple() {
+        let result = amp("simple");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["fixture simple ok"]
+        );
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::Reasoning { text, streaming: false } if text == "The user wants an echo."
+        )));
+        // `threads new` names the thread; turns bind by ordinal.
+        let run = runs(main)[0];
+        assert_eq!(native_thread(main, run).as_deref(), Some(THREAD));
+        let turn = provider_turns(main)[0];
+        assert!(turn.native_turn_ref.is_none());
+        assert_eq!(
+            turn.token_usage.as_ref().map(|usage| usage.used),
+            Some(1512)
+        );
+        let session = main.provider_sessions.values().next().unwrap();
+        assert_eq!(session.capabilities, amp_capabilities());
+        assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+    }
+
+    #[test]
+    fn amp_multi_turn_keeps_one_process() {
+        let result = amp("multi_turn");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["Echo: first", "Echo: second"]
+        );
+        assert_eq!(main.provider_sessions.len(), 1);
+        assert_eq!(
+            spawns("multi_turn").len(),
+            2,
+            "threads new, then one session"
+        );
+    }
+
+    #[test]
+    fn amp_read_only_tool() {
+        let result = amp("tool_call_read_only");
+        assert_eq!(statuses(&result.projection), [RunStatus::Completed]);
+        let rows = items(&result, main_id(&result));
+        assert!(rows.iter().any(|item| matches!(
+            &item.kind,
+            TurnItemKind::DynamicTool { tool_name: Some(name), output: Some(_), .. } if name == "Read"
+        ) && item.status == ItemStatus::Completed));
+    }
+
+    #[test]
+    fn amp_interrupt_keeps_the_thread_reusable() {
+        let result = amp("turn_interrupt");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Interrupted]);
+        assert_eq!(terminals(&result), [TurnOutcome::Interrupted]);
+        let terminal = result
+            .adapter_events
+            .iter()
+            .find_map(|event| match event {
+                AdapterEvent::TurnTerminal { terminal } => Some(terminal.thread_disposition),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(terminal, waku_core::driver::v2::ThreadDisposition::Reusable);
+        // The provider thread survives the process.
+        let thread = &main.provider_threads[&runs(main)[0].provider_thread_id.unwrap()];
+        assert_ne!(thread.status, ProviderThreadStatus::Error);
+        assert_eq!(main.thread.active_provider_thread_id, Some(thread.id));
+    }
+
+    #[test]
+    fn amp_interrupt_mid_tool_closes_the_command() {
+        let result = amp("turn_interrupt_mid_tool");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Interrupted]);
+        let rows = items(&result, main_id(&result));
+        let command = rows
+            .iter()
+            .find(|item| matches!(item.kind, TurnItemKind::CommandExecution { .. }))
+            .expect("the running command");
+        assert_eq!(command.status, ItemStatus::Interrupted);
+    }
+
+    #[test]
+    fn amp_message_steering_is_native() {
+        let result = amp("message_steering");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed]);
+        let run = runs(main)[0];
+        let attempts = main
+            .attempts
+            .values()
+            .filter(|attempt| attempt.run_id == run.id)
+            .count();
+        assert_eq!(attempts, 1, "native steering keeps one attempt");
+        assert_eq!(terminals(&result), [TurnOutcome::Completed]);
+        assert_eq!(
+            assistant_texts(&result, main_id(&result)),
+            ["Working", "Steered: use tabs"]
+        );
+    }
+
+    #[test]
+    fn amp_resumes_with_threads_continue() {
+        let result = amp("provider_thread_resume");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Completed, RunStatus::Completed]);
+        assert_eq!(main.provider_sessions.len(), 2);
+        let all = runs(main);
+        assert_eq!(all[0].provider_thread_id, all[1].provider_thread_id);
+        let spawns = spawns("provider_thread_resume");
+        assert_eq!(spawns.len(), 3);
+        assert_eq!(
+            spawns[2].as_array().unwrap()[0..3],
+            ["threads", "continue", THREAD]
+        );
+    }
+
+    #[test]
+    fn amp_usage_limit() {
+        let result = amp("usage_limit");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Failed]);
+        let failure = runs(main)[0].failure.clone().unwrap();
+        assert_eq!(failure.class, FailureClass::UsageLimit);
+        assert_eq!(failure.reset_at, Some(1_767_240_000_000));
+    }
+
+    #[test]
+    fn amp_unexpected_exit_fails_the_turn_once() {
+        let result = amp("runtime_exit_unexpected");
+        let main = &result.projection;
+        assert_eq!(statuses(main), [RunStatus::Failed]);
+        let failure = runs(main)[0].failure.clone().unwrap();
+        assert_eq!(failure.class, FailureClass::TransportError);
+        assert_eq!(failure.code.as_deref(), Some("process_exit"));
+        assert!(matches!(
+            terminals(&result)[..],
+            [TurnOutcome::Failed { .. }]
+        ));
+    }
+
+    #[test]
+    fn amp_capabilities_match_the_snapshot() {
+        let path = fixtures().join("../capabilities_amp.json");
+        let expected: Capabilities =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(amp_capabilities(), expected);
+        assert_eq!(AmpDriver::new().capabilities(&amp_instance()), expected);
+        // Declared gaps: no approvals, no native rollback or fork, Full
+        // access only at the client boundary.
+        assert_eq!(expected.approvals, ApprovalCaps::default());
+        assert!(!expected.threads.rollback && !expected.threads.fork);
+        assert_eq!(
+            expected.runtime_policy.supported_modes,
+            [RuntimeMode::FullAccess]
+        );
+        assert_eq!(
+            expected.runtime_policy.enforcement,
+            Enforcement::ClientBoundary
+        );
     }
 }

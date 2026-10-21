@@ -7,30 +7,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
-use serde_json::Value;
 
 use super::computer_use as computer_use_runtime;
 use crate::driver::DriverEventSender;
 use crate::fs_ext;
-use crate::model::{ActivityKind, ProviderKind};
-
-/// The context-window occupancy of one API call from a Claude-wire `usage`
-/// object (Claude Code and Amp share the format): prompt (fresh + cached) plus
-/// output. Multi-call messages carry per-call `iterations`; the last one is
-/// the live context, and summed outer fields would double-count cache reads.
-pub(super) fn claude_context_tokens(usage: &Value) -> Option<u64> {
-    let call = usage
-        .get("iterations")
-        .and_then(Value::as_array)
-        .and_then(|iterations| iterations.last())
-        .unwrap_or(usage);
-    let field = |name: &str| call.get(name).and_then(Value::as_u64).unwrap_or(0);
-    let total = field("input_tokens")
-        + field("cache_read_input_tokens")
-        + field("cache_creation_input_tokens")
-        + field("output_tokens");
-    (total > 0).then_some(total)
-}
+use crate::model::ProviderKind;
 
 #[derive(Clone)]
 pub(super) enum HeadlessComputerUseConfig {
@@ -265,10 +246,6 @@ fn truncate_error(message: &str, max_chars: usize) -> String {
     truncated
 }
 
-pub(super) fn classify_tool(name: &str) -> ActivityKind {
-    ActivityKind::from_tool_name(name)
-}
-
 /// OpenCode's permission policy.
 ///
 /// `permission_responses` translates every durable "always" choice into a
@@ -399,6 +376,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::model::ActivityKind;
 
     fn computer_use_config() -> computer_use_runtime::ComputerUseConfig {
         computer_use_runtime::ComputerUseConfig {
@@ -413,18 +391,48 @@ mod tests {
 
     #[test]
     fn todo_tools_are_plans_not_file_writes() {
-        assert_eq!(classify_tool("TodoWrite"), ActivityKind::Plan);
-        assert_eq!(classify_tool("todo_write"), ActivityKind::Plan);
-        assert_eq!(classify_tool("apply_patch"), ActivityKind::FileChange);
-        assert_eq!(classify_tool("read"), ActivityKind::FileRead);
-        assert_eq!(classify_tool("ReadFile"), ActivityKind::FileRead);
-        assert_eq!(classify_tool("grep"), ActivityKind::FileSearch);
-        assert_eq!(classify_tool("glob"), ActivityKind::FileSearch);
-        assert_eq!(classify_tool("ls"), ActivityKind::FileList);
-        assert_eq!(classify_tool("websearch"), ActivityKind::Search);
-        assert_eq!(classify_tool("create_thread"), ActivityKind::Tool);
-        assert_eq!(classify_tool("read_mcp_resource"), ActivityKind::Tool);
-        assert_eq!(classify_tool("list_threads"), ActivityKind::Tool);
+        assert_eq!(
+            ActivityKind::from_tool_name("TodoWrite"),
+            ActivityKind::Plan
+        );
+        assert_eq!(
+            ActivityKind::from_tool_name("todo_write"),
+            ActivityKind::Plan
+        );
+        assert_eq!(
+            ActivityKind::from_tool_name("apply_patch"),
+            ActivityKind::FileChange
+        );
+        assert_eq!(ActivityKind::from_tool_name("read"), ActivityKind::FileRead);
+        assert_eq!(
+            ActivityKind::from_tool_name("ReadFile"),
+            ActivityKind::FileRead
+        );
+        assert_eq!(
+            ActivityKind::from_tool_name("grep"),
+            ActivityKind::FileSearch
+        );
+        assert_eq!(
+            ActivityKind::from_tool_name("glob"),
+            ActivityKind::FileSearch
+        );
+        assert_eq!(ActivityKind::from_tool_name("ls"), ActivityKind::FileList);
+        assert_eq!(
+            ActivityKind::from_tool_name("websearch"),
+            ActivityKind::Search
+        );
+        assert_eq!(
+            ActivityKind::from_tool_name("create_thread"),
+            ActivityKind::Tool
+        );
+        assert_eq!(
+            ActivityKind::from_tool_name("read_mcp_resource"),
+            ActivityKind::Tool
+        );
+        assert_eq!(
+            ActivityKind::from_tool_name("list_threads"),
+            ActivityKind::Tool
+        );
     }
 
     #[test]
