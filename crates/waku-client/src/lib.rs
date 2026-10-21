@@ -11,6 +11,8 @@ pub mod computer_use;
 pub mod driver;
 pub mod persistence;
 mod process;
+/// Client-side reducers for the v8 shell, thread and command-output streams.
+pub mod projection;
 pub mod terminal;
 /// Protocol v8 (RFC 0003); shadows the protocol crate's `v8` module and
 /// re-exports its types.
