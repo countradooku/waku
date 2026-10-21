@@ -530,8 +530,6 @@ fn handshake_error(status: StatusCode, message: &str) -> ErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use crossbeam_channel::bounded;
     use waku_client::V8Client;
 
@@ -707,6 +705,7 @@ mod tests {
     #[test]
     fn local_socket_is_private_and_serves_without_tcp() {
         use std::os::unix::fs::PermissionsExt as _;
+        use std::path::PathBuf;
 
         // Short, so the path fits in `sun_path` on every runner.
         let root =
