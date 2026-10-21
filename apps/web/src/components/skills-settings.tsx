@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query'
-import type { Project, ProviderKind, SkillEntry, SkillSource } from '@waku/client'
+import type * as T from '@waku/client/v8'
 import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Virtuoso } from 'react-virtuoso'
@@ -7,7 +7,7 @@ import remarkGfm from 'remark-gfm'
 import { toast } from 'sonner'
 import { ControlMenu } from '@/components/control-menu'
 import { Button } from '@/components/ui/button'
-import { ProviderIcon, providerMeta, WakuIcon } from '@/components/waku-icon'
+import { ProviderIcon, providerMeta, WakuIcon, type ProviderKind } from '@/components/waku-icon'
 import { useSkills } from '@/hooks/use-daemon-data'
 import { useCopyFeedback } from '@/hooks/use-copy-feedback'
 import { daemonKeys, setSkillsEnabled, trashSkills } from '@/lib/daemon-api'
@@ -18,15 +18,19 @@ import { cn } from '@/lib/utils'
 
 type SkillSourceFilter = 'all' | 'shared' | ProviderKind
 
+type SkillEntry = T.Skill
+/** `shared`, or the provider id whose folder holds the install. */
+type SkillSource = string
+
 type SkillListRow =
   | { type: 'section'; key: string; label: string; count: number }
   | { type: 'skill'; key: string; skill: SkillEntry }
 
-export function SkillsSettings({ projects }: { projects: Project[] }) {
+export function SkillsSettings({ projects }: { projects: T.Project[] }) {
   const { locale, t } = useI18n()
-  const { client, config } = useDaemon()
+  const { connection, config } = useDaemon()
   const queryClient = useQueryClient()
-  const skills = useSkills(projects)
+  const skills = useSkills(projects.map((project) => project.id))
   const [query, setQuery] = useState('')
   const [source, setSource] = useState<SkillSourceFilter>('all')
   const [selectedKey, setSelectedKey] = useState<number | null>(null)
@@ -170,16 +174,16 @@ export function SkillsSettings({ projects }: { projects: Project[] }) {
             key={selected.rowKey}
             locale={locale}
             skill={selected}
-            onDelete={() => client
+            onDelete={() => connection
               ? mutate(
-                  () => trashSkills(client, selected.installs.map((install) => install.dir)),
+                  () => trashSkills(connection, selected.installs.map((install) => install.dir)),
                   'skills.delete_failed',
                   t('skills.deleted_toast', { name: selected.name }),
                 )
               : Promise.resolve()}
-            onToggle={(enabled) => client
+            onToggle={(enabled) => connection
               ? mutate(
-                  () => setSkillsEnabled(client, selected.installs.map((install) => install.dir), enabled),
+                  () => setSkillsEnabled(connection, selected.installs.map((install) => install.dir), enabled),
                   'skills.toggle_failed',
                 )
               : Promise.resolve()}
@@ -311,7 +315,7 @@ function SkillInfoRow({ label, children }: { label: string; children: React.Reac
 function SkillGlyph({ skill, enabled, large = false }: { skill: SkillEntry; enabled: boolean; large?: boolean }) {
   const source = skill.installs.length === 1 ? skill.installs[0]?.source : 'shared'
   const className = cn(large ? 'size-[18px]' : 'size-[13px]', !enabled && 'opacity-45')
-  if (source && source !== 'shared') return <ProviderIcon className={className} provider={source.provider} />
+  if (source && source !== 'shared') return <ProviderIcon className={className} provider={source} />
   return <WakuIcon className={cn(className, 'text-[var(--text-secondary)]')} name="package" />
 }
 
@@ -365,7 +369,7 @@ function availableSkillSources(skills: SkillEntry[], t: Translator) {
     for (const install of skill.installs) seen.add(skillSourceKey(install.source))
     for (const key of seen) counts.set(key, (counts.get(key) ?? 0) + 1)
   }
-  const ids: Array<Exclude<SkillSourceFilter, 'all'>> = ['shared', 'claude', 'codex', 'cursor', 'fx', 'openCode', 'pi', 'ohMyPi', 'amp', 'deepSeek', 'grok']
+  const ids: Array<Exclude<SkillSourceFilter, 'all'>> = ['shared', 'claude', 'codex', 'cursor', 'fx', 'opencode', 'pi', 'ohmypi', 'amp', 'deepseek', 'grok', 'kimi']
   return [
     { id: 'all' as const, label: t('skills.filter_all'), count: skills.length },
     ...ids.filter((id) => counts.has(id)).map((id) => ({ id, label: skillSourceFilterLabel(id, t), count: counts.get(id)! })),
@@ -373,11 +377,11 @@ function availableSkillSources(skills: SkillEntry[], t: Translator) {
 }
 
 function skillSourceKey(source: SkillSource): Exclude<SkillSourceFilter, 'all'> {
-  return source === 'shared' ? 'shared' : source.provider
+  return source
 }
 
 function skillSourceLabel(source: SkillSource, t: Translator) {
-  return source === 'shared' ? t('skills.source_shared') : providerMeta(source.provider).shortName
+  return source === 'shared' ? t('skills.source_shared') : providerMeta(source).shortName
 }
 
 function skillSourceFilterLabel(source: Exclude<SkillSourceFilter, 'all'>, t: Translator) {
@@ -398,12 +402,13 @@ function formatBytes(value: number, locale: AppLocale) {
 }
 
 function formatRelativeTime(timestamp: number, locale: AppLocale, t: Translator) {
-  const seconds = Math.max(0, Math.floor(Date.now() / 1_000) - timestamp)
+  // `modifiedAt` is epoch milliseconds.
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1_000))
   if (seconds < 60) return t('skills.updated_just_now')
   if (seconds < 3_600) return t('skills.updated_minutes', { count: Math.floor(seconds / 60) })
   if (seconds < 86_400) return t('skills.updated_hours', { count: Math.floor(seconds / 3_600) })
   if (seconds < 2_592_000) return t('skills.updated_days', { count: Math.floor(seconds / 86_400) })
-  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium' }).format(new Date(timestamp * 1_000))
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium' }).format(new Date(timestamp))
 }
 
 function errorMessage(error: unknown) {

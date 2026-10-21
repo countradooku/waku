@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { ProviderAgentPreset } from '@waku/client'
+import type { AgentPreset } from '@waku/client/v8'
 import {
   agentPresetDescription,
   agentPresetIdLabel,
@@ -11,12 +11,12 @@ const english = (key: string) => translate('en', key)
 
 describe('DeepSeek agent preset presentation', () => {
   test('localizes shipped presets instead of displaying the daemon host language', () => {
-    const preset: ProviderAgentPreset = {
+    const preset: AgentPreset = {
       id: 'standard',
       name: '标准模式',
       description: '主机本地化的描述',
-      is_default: true,
-      is_custom: false,
+      isDefault: true,
+      isCustom: false,
     }
 
     expect(agentPresetLabel(preset, english)).toBe('Standard mode')
@@ -25,12 +25,12 @@ describe('DeepSeek agent preset presentation', () => {
   })
 
   test('preserves user-authored preset metadata', () => {
-    const preset: ProviderAgentPreset = {
+    const preset: AgentPreset = {
       id: 'my-agent',
       name: 'My agent',
       description: 'My description',
-      is_default: false,
-      is_custom: true,
+      isDefault: false,
+      isCustom: true,
     }
 
     expect(agentPresetLabel(preset, english)).toBe('My agent')

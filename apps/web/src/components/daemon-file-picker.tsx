@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import type { WorkingTreeEntry } from '@waku/client'
+import type * as T from '@waku/client/v8'
 import { useEffect, useRef, useState, type KeyboardEvent, type RefObject } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { Button } from '@/components/ui/button'
@@ -23,10 +23,10 @@ export function DaemonFilePicker({
   selectionMode?: 'attachment' | 'file' | 'directory'
   returnFocus?: RefObject<HTMLElement | null>
   onClose: () => void
-  onSelect: (absolutePath: string) => Promise<boolean>
+  onSelect: (path: string) => Promise<boolean>
 }) {
   const { t } = useI18n()
-  const { client, config, phase } = useDaemon()
+  const { connection, config, phase } = useDaemon()
   const list = useRef<VirtuosoHandle>(null)
   const [history, setHistory] = useState(() => [root])
   const [historyIndex, setHistoryIndex] = useState(0)
@@ -38,26 +38,26 @@ export function DaemonFilePicker({
   const directory = useQuery({
     queryKey: daemonKeys.directory(config?.address ?? 'disconnected', currentPath),
     queryFn: () => {
-      if (!client) throw new Error(t('file_picker.daemon_disconnected'))
-      return browseDaemonDirectory(client, currentPath)
+      if (!connection) throw new Error(t('file_picker.daemon_disconnected'))
+      return browseDaemonDirectory(connection, currentPath)
     },
-    enabled: phase === 'connected' && Boolean(client && config),
+    enabled: phase === 'connected' && Boolean(connection && config),
   })
   const entries = directory.data?.entries ?? []
   const query = filter.trim().toLocaleLowerCase()
   const visibleEntries = query
     ? entries.filter((entry) => entry.name.toLocaleLowerCase().includes(query))
     : entries
-  const selectedEntry = visibleEntries.find((entry) => entry.absolutePath === selectedPath)
+  const selectedEntry = visibleEntries.find((entry) => entry.path === selectedPath)
   const resolvedPath = directory.data?.path ?? currentPath ?? ''
   const selectedTarget = selectionMode === 'directory'
     ? selectedEntry?.isDir
-      ? selectedEntry.absolutePath
+      ? selectedEntry.path
       : selectedPath && samePath(selectedPath, resolvedPath)
         ? resolvedPath
         : null
     : selectedEntry && (selectionMode === 'attachment' || !selectedEntry.isDir)
-        ? selectedEntry.absolutePath
+        ? selectedEntry.path
         : null
 
   useEffect(() => {
@@ -75,7 +75,7 @@ export function DaemonFilePicker({
     if (
       selectedPath
       && !(selectionMode === 'directory' && samePath(selectedPath, resolvedPath))
-      && !visibleEntries.some((entry) => entry.absolutePath === selectedPath)
+      && !visibleEntries.some((entry) => entry.path === selectedPath)
     ) {
       setSelectedPath(null)
     }
@@ -97,8 +97,8 @@ export function DaemonFilePicker({
     setHistoryIndex(historyIndex + 1)
   }
 
-  function openFolder(entry: WorkingTreeEntry) {
-    if (entry.isDir) visit(entry.absolutePath)
+  function openFolder(entry: T.DirectoryEntry) {
+    if (entry.isDir) visit(entry.path)
   }
 
   async function select(target = selectedTarget) {
@@ -114,7 +114,7 @@ export function DaemonFilePicker({
   function activate(entry = selectedEntry) {
     if (!entry) return
     if (entry.isDir) openFolder(entry)
-    else if (selectionMode !== 'directory') void select(entry.absolutePath)
+    else if (selectionMode !== 'directory') void select(entry.path)
   }
 
   function moveSelection(delta: number) {
@@ -122,14 +122,14 @@ export function DaemonFilePicker({
       ? visibleEntries.filter((entry) => entry.isDir)
       : visibleEntries
     if (!selectableEntries.length) return
-    const current = selectableEntries.findIndex((entry) => entry.absolutePath === selectedPath)
+    const current = selectableEntries.findIndex((entry) => entry.path === selectedPath)
     const next = current === -1
       ? delta < 0 ? selectableEntries.length - 1 : 0
       : Math.max(0, Math.min(selectableEntries.length - 1, current + delta))
     const entry = selectableEntries[next]!
-    setSelectedPath(entry.absolutePath)
+    setSelectedPath(entry.path)
     list.current?.scrollIntoView({
-      index: visibleEntries.findIndex((item) => item.absolutePath === entry.absolutePath),
+      index: visibleEntries.findIndex((item) => item.path === entry.path),
       behavior: 'auto',
     })
   }
@@ -164,7 +164,7 @@ export function DaemonFilePicker({
 
   const dialogTitle = t(selectionMode === 'directory' ? 'file_picker.open_project' : 'file_picker.attach')
   const home = directory.data?.home
-  const filesystemRoot = directory.data?.filesystem_root
+  const filesystemRoot = directory.data?.filesystemRoot
   const showWorkspace = Boolean(root && workspaceLabel)
   const showHome = Boolean(home && (!root || !samePath(home, root)))
   const showFilesystem = Boolean(
@@ -288,13 +288,13 @@ export function DaemonFilePicker({
                 <Virtuoso
                   aria-label={t(selectionMode === 'directory' ? 'file_picker.folders' : 'file_picker.files')}
                   className="size-full py-1.5 outline-none"
-                  computeItemKey={(_, entry) => entry.absolutePath}
+                  computeItemKey={(_, entry) => entry.path}
                   data={visibleEntries}
                   fixedItemHeight={36}
                   increaseViewportBy={180}
                   itemContent={(_, entry) => {
                     const selectable = selectionMode !== 'directory' || entry.isDir
-                    const selected = selectable && selectedPath === entry.absolutePath
+                    const selected = selectable && selectedPath === entry.path
                     return (
                       <div className="flex h-9 items-center px-2">
                         <button
@@ -311,7 +311,7 @@ export function DaemonFilePicker({
                           tabIndex={selectable ? 0 : -1}
                           type="button"
                           onClick={() => {
-                            if (selectable) setSelectedPath(entry.absolutePath)
+                            if (selectable) setSelectedPath(entry.path)
                           }}
                           onDoubleClick={() => activate(entry)}
                           onKeyDown={(event) => {
@@ -335,7 +335,7 @@ export function DaemonFilePicker({
                                 'size-[15px] opacity-75',
                                 !selectable && 'opacity-35 grayscale',
                               )}
-                              path={entry.absolutePath}
+                              path={entry.path}
                             />
                           )}
                           <span className="min-w-0 flex-1 truncate">{entry.name}</span>

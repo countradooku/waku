@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'bun:test'
-import type { AgentSession, Project } from '@waku/client'
 import {
   dateGroup,
   formatTimeAgo,
@@ -10,6 +9,7 @@ import {
   sessionTimeLabel,
   sidebarRows,
 } from './sidebar-presentation'
+import { project, taskSummary } from './test-fixtures'
 
 describe('desktop sidebar presentation', () => {
   test('uses a Monday-based current week instead of a rolling seven days', () => {
@@ -39,65 +39,35 @@ describe('desktop sidebar presentation', () => {
     expect(formatWorkingElapsed(65)).toBe('1m 5s')
     expect(formatWorkingElapsed(3_720)).toBe('1h 2m')
 
-    const live = session({
-      status: 'working',
-      turns: [{
-        id: 'turn',
-        turn_count: 1,
-        status: 'running',
-        provider_turn_started: true,
-        started_at: 100,
-        completed_at: null,
-        checkpoint: null,
-      }],
-    })
+    const live = taskSummary({ lastReplyAt: 100_000 }, { activity: 'working' })
     expect(sessionTimeLabel(live, 165)).toBe('Working for 1m 5s')
     expect(nextSidebarUpdateDelay([live], 165)).toBe(1)
+    const settled = taskSummary({ lastReplyAt: 100_000 })
+    expect(sessionTimeLabel(settled, 220)).toBe('2m')
   })
 
-  test('does not invent a reply time and keeps cursor-only resumed tasks', () => {
-    const resumed = session({ provider_cursor: { provider: 'codex', value: {} } as never })
-    expect(sessionHasStarted(resumed)).toBe(true)
-    expect(sessionTimeLabel(resumed, 1_000)).toBeNull()
+  test('lists threads with a reply or their own title, without inventing a reply time', () => {
+    const placeholder = taskSummary()
+    expect(sessionHasStarted(placeholder)).toBe(false)
+    const imported = taskSummary({ title: 'Imported', titleSource: 'user' })
+    expect(sessionHasStarted(imported)).toBe(true)
+    expect(sessionTimeLabel(imported, 1_000)).toBeNull()
+    expect(sessionHasStarted(taskSummary({}, { queuedRunCount: 1 }))).toBe(true)
   })
 
   test('presents the projectless sentinel with the localized desktop name', () => {
-    const project: Project = {
-      id: 'project',
-      name: 'No project',
-      path: '/home/me/.waku/projects/session',
-      created_at: 1,
-    }
     const groups = groupSessions(
-      [project],
-      [session({ messages: [{ id: 'message' } as never] })],
+      [project('project', 'No project', '/home/me/.waku/projects')],
+      [taskSummary({ lastReplyAt: new Date(2026, 7, 15, 11).getTime() })],
       new Date(2026, 7, 15, 12),
       'Unknown project',
       'プロジェクトなし',
     )
+    expect(groups[0]?.id).toBe('today')
     expect(groups[0]?.sessions[0]?.projectName).toBe('プロジェクトなし')
   })
 })
 
 function atLocalNoon(year: number, month: number, day: number): number {
   return Math.floor(new Date(year, month, day, 12).getTime() / 1_000)
-}
-
-function session(patch: Partial<AgentSession>): AgentSession {
-  return {
-    id: 'session',
-    title: 'New Task',
-    project_id: 'project',
-    provider: 'codex',
-    model: null,
-    runtime_mode: 'ask',
-    status: 'idle',
-    created_at: 10,
-    updated_at: 10,
-    provider_cursor: null,
-    messages: [],
-    transcript_blocks: [],
-    turns: [],
-    ...patch,
-  }
 }

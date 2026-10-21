@@ -1,4 +1,4 @@
-import type { AgentSession } from '@waku/client'
+import type { Project } from '@waku/client/v8'
 import { ContextMenu } from '@base-ui/react/context-menu'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Virtuoso } from 'react-virtuoso'
@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PanelResizeHandle } from '@/components/panel-resize-handle'
 import { WakuIcon } from '@/components/waku-icon'
-import { displayTitle, type TaskState } from '@/lib/daemon-api'
+import { displayTitle, type TaskStatus, type TaskSummary } from '@/lib/thread-model'
 import { useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
 import {
@@ -21,7 +21,8 @@ import { cn } from '@/lib/utils'
 import wakuAppIconUrl from '../../../../website/public/app-icon.png'
 
 interface SidebarProps {
-  taskState: TaskState
+  projects: Project[]
+  tasks: TaskSummary[]
   selectedSessionId?: string
   mobileOpen: boolean
   width: number
@@ -33,6 +34,7 @@ interface SidebarProps {
   onSelectSession: (sessionId: string) => void
   onRenameSession: (sessionId: string, title: string) => Promise<void>
   onRemoveSession: (sessionId: string) => Promise<void>
+  onArchiveSession: (sessionId: string) => Promise<void>
   onSearch: () => void
   onSettings: () => void
 }
@@ -49,7 +51,8 @@ const GROUP_TRANSLATION_KEYS: Record<DateGroup, string> = {
 type Translator = (key: string, params?: Record<string, string | number>) => string
 
 export function Sidebar({
-  taskState,
+  projects,
+  tasks,
   selectedSessionId,
   mobileOpen,
   width,
@@ -61,6 +64,7 @@ export function Sidebar({
   onSelectSession,
   onRenameSession,
   onRemoveSession,
+  onArchiveSession,
   onSearch,
   onSettings,
 }: SidebarProps) {
@@ -69,8 +73,8 @@ export function Sidebar({
   const [liveWidth, setLiveWidth] = useState(width)
   const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1_000))
   const groups = groupSessions(
-    taskState.projects,
-    taskState.sessions,
+    projects,
+    tasks,
     new Date(nowSeconds * 1_000),
     t('sidebar.unknown_project'),
     t('project.no_project_name'),
@@ -79,13 +83,13 @@ export function Sidebar({
 
   useEffect(() => setLiveWidth(width), [width])
   useEffect(() => {
-    const delay = nextSidebarUpdateDelay(taskState.sessions, nowSeconds)
+    const delay = nextSidebarUpdateDelay(tasks, nowSeconds)
     const timer = window.setTimeout(
       () => setNowSeconds(Math.floor(Date.now() / 1_000)),
       delay * 1_000,
     )
     return () => window.clearTimeout(timer)
-  }, [nowSeconds, taskState.sessions])
+  }, [nowSeconds, tasks])
 
   return (
     <>
@@ -213,6 +217,7 @@ export function Sidebar({
                     nowSeconds={nowSeconds}
                     selected={selectedSessionId === row.item.session.id}
                     t={t}
+                    onArchive={onArchiveSession}
                     onRemove={onRemoveSession}
                     onRename={onRenameSession}
                     onSelect={(sessionId) => {
@@ -282,6 +287,7 @@ function SessionRow({
   selected,
   onSelect,
   onRename,
+  onArchive,
   onRemove,
   t,
 }: {
@@ -290,6 +296,7 @@ function SessionRow({
   selected: boolean
   onSelect: (sessionId: string) => void
   onRename: (sessionId: string, title: string) => Promise<void>
+  onArchive: (sessionId: string) => Promise<void>
   onRemove: (sessionId: string) => Promise<void>
   t: Translator
 }) {
@@ -411,6 +418,16 @@ function SessionRow({
             >
               <WakuIcon className="size-3" name="pencil" /> {t('common.rename')}
             </ContextMenu.Item>
+            <ContextMenu.Item
+              className="waku-menu-item"
+              onClick={() => {
+                restoreMenuFocus.current = false
+                setMenuOpen(false)
+                void onArchive(item.session.id).catch(() => {})
+              }}
+            >
+              <WakuIcon className="size-3" name="folder" /> {t('common.archive')}
+            </ContextMenu.Item>
             <ContextMenu.Separator className="waku-menu-separator" />
             <ContextMenu.Item
               className="waku-menu-item text-destructive data-[highlighted]:bg-[var(--danger-soft)]"
@@ -447,12 +464,12 @@ function SessionMetadata({ item, nowSeconds, t }: { item: SessionItem; nowSecond
   )
 }
 
-function SessionStatus({ status, t }: { status: AgentSession['status']; t: Translator }) {
+function SessionStatus({ status, t }: { status: TaskStatus; t: Translator }) {
   if (status === 'idle') return null
-  if (status === 'working' || status === 'connecting') {
+  if (status === 'working' || status === 'preparing') {
     return <WakuIcon label={t('sidebar.status_working')} className="size-3 text-[var(--success)] motion-safe:animate-spin" name="loaderCircle" />
   }
-  if (status === 'background') {
+  if (status === 'finalizing') {
     return <WakuIcon label={t('sidebar.status_background')} className="size-3 text-[var(--text-secondary)]" name="hourglass" />
   }
   if (status === 'waiting') {
@@ -470,6 +487,7 @@ function ConnectionDot() {
       className={cn(
         'block size-1.5 rounded-full bg-[var(--text-ghost)]',
         phase === 'connected' && 'bg-[var(--success)]',
+        phase === 'reconnecting' && 'bg-[var(--warning)]',
         phase === 'error' && 'bg-destructive',
       )}
       role="img"

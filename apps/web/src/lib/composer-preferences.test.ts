@@ -2,21 +2,22 @@ import { describe, expect, test } from 'bun:test'
 import {
   readComposerPreferences,
   rememberedModelTraits,
-  rememberComposerSession,
+  rememberedSelection,
+  rememberComposerSelection,
   writeComposerPreferences,
 } from './composer-preferences'
 
 describe('composer preferences', () => {
   test('remembers the last model per daemon and its traits', () => {
     const storage = memoryStorage()
-    const remembered = rememberComposerSession(
+    const remembered = rememberComposerSelection(
       readComposerPreferences(storage, 'ws://first'),
       {
-        provider: 'codex',
+        instance: 'codex',
         model: 'gpt-5.6-sol',
-        reasoning_effort: 'high',
-        service_tier: 'fast',
-        context_window: '1m',
+        reasoningEffort: 'high',
+        serviceTier: 'fast',
+        contextWindow: '1m',
       },
     )
     writeComposerPreferences(storage, 'ws://first', remembered)
@@ -36,65 +37,30 @@ describe('composer preferences', () => {
     expect(readComposerPreferences(storage, 'ws://second').lastModel).toBeNull()
   })
 
-  test('does not erase an explicit model when a blank draft is selected', () => {
-    const preferences = rememberComposerSession(
+  test('does not erase an explicit model when a blank selection is chosen', () => {
+    const preferences = rememberComposerSelection(
       readComposerPreferences(null, 'ws://first'),
-      {
-        provider: 'claude',
-        model: 'claude-opus-4-1',
-        reasoning_effort: null,
-        service_tier: null,
-      },
+      { instance: 'claude', model: 'claude-opus-4-1' },
     )
-    expect(rememberComposerSession(preferences, {
-      provider: 'codex',
-      model: null,
-      reasoning_effort: null,
-      service_tier: null,
-    })).toBe(preferences)
+    expect(rememberComposerSelection(preferences, { instance: 'codex' })).toBe(preferences)
   })
 
-  test('restores Fx as a valid remembered provider', () => {
-    const storage = memoryStorage()
-    const preferences = rememberComposerSession(
-      readComposerPreferences(storage, 'ws://first'),
-      {
-        provider: 'fx',
-        model: 'openai/gpt-5.6-sol',
-        reasoning_effort: null,
-        service_tier: null,
-      },
+  test('a new task starts from the remembered selection', () => {
+    const preferences = rememberComposerSelection(
+      readComposerPreferences(null, 'ws://first'),
+      { instance: 'fx', model: 'openai/gpt-5.6-sol', reasoningEffort: 'low' },
     )
-    writeComposerPreferences(storage, 'ws://first', preferences)
-
-    expect(readComposerPreferences(storage, 'ws://first').lastProvider).toBe('fx')
-  })
-
-  test('carries preferences saved for the OpenCode 2 beta over to OpenCode', () => {
-    const storage = memoryStorage()
-    storage.setItem('waku.composer-preferences.v1', JSON.stringify({
-      'ws://first': {
-        lastProvider: 'openCode2',
-        lastModel: 'opencode-go/deepseek-v4-flash',
-        lastReasoningEffort: 'high',
-        lastServiceTier: null,
-        modelTraits: {
-          'openCode2\u0000opencode-go/deepseek-v4-flash': {
-            reasoningEffort: 'high',
-            serviceTier: null,
-          },
-        },
-      },
-    }))
-
-    const preferences = readComposerPreferences(storage, 'ws://first')
-    expect(preferences.lastProvider).toBe('openCode')
-    expect(preferences.lastModel).toBe('opencode-go/deepseek-v4-flash')
-    expect(rememberedModelTraits(preferences, 'openCode', 'opencode-go/deepseek-v4-flash')).toEqual({
-      reasoningEffort: 'high',
-      serviceTier: null,
-      contextWindow: null,
+    expect(rememberedSelection(preferences)).toEqual({
+      instance: 'fx',
+      model: 'openai/gpt-5.6-sol',
+      reasoningEffort: 'low',
     })
+  })
+
+  test('starts over from malformed storage', () => {
+    const storage = memoryStorage()
+    storage.setItem('waku.composer-preferences.v2', '{bad json')
+    expect(readComposerPreferences(storage, 'ws://first').lastProvider).toBe('codex')
   })
 })
 
