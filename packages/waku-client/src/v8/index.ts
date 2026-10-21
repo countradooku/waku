@@ -9,6 +9,7 @@ export {
   V8Client,
   type Encoding,
   type SocketFactory,
+  type UploadOptions,
   type StreamHandlers,
   type SubscribeOptions,
   type V8ConnectOptions,
