@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context as _, anyhow, bail};
+#[cfg(target_os = "macos")]
 use serde::Deserialize;
 use serde_json::Value;
 #[cfg(target_os = "macos")]
