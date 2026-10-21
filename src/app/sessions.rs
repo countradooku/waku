@@ -1334,44 +1334,17 @@ impl Waku {
             return;
         }
 
-        // The scratch directory is a workspace operation; the project itself
-        // is the daemon's (`project.create`).
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
-        cx.spawn(async move |waku, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    match workspace.request(
-                        waku_client::WorkspaceOperation::CreateProjectlessWorkspace {
-                            prompt: None,
-                        },
-                    )? {
-                        waku_client::WorkspaceResult::ProjectlessWorkspace { cwd } => Ok(cwd),
-                        _ => anyhow::bail!("the daemon returned an invalid projectless response"),
-                    }
-                })
-                .await;
-            let _ = waku.update(cx, |waku, cx| match result {
-                Ok(cwd) => {
-                    let project_id = Uuid::new_v4();
-                    waku.dispatch(
-                        commands::create_project(
-                            project_id,
-                            cwd,
-                            Project::PROJECTLESS_NAME.to_owned(),
-                        ),
-                        ThreadAction::Other,
-                    );
-                    waku.state.selected_project = Some(project_id);
-                    waku.create_session_for(project_id, waku.state.last_provider, cx);
-                }
-                Err(error) => {
-                    waku.show_toast(tr!("errors.create_projectless_task", error = error));
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        // Every projectless task gets a folder of its own: the daemon makes
+        // it under the projectless root and records the project
+        // (`project.create_scratch`). The project row arrives with the
+        // shell, like `add_project_at`'s.
+        let project_id = Uuid::new_v4();
+        self.dispatch(
+            commands::create_scratch_project(project_id, None),
+            ThreadAction::Other,
+        );
+        self.state.selected_project = Some(project_id);
+        self.create_session_for(project_id, self.state.last_provider, cx);
     }
 }
 

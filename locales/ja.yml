@@ -850,6 +850,7 @@ background.no_work: バックグラウンドの作業はありません
 background.no_work_description: 長時間実行されるコマンドとサブエージェントがここに表示されます。
 background.view: 表示
 background.stop: 停止
+background.refresh: バックグラウンド作業を更新
 background.stop_named: "%{name} を停止"
 background.stop_all: すべて停止
 background.stop_not_running: プロセスはすでに停止しています。

@@ -1653,6 +1653,8 @@ background.view:
   en: View
 background.stop:
   en: Stop
+background.refresh:
+  en: Refresh Background Work
 background.stop_named:
   en: Stop %{name}
 background.stop_all:

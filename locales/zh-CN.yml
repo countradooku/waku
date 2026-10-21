@@ -809,6 +809,7 @@ background.no_work: 暂无后台工作
 background.no_work_description: 长时间运行的命令和子智能体显示在这里。
 background.view: 查看
 background.stop: 停止
+background.refresh: 刷新后台任务
 background.stop_named: 停止 %{name}
 background.stop_all: 全部停止
 background.stop_not_running: 该进程已不再运行。

@@ -329,14 +329,17 @@ impl Waku {
                     }
                 }
             }
-            // Slash commands and `@` mentions follow the provider and the
-            // workspace, which a thread update rarely moves.
+            // Slash commands and `@` mentions follow the provider, the
+            // workspace and the commands the live session reported, which a
+            // thread update rarely moves.
             let sources_moved =
                 previous
                     .as_ref()
                     .zip(current.as_ref())
                     .is_some_and(|(old, new)| {
-                        old.provider != new.provider || old.workspace != new.workspace
+                        old.provider != new.provider
+                            || old.workspace != new.workspace
+                            || old.available_commands != new.available_commands
                     });
             if sources_moved {
                 self.refresh_composer_sources(cx);

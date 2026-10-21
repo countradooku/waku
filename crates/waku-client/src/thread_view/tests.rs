@@ -548,6 +548,173 @@ fn rewinding_a_run_rolls_back_to_the_previous_runs_checkpoint() {
     assert_eq!(view.rewind_point(4), Some(point(3, true)));
 }
 
+fn checkpoint(
+    n: u128,
+    run_id: &str,
+    ordinal_within_scope: u32,
+    app_run_ordinal: u32,
+) -> Checkpoint {
+    serde_json::from_value(json!({
+        "id": id(n),
+        "threadId": THREAD,
+        "scopeId": SCOPE,
+        "runId": run_id,
+        "nodeId": id(701),
+        "ordinalWithinScope": ordinal_within_scope,
+        "appRunOrdinal": app_run_ordinal,
+        "gitRef": format!("refs/waku/t/{THREAD}/{SCOPE}/{ordinal_within_scope}"),
+        "status": "ready",
+        "capturedAt": 1_700_000_003_000_i64,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn the_first_message_rewinds_to_its_turn_start_checkpoint() {
+    let mut first = run(RUN_1, Some(1), "completed", 101);
+    first.checkpoint_id = Some(CheckpointId(id(902).parse().unwrap()));
+    let mut state = state(vec![prompt(1, RUN_1, 101, "first")], vec![first]);
+    state.checkpoint_scopes.insert(
+        CheckpointScopeId(SCOPE.parse().unwrap()),
+        serde_json::from_value(json!({
+            "id": SCOPE, "threadId": THREAD, "runId": RUN_1, "nodeId": id(701),
+            "kind": "root_run", "ordinalWithinParent": 1, "advancesAppRunCount": true,
+            "cwd": "/work/tree", "createdAt": 1_700_000_001_000_i64,
+        }))
+        .unwrap(),
+    );
+    for checkpoint in [checkpoint(901, RUN_1, 0, 0), checkpoint(902, RUN_1, 1, 1)] {
+        state.checkpoints.insert(checkpoint.id, checkpoint);
+    }
+    let view = build(&state);
+    let point = view.rewind_point(1).expect("the first message rewinds");
+    assert_eq!(point.checkpoint_id.0, id(901).parse::<Uuid>().unwrap());
+    assert_eq!(point.scope_id.0, SCOPE.parse::<Uuid>().unwrap());
+    // The run's own checkpoint is what a later run would fall back to.
+    assert_eq!(view.run_checkpoints.len(), 1);
+    assert_eq!(
+        view.run_checkpoints[0].checkpoint_id.0,
+        id(902).parse::<Uuid>().unwrap()
+    );
+}
+
+fn session(status: &str, instance: &str, updated_at: i64, commands: Value) -> ProviderSession {
+    serde_json::from_value(json!({
+        "id": Uuid::new_v4(),
+        "driver": instance,
+        "providerInstanceId": instance,
+        "status": status,
+        "cwd": "/work/tree",
+        "createdAt": 1_700_000_000_000_i64,
+        "updatedAt": updated_at,
+        "availableCommands": commands,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn open_sessions_of_the_threads_provider_report_slash_commands() {
+    let mut state = state(Vec::new(), Vec::new());
+    for session in [
+        session(
+            "ready",
+            "claude",
+            2,
+            json!([{"name": "review", "description": "Review"}, {"name": "compact"}]),
+        ),
+        session(
+            "ready",
+            "claude",
+            1,
+            json!([{"name": "review"}, {"name": "cost"}]),
+        ),
+        session("stopped", "claude", 3, json!([{"name": "gone"}])),
+        session("ready", "codex", 4, json!([{"name": "other"}])),
+    ] {
+        state.provider_sessions.insert(session.id, session);
+    }
+    let view = build(&state);
+    let names = view
+        .available_commands
+        .iter()
+        .map(|command| (command.name.as_str(), command.description.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [("review", "Review"), ("compact", ""), ("cost", "")],
+        "newest session first, one per name, closed and other sessions left out"
+    );
+}
+
+#[test]
+fn background_processes_stop_through_their_provider_thread_and_show_their_output() {
+    let provider_thread = id(801);
+    let command_item = id(802);
+    let mut thread = thread();
+    thread.active_provider_thread_id = Some(ProviderThreadId(provider_thread.parse().unwrap()));
+    let mut state = state(Vec::new(), Vec::new());
+    state.thread = Some(thread);
+    let row: ProviderThread = serde_json::from_value(json!({
+        "id": provider_thread,
+        "driver": "codex",
+        "providerInstanceId": "claude",
+        "status": "idle",
+        "createdAt": 1,
+        "updatedAt": 1,
+        "pendingBackgroundTasks": [
+            {"kind": "command", "taskId": "proc-7", "description": "npm run dev",
+             "itemId": command_item},
+            {"kind": "monitor", "taskId": "watch-1"},
+        ],
+    }))
+    .unwrap();
+    state.provider_threads.insert(row.id, row);
+    let mut outputs = HashMap::new();
+    outputs.insert(
+        TurnItemId(command_item.parse().unwrap()),
+        CommandOutputState {
+            text: "listening on 3000\n".into(),
+            truncated: false,
+            running: true,
+            exit_code: None,
+        },
+    );
+    let view = ViewCache::default()
+        .build(
+            &state,
+            &ViewExtras {
+                outputs: Some(&outputs),
+                ..ViewExtras::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(view.background_work.len(), 2);
+    let process = &view.background_work[0];
+    assert_eq!(process.key.kind, model::BackgroundWorkKind::Process);
+    assert!(process.can_stop);
+    assert_eq!(process.output.as_deref(), Some("listening on 3000\n"));
+    assert_eq!(
+        process.origin_activity_id.as_deref(),
+        Some(command_item.as_str())
+    );
+    let control = process.control_id.as_deref().unwrap();
+    assert_eq!(
+        background_control(process.key.kind, control),
+        Some(BackgroundControl::Process {
+            provider_thread_id: ProviderThreadId(provider_thread.parse().unwrap()),
+            task_id: "proc-7".into(),
+        })
+    );
+    let monitor = &view.background_work[1];
+    assert_eq!(monitor.key.kind, model::BackgroundWorkKind::Monitor);
+    assert_eq!(monitor.status, model::BackgroundWorkStatus::Monitoring);
+    assert_eq!(
+        background_control(model::BackgroundWorkKind::Subagent, control),
+        None,
+        "a process control is not a subagent's"
+    );
+}
+
 #[test]
 fn streaming_text_rebuilds_only_its_own_row() {
     let answer = |text: &str, rev: u32| {
