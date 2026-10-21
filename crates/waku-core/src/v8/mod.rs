@@ -12,6 +12,7 @@
 //! searches, the `shell`, `thread` and `commandOutput` streams) is served
 //! from the daemon's orchestrator ([`orchestration`], #54–#57, #55).
 
+mod catalog;
 mod connection;
 mod methods;
 pub mod orchestration;
@@ -51,6 +52,10 @@ pub(crate) struct V8Context {
     /// The event store behind orchestration methods and streams; the daemon
     /// always attaches one (#55), test servers may not.
     pub(crate) orchestration: Option<Arc<orchestration::Orchestration>>,
+    /// The non-orchestration catalog's shared state (#53 part 2).
+    pub(crate) catalog: catalog::Catalog,
+    /// Whether `daemon.shutdown` is accepted (a desktop-owned daemon).
+    pub(crate) allow_shutdown: bool,
 }
 
 impl V8Context {
@@ -70,6 +75,8 @@ impl V8Context {
             hello_deadline: Duration::from_millis(u64::from(HELLO_DEADLINE_MS)),
             environment: environment(),
             orchestration: None,
+            catalog: catalog::Catalog::default(),
+            allow_shutdown: false,
         }
     }
 
@@ -79,6 +86,11 @@ impl V8Context {
         if let Some(id) = id {
             self.environment.id = id;
         }
+        self
+    }
+
+    pub(crate) fn with_allow_shutdown(mut self, allow_shutdown: bool) -> Self {
+        self.allow_shutdown = allow_shutdown;
         self
     }
 
@@ -146,6 +158,26 @@ impl BackendHandle {
         )
     }
 
+    /// Run `command` as `session_id`/`runtime_id`, with its events going to
+    /// `events` (the terminals of v8 clients).
+    pub(crate) fn call_as(
+        &self,
+        session_id: Uuid,
+        runtime_id: Uuid,
+        command: Command,
+        events: EventSink,
+    ) -> anyhow::Result<ResponsePayload> {
+        self.backend.handle(
+            Request {
+                request_id: Uuid::new_v4(),
+                session_id,
+                runtime_id,
+                command,
+            },
+            events,
+        )
+    }
+
     /// The daemon settings as clients see them, published to `bus`.
     pub(crate) fn load_settings(&self, bus: &SettingsBus) -> anyhow::Result<Arc<SettingsState>> {
         match self.call(Command::GetSettings)? {
@@ -155,7 +187,7 @@ impl BackendHandle {
     }
 }
 
-fn payload_name(payload: &ResponsePayload) -> String {
+pub(crate) fn payload_name(payload: &ResponsePayload) -> String {
     serde_json::to_value(payload)
         .ok()
         .and_then(|value| value.get("type")?.as_str().map(str::to_owned))
@@ -279,6 +311,7 @@ pub(crate) fn wire_settings(settings: &DaemonSettings) -> Settings {
             .iter()
             .map(|(provider, binary)| (provider_name(provider), binary.clone()))
             .collect(),
+        storage: catalog::wire_storage(&settings.storage),
     }
 }
 
@@ -326,7 +359,7 @@ where
         return;
     }
     let (reader, writer) = transport::local(stream);
-    connection::serve(reader, writer, context, || {}).await;
+    connection::serve(reader, writer, context, true, || {}).await;
 }
 
 /// Serve a v8 client on an upgraded `/v8` WebSocket. `authenticated` runs
@@ -339,7 +372,7 @@ pub(crate) async fn serve_websocket<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (reader, writer) = transport::websocket(socket);
-    connection::serve(reader, writer, context, authenticated).await;
+    connection::serve(reader, writer, context, false, authenticated).await;
 }
 
 #[cfg(all(test, unix))]

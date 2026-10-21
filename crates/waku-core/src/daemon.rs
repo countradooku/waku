@@ -66,6 +66,9 @@ pub struct WakuBackend {
     default_cwd: std::path::PathBuf,
     worktree_cleanup: Arc<WorktreeCleanup>,
     settings_listener: Mutex<Option<SettingsListener>>,
+    /// The daemon host's blob sweeper (#55); without one, v7 `SweepBlobs`
+    /// sweeps on its own.
+    blob_sweeps: Mutex<Option<crate::blob_sweep::SweepHandle>>,
 }
 
 impl WakuBackend {
@@ -107,6 +110,7 @@ impl WakuBackend {
             default_cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             worktree_cleanup,
             settings_listener: Mutex::new(None),
+            blob_sweeps: Mutex::new(None),
         })
     }
 
@@ -128,6 +132,24 @@ impl WakuBackend {
     /// The open terminals, for the orchestrator's cleanup port.
     pub fn terminal_map(&self) -> Arc<crate::orchestrator_ports::TerminalMap> {
         self.terminals.clone()
+    }
+
+    /// Sweeps go through `sweeps` from now on: stores and released
+    /// references request them, and v7 `SweepBlobs` only asks for one.
+    pub fn set_blob_sweeps(&self, sweeps: crate::blob_sweep::SweepHandle) {
+        *self.blob_sweeps.lock() = Some(sweeps);
+    }
+
+    /// The legacy store's half of a blob sweep (its sessions and the
+    /// composer drafts), for the daemon host's sweeper.
+    pub fn asset_sweep(&self) -> crate::persistence::AssetSweep {
+        self.task_store.asset_sweep()
+    }
+
+    fn request_sweep(&self, reason: crate::blob_sweep::SweepReason) {
+        if let Some(sweeps) = &*self.blob_sweeps.lock() {
+            sweeps.request(reason);
+        }
     }
 
     /// Runs `listener` after every settings change (the orchestrator host
@@ -741,14 +763,19 @@ impl Backend for WakuBackend {
                     .blobs()
                     .path_for(&reference)
                     .ok_or_else(|| anyhow!("stored blob has no daemon path"))?;
+                self.request_sweep(crate::blob_sweep::SweepReason::Stored);
                 Ok(ResponsePayload::BlobStored { reference, path })
             }
-            Command::ImportAttachment { name, upload } => Ok(ResponsePayload::AttachmentStored {
-                attachment: self.attachments.import(&name, upload)?,
-            }),
-            Command::ImportPathAttachment { path } => Ok(ResponsePayload::AttachmentStored {
-                attachment: self.attachments.import_path(&path)?,
-            }),
+            Command::ImportAttachment { name, upload } => {
+                let attachment = self.attachments.import(&name, upload)?;
+                self.request_sweep(crate::blob_sweep::SweepReason::Stored);
+                Ok(ResponsePayload::AttachmentStored { attachment })
+            }
+            Command::ImportPathAttachment { path } => {
+                let attachment = self.attachments.import_path(&path)?;
+                self.request_sweep(crate::blob_sweep::SweepReason::Stored);
+                Ok(ResponsePayload::AttachmentStored { attachment })
+            }
             Command::ReadBlob { reference } => {
                 let path = self
                     .task_store
@@ -777,7 +804,13 @@ impl Backend for WakuBackend {
                 path: self.attachments.locate_file(&reference, &path)?,
             }),
             Command::SweepBlobs => {
-                self.task_store.blob_sweep()();
+                // Under the daemon host the sweep must also keep what the
+                // orchestrator references, so it is the host's to run.
+                let sweeps = self.blob_sweeps.lock().clone();
+                match sweeps {
+                    Some(sweeps) => sweeps.request(crate::blob_sweep::SweepReason::Released),
+                    None => self.task_store.blob_sweep()(),
+                }
                 Ok(ResponsePayload::Ack)
             }
             Command::ForkSessionFromResponse { turn_count } => {

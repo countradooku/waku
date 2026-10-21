@@ -1,0 +1,1 @@
+{"type":"call","id":31,"method":"vcs.createWorktree","params":{"projectId":"9a0ec700-0000-4000-8000-000000000003","baseRef":"main","branchHint":"Fix the flaky test","threadId":"7e8ead00-0000-4000-8000-000000000004","opId":"0b1d0000-0000-4000-8000-000000000010"}}

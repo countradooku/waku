@@ -14,6 +14,8 @@ type Message = Record<string, any>;
 interface Peer {
   /** Every message the client sent, decoded. */
   received: Message[];
+  /** Every DATA frame the client sent. */
+  data: Array<{ channel: number; fin: boolean; body: Uint8Array }>;
   send(message: Message): void;
   sendData(channel: number, fin: boolean, body: Uint8Array): void;
   close(): void;
@@ -78,6 +80,13 @@ function daemon(script: Script, options: { hello?: (peer: Peer, hello: Message) 
         } else {
           socket.data.encoding ??= "msgpack";
           const frame = parseFrame(new Uint8Array(raw));
+          if (frame?.kind === "data") {
+            const peer = socket.data.peer;
+            if (!peer) return;
+            peer.data.push({ channel: frame.channel, fin: frame.fin, body: frame.body.slice() });
+            script(peer, { type: "data", channel: frame.channel, fin: frame.fin, size: frame.body.length });
+            return;
+          }
           if (frame?.kind !== "msg") return;
           message = msgpack.decode(frame.body) as Message;
         }
@@ -85,6 +94,7 @@ function daemon(script: Script, options: { hello?: (peer: Peer, hello: Message) 
           const encoding = socket.data.encoding;
           const peer: Peer = {
             received: [],
+            data: [],
             send: (reply) =>
               void socket.send(encoding === "json" ? JSON.stringify(reply) : encodeMsgFrame(msgpack.encode(reply))),
             sendData: (channel, fin, body) => void socket.send(encodeDataFrame(channel, fin, body)),
@@ -300,6 +310,106 @@ describe("V8Client", () => {
     expect(peers[0]!.received.find((message) => message.type === "pong")).toEqual({ type: "pong", nonce: 99 });
     await until(() => peers[0]!.received.filter((message) => message.type === "ping").length >= 2);
     expect(client.isClosed).toBe(false);
+    client.close();
+  });
+
+  test("uploads stream the blob as DATA after blobs.put", async () => {
+    let call: Message | undefined;
+    let received = 0;
+    const { url, peers } = daemon((peer, message) => {
+      if (message.type === "call" && message.method === "blobs.put") call = message;
+      if (message.type === "data") {
+        received += message.size;
+        if (message.fin) {
+          peer.send({
+            type: "reply",
+            id: call!.id,
+            ok: { reference: "waku-blob:00.png", size: received, sha256: "ab", deduplicated: false },
+          });
+        }
+      }
+    });
+    const client = await connect(url);
+    const bytes = new Uint8Array(600 * 1024).map((_, index) => index % 251);
+    const put = await client.uploadBlob(bytes, { mime: "image/png", name: "shot.png" });
+    expect(put).toEqual({ reference: "waku-blob:00.png", size: bytes.length, sha256: "ab", deduplicated: false });
+    expect(call?.params).toEqual({ channel: 1, size: bytes.length, mime: "image/png", name: "shot.png" });
+    const data = peers[0]!.data;
+    expect(data.map((frame) => [frame.channel, frame.fin, frame.body.length])).toEqual([
+      [1, false, 256 * 1024],
+      [1, false, 256 * 1024],
+      [1, true, 600 * 1024 - 512 * 1024],
+    ]);
+    client.close();
+  });
+
+  test("a deduplicated upload stops and closes its transfer", async () => {
+    const { url, peers } = daemon((peer, message) => {
+      if (message.type === "call" && message.method === "blobs.put") {
+        peer.send({
+          type: "reply",
+          id: message.id,
+          ok: { reference: "waku-blob:00.png", size: message.params.size, sha256: message.params.sha256, deduplicated: true },
+        });
+      }
+    });
+    const client = await connect(url);
+    const bytes = new Uint8Array(2 * 1024 * 1024);
+    const put = await client.uploadBlob(bytes, { mime: "image/png", sha256: "cd" });
+    expect(put.deduplicated).toBe(true);
+    await until(() => peers[0]!.data.some((frame) => frame.fin));
+    const data = peers[0]!.data;
+    expect(data.length).toBeLessThan(8);
+    expect(data[data.length - 1]).toMatchObject({ channel: 1, fin: true });
+    client.close();
+  });
+
+  test("terminal input goes out as DATA and output moves the offset past the replay", async () => {
+    const generation = "00000000-0000-4000-8000-0000000000bb";
+    const terminalId = "00000000-0000-4000-8000-0000000000cc";
+    const { url, peers } = daemon((peer, message) => {
+      if (message.type !== "subscribe") return;
+      peer.send({
+        type: "items",
+        channel: message.channel,
+        items: [{ type: "attached", generation, cols: 80, rows: 24, offset: 100, replay: 3, truncated: false, exited: false }],
+      });
+      peer.sendData(message.channel, false, new TextEncoder().encode("old"));
+      peer.sendData(message.channel, false, new TextEncoder().encode("live!"));
+    });
+    const client = await connect(url);
+    const output: string[] = [];
+    const terminal = client.subscribe(
+      "terminal",
+      { terminalId, interactive: true },
+      { item: () => {}, data: (bytes) => output.push(new TextDecoder().decode(bytes)) },
+    );
+    await until(() => output.length === 2);
+    expect(terminal.cursor).toEqual({ type: "offset", generation, offset: 105 });
+    terminal.sendData(new TextEncoder().encode("ls\r"));
+    await until(() => peers[0]!.data.length === 1);
+    expect(peers[0]!.data[0]!.channel).toBe(terminal.channel);
+    expect(new TextDecoder().decode(peers[0]!.data[0]!.body)).toBe("ls\r");
+    client.close();
+  });
+
+  test("downloadBlob collects the DATA of a blobDownload", async () => {
+    const { url, peers } = daemon((peer, message) => {
+      if (message.type !== "subscribe") return;
+      peer.send({ type: "items", channel: message.channel, items: [{ type: "meta", size: 5, mime: "text/plain", sha256: "00" }] });
+      peer.sendData(message.channel, false, new TextEncoder().encode("hel"));
+      peer.sendData(message.channel, true, new TextEncoder().encode("lo"));
+      peer.send({ type: "end", channel: message.channel, reason: { type: "completed" } });
+    });
+    const client = await connect(url);
+    const { meta, bytes } = await client.downloadBlob("waku-attachment:x", "/a/b.txt");
+    expect(meta).toEqual({ type: "meta", size: 5, mime: "text/plain", sha256: "00" });
+    expect(new TextDecoder().decode(bytes)).toBe("hello");
+    expect(peers[0]!.received.find((message) => message.type === "subscribe")?.stream).toEqual({
+      type: "blobDownload",
+      reference: "waku-attachment:x",
+      path: "/a/b.txt",
+    });
     client.close();
   });
 

@@ -1,0 +1,1 @@
+{"type":"call","id":32,"method":"vcs.removeWorktree","params":{"path":"/Users/dev/.waku-fork/worktrees/waku/fix-the-flaky-test","force":false,"opId":"0b1d0000-0000-4000-8000-000000000010"}}

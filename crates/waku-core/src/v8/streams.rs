@@ -88,30 +88,35 @@ pub(crate) async fn blob_download(
 ) {
     let backend = context.backend.clone();
     let reference = spec.reference.clone();
-    let bytes =
-        match tokio::task::spawn_blocking(move || backend.call(Command::ReadBlob { reference }))
-            .await
-        {
-            Ok(Ok(ResponsePayload::BlobData { bytes })) => bytes,
-            Ok(Ok(_)) => {
-                sink.end(EndReason::Error {
-                    error: Error::new(ErrorCode::Internal, "unexpected blob response"),
-                });
-                return;
-            }
-            Ok(Err(error)) => {
-                sink.end(EndReason::Error {
-                    error: Error::new(ErrorCode::NotFound, format!("{error:#}")).with_details(
-                        ErrorDetails::NotFound {
-                            resource: "blob".into(),
-                            id: spec.reference,
-                        },
-                    ),
-                });
-                return;
-            }
-            Err(_) => return,
-        };
+    // A file inside an attachment, or a blob.
+    let command = match spec.path.clone() {
+        Some(path) => Command::ReadAttachment {
+            reference,
+            path: path.into(),
+        },
+        None => Command::ReadBlob { reference },
+    };
+    let bytes = match tokio::task::spawn_blocking(move || backend.call(command)).await {
+        Ok(Ok(ResponsePayload::BlobData { bytes })) => bytes,
+        Ok(Ok(_)) => {
+            sink.end(EndReason::Error {
+                error: Error::new(ErrorCode::Internal, "unexpected blob response"),
+            });
+            return;
+        }
+        Ok(Err(error)) => {
+            sink.end(EndReason::Error {
+                error: Error::new(ErrorCode::NotFound, format!("{error:#}")).with_details(
+                    ErrorDetails::NotFound {
+                        resource: "blob".into(),
+                        id: spec.reference,
+                    },
+                ),
+            });
+            return;
+        }
+        Err(_) => return,
+    };
     if bytes.len() as u64 > MAX_BLOB_BYTES {
         sink.end(EndReason::Error {
             error: Error::new(
@@ -126,7 +131,7 @@ pub(crate) async fn blob_download(
     }
     let meta = BlobDownloadItem::Meta {
         size: bytes.len() as u64,
-        mime: mime_type(&spec.reference).into(),
+        mime: mime_type(spec.path.as_deref().unwrap_or(&spec.reference)).into(),
         sha256: format!("{:x}", Sha256::digest(&bytes)),
     };
     if sink.push(&meta, None).is_err() {
@@ -159,7 +164,7 @@ pub(crate) async fn blob_download(
 }
 
 /// The MIME type of a `waku-blob:<sha256>.<ext>` reference.
-fn mime_type(reference: &str) -> &'static str {
+pub(crate) fn mime_type(reference: &str) -> &'static str {
     let extension = reference
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_ascii_lowercase())

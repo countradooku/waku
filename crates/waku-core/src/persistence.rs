@@ -45,7 +45,7 @@ const COMPOSER_DRAFTS_FILENAME: &str = "composer-drafts.json";
 /// Uploading a blob and committing the reference are separate operations. A
 /// sweep may reclaim abandoned payloads, but never ones a client could still
 /// be handing off to a draft or task save.
-const ASSET_SWEEP_GRACE_PERIOD: Duration = Duration::from_secs(60 * 60);
+pub const ASSET_SWEEP_GRACE_PERIOD: Duration = Duration::from_secs(60 * 60);
 
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 252.0;
 pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 460.0;
@@ -1599,49 +1599,88 @@ impl StateStore {
         Ok(())
     }
 
-    /// Builds a blob sweep.
+    /// Builds a blob sweep that keeps what the legacy sessions and the
+    /// composer drafts reference.
     ///
     /// Both halves are filesystem and database work, so the whole thing runs on
     /// a background executor; it opens its own connection rather than borrowing
     /// the store's.
     pub fn blob_sweep(&self) -> impl FnOnce() + Send + 'static {
-        let blobs = Arc::clone(&self.blobs);
-        let path = self.path.clone();
-        let attachments_root = path
+        let sweep = self.asset_sweep();
+        move || sweep.run(&AssetReferences::default())
+    }
+
+    /// The blob and attachment stores' sweep, for callers that add
+    /// references of their own (the daemon's orchestrator, #55).
+    pub fn asset_sweep(&self) -> AssetSweep {
+        let directory = self
+            .path
             .parent()
             .unwrap_or_else(|| Path::new("."))
-            .join("attachments");
-        let drafts_path = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(COMPOSER_DRAFTS_FILENAME);
-        move || {
-            let cutoff = SystemTime::now()
-                .checked_sub(ASSET_SWEEP_GRACE_PERIOD)
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            let Ok(connection) = Connection::open(&path) else {
-                return;
-            };
-            let Ok(mut live) = live_blob_references(&connection) else {
-                return;
-            };
-            if let Ok(drafts) = fs::read_to_string(drafts_path) {
-                collect_blob_references(&drafts, &mut live);
-            }
-            let _ = blobs.retain_unreferenced_older_than(&live, cutoff);
-            let Ok(mut live_attachments) = live_attachment_references(&connection) else {
-                return;
-            };
-            if let Ok(drafts) = fs::read_to_string(
-                path.parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(COMPOSER_DRAFTS_FILENAME),
-            ) {
-                collect_attachment_references(&drafts, &mut live_attachments);
-            }
-            let _ = crate::attachments::AttachmentStore::new(attachments_root)
-                .retain_unreferenced_older_than(&live_attachments, cutoff);
+            .to_owned();
+        AssetSweep {
+            blobs: Arc::clone(&self.blobs),
+            database: self.path.clone(),
+            attachments_root: directory.join("attachments"),
+            drafts: directory.join(COMPOSER_DRAFTS_FILENAME),
         }
+    }
+}
+
+/// `waku-blob:` and `waku-attachment:` references something still holds.
+#[derive(Debug, Default)]
+pub struct AssetReferences {
+    pub blobs: HashSet<String>,
+    pub attachments: HashSet<String>,
+}
+
+impl AssetReferences {
+    /// Adds every reference named in `text` (JSON or any other text that
+    /// ends a reference with `"`).
+    pub fn collect(&mut self, text: &str) {
+        collect_blob_references(text, &mut self.blobs);
+        collect_attachment_references(text, &mut self.attachments);
+    }
+}
+
+/// Deletes blobs and attachment trees older than
+/// [`ASSET_SWEEP_GRACE_PERIOD`] that nothing references: not the legacy
+/// sessions, not the composer drafts, not the caller's `extra` references.
+/// A source that cannot be read stops the sweep rather than counting as
+/// empty.
+pub struct AssetSweep {
+    blobs: Arc<BlobStore>,
+    database: PathBuf,
+    attachments_root: PathBuf,
+    drafts: PathBuf,
+}
+
+impl AssetSweep {
+    pub fn run(&self, extra: &AssetReferences) {
+        let cutoff = SystemTime::now()
+            .checked_sub(ASSET_SWEEP_GRACE_PERIOD)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let Ok(connection) = Connection::open(&self.database) else {
+            return;
+        };
+        let drafts = match fs::read_to_string(&self.drafts) {
+            Ok(drafts) => drafts,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(_) => return,
+        };
+        let Ok(mut live) = live_blob_references(&connection) else {
+            return;
+        };
+        collect_blob_references(&drafts, &mut live);
+        live.extend(extra.blobs.iter().cloned());
+        let _ = self.blobs.retain_unreferenced_older_than(&live, cutoff);
+        let Ok(mut live_attachments) = live_attachment_references(&connection) else {
+            return;
+        };
+        collect_attachment_references(&drafts, &mut live_attachments);
+        live_attachments.extend(extra.attachments.iter().cloned());
+        let _ = crate::attachments::AttachmentStore::new(self.attachments_root.clone())
+            .retain_unreferenced_older_than(&live_attachments, cutoff);
     }
 }
 

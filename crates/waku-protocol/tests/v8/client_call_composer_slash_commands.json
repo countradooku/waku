@@ -1,0 +1,1 @@
+{"type":"call","id":17,"method":"composer.slashCommands","params":{"root":{"type":"project","projectId":"9a0ec700-0000-4000-8000-000000000003"},"instanceId":"claude","threadId":"7e8ead00-0000-4000-8000-000000000004"}}

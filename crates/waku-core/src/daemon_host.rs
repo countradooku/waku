@@ -17,10 +17,15 @@
 //!    the session manager, the rest to `core_ports` (the managed worktree
 //!    folder and cleanup rules from the storage settings, the daemon's
 //!    terminals, the attachment store);
-//! 5. the lifecycle service (auto-settle, snooze wake).
+//! 5. the lifecycle service (auto-settle, snooze wake);
+//! 6. the blob sweeper ([`crate::blob_sweep`]), which keeps what the
+//!    orchestrator, the drafts and the legacy sessions reference, and a
+//!    watcher that asks it for a sweep when a thread is deleted or rolled
+//!    back.
 //!
 //! [`DaemonHost::shutdown`] stops claiming effects and waits up to
-//! [`SHUTDOWN_GRACE`] for running ones, stops the lifecycle service, closes
+//! [`SHUTDOWN_GRACE`] for running ones, stops the lifecycle service and the
+//! blob sweeper, closes
 //! every provider session, then stops the orchestrator. Effects still
 //! running are left `running` for the next start's reconciliation (RFC 0001:
 //! shutdown is a crash, one recovery path).
@@ -44,6 +49,7 @@ use waku_protocol::orchestration::DriverKind;
 
 use crate::Orchestration;
 use crate::attachments::AttachmentStore;
+use crate::blob_sweep::{BlobSweeper, SweepTimes, orchestrator_references, watch_releases};
 use crate::daemon::WakuBackend;
 use crate::driver::v2::manager::{
     DriverRegistry, ManagerDeps, ManagerExecutor, ProviderSessionManager, RegisteredInstance,
@@ -79,6 +85,7 @@ pub struct HostOptions {
     /// `None`: the backend's data directory.
     pub data_dir: Option<PathBuf>,
     pub workers: WorkerConfig,
+    pub blob_sweeps: SweepTimes,
 }
 
 /// The running orchestrator, its effect workers, provider sessions and
@@ -89,6 +96,8 @@ pub struct DaemonHost {
     registry: DriverRegistry,
     pool: Option<EffectWorkerPool>,
     lifecycle: Option<LifecycleService>,
+    sweeper: Option<BlobSweeper>,
+    release_watch: Option<std::thread::JoinHandle<()>>,
     environment_id: Uuid,
 }
 
@@ -166,6 +175,22 @@ impl DaemonHost {
             Arc::new(NoPullRequests),
         );
 
+        let swept = orchestrator.clone();
+        let legacy = backend.asset_sweep();
+        let sweeper =
+            BlobSweeper::start(options.blob_sweeps, move || {
+                match orchestrator_references(&swept) {
+                    Ok(references) => legacy.run(&references),
+                    Err(error) => eprintln!("waku-daemon skipped a blob sweep: {error:#}"),
+                }
+            });
+        backend.set_blob_sweeps(sweeper.handle());
+        let watched = orchestrator.clone();
+        let sweeps = sweeper.handle();
+        let release_watch = std::thread::Builder::new()
+            .name("waku-blob-release-watch".into())
+            .spawn(move || watch_releases(&watched, &sweeps))?;
+
         let observed = registry.clone();
         backend.on_settings_changed(Box::new(move |settings| {
             observed.replace(provider_instances(settings));
@@ -177,6 +202,8 @@ impl DaemonHost {
             registry,
             pool: Some(pool),
             lifecycle: Some(lifecycle),
+            sweeper: Some(sweeper),
+            release_watch: Some(release_watch),
             environment_id,
         })
     }
@@ -215,6 +242,9 @@ impl DaemonHost {
         if let Some(lifecycle) = self.lifecycle.take() {
             lifecycle.shutdown();
         }
+        if let Some(sweeper) = self.sweeper.take() {
+            sweeper.shutdown();
+        }
         // Not on a runtime thread: the daemon's main thread or a test's.
         let manager = self.manager.clone();
         let runtime = crate::driver::v2::bridge::runtime();
@@ -223,6 +253,10 @@ impl DaemonHost {
             .spawn(move || runtime.block_on(manager.shutdown()))
             .map(|thread| thread.join());
         self.orchestration.shutdown();
+        // The feed closed with the orchestrator.
+        if let Some(watch) = self.release_watch.take() {
+            let _ = watch.join();
+        }
     }
 }
 

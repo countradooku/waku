@@ -106,6 +106,12 @@ pub struct SubscribeOptions {
 
 enum Outgoing {
     Message(Vec<u8>),
+    /// DATA: upload bytes or terminal input.
+    Data {
+        channel: u32,
+        fin: bool,
+        body: Vec<u8>,
+    },
     Close,
 }
 
@@ -114,6 +120,9 @@ struct SubscriptionState {
     spec: StreamSpec,
     window: Option<u32>,
     cursor: Option<StreamCursor>,
+    /// DATA bytes still to come that replay retained output (a terminal's
+    /// `attached`/`reset`); they do not advance the offset cursor.
+    replay_left: u64,
     events: Sender<StreamEvent>,
     channel: Arc<AtomicU32>,
 }
@@ -125,6 +134,8 @@ struct Routing {
     next_nonce: u64,
     calls: HashMap<u32, (&'static str, Sender<Result<MethodResult, CallError>>)>,
     subscriptions: HashMap<u32, SubscriptionState>,
+    /// Channels of uploads in progress; they share the channel space.
+    uploads: std::collections::HashSet<u32>,
 }
 
 impl DecodeContext for Routing {
@@ -150,7 +161,9 @@ impl Routing {
     fn allocate_channel(&mut self) -> u32 {
         loop {
             self.next_channel = self.next_channel.wrapping_add(1).max(1);
-            if !self.subscriptions.contains_key(&self.next_channel) {
+            if !self.subscriptions.contains_key(&self.next_channel)
+                && !self.uploads.contains(&self.next_channel)
+            {
                 return self.next_channel;
             }
         }
@@ -304,6 +317,14 @@ impl V8Client {
         params: M::Params,
         timeout: Duration,
     ) -> Result<M::Result, CallError> {
+        let (id, reply) = self.start_call::<M>(params)?;
+        self.wait_call::<M>(id, reply, timeout)
+    }
+
+    fn start_call<M: MethodDef>(
+        &self,
+        params: M::Params,
+    ) -> Result<(u32, Receiver<Result<MethodResult, CallError>>), CallError> {
         if self.is_disconnected() {
             return Err(CallError::Disconnected);
         }
@@ -318,6 +339,15 @@ impl V8Client {
             id,
             method: M::wrap(params),
         });
+        Ok((id, reply_rx))
+    }
+
+    fn wait_call<M: MethodDef>(
+        &self,
+        id: u32,
+        reply_rx: Receiver<Result<MethodResult, CallError>>,
+        timeout: Duration,
+    ) -> Result<M::Result, CallError> {
         match reply_rx.recv_timeout(timeout) {
             Ok(Ok(result)) => M::unwrap(result).ok_or(CallError::Disconnected),
             Ok(Err(error)) => Err(error),
@@ -328,6 +358,102 @@ impl V8Client {
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Err(CallError::Disconnected),
         }
+    }
+
+    /// Upload `bytes` as a blob (`blobs.put`, RFC 0003 §5.6): the call, then
+    /// the bytes as DATA on a fresh channel, `FIN` on the last chunk. Pass
+    /// `sha256` (lowercase hex) to let the daemon skip a blob it holds.
+    pub fn put_blob(
+        &self,
+        bytes: &[u8],
+        mime: &str,
+        name: Option<&str>,
+        sha256: Option<&str>,
+    ) -> Result<BlobPut, CallError> {
+        let channel = {
+            let mut routing = self.inner.routing.lock();
+            let channel = routing.allocate_channel();
+            routing.uploads.insert(channel);
+            channel
+        };
+        let started = self.start_call::<method::BlobsPut>(BlobsPutParams {
+            channel,
+            size: bytes.len() as u64,
+            mime: mime.to_owned(),
+            name: name.map(str::to_owned),
+            sha256: sha256.map(str::to_owned),
+        });
+        let outcome = started.and_then(|(id, reply)| {
+            let chunk = self.inner.welcome.limits.max_data_chunk_bytes.max(1) as usize;
+            let mut chunks = bytes.chunks(chunk).peekable();
+            if chunks.peek().is_none() {
+                self.send_data(channel, true, Vec::new());
+            }
+            while let Some(body) = chunks.next() {
+                // A deduplicated or refused upload is answered early; stop
+                // sending and close the transfer.
+                if !reply.is_empty() {
+                    self.send_data(channel, true, Vec::new());
+                    break;
+                }
+                self.send_data(channel, chunks.peek().is_none(), body.to_vec());
+            }
+            self.wait_call::<method::BlobsPut>(id, reply, CALL_TIMEOUT)
+        });
+        self.inner.routing.lock().uploads.remove(&channel);
+        outcome
+    }
+
+    /// Download a blob, or with `path` a file inside an attachment, through
+    /// the `blobDownload` stream; returns its `meta` and bytes.
+    pub fn download_blob(
+        &self,
+        reference: &str,
+        path: Option<&str>,
+    ) -> Result<(BlobDownloadItem, Vec<u8>), CallError> {
+        let subscription = self.subscribe::<stream::BlobDownload>(
+            BlobDownloadSpec {
+                reference: reference.to_owned(),
+                offset: None,
+                path: path.map(str::to_owned),
+            },
+            SubscribeOptions::default(),
+        );
+        let mut meta = None;
+        let mut bytes = Vec::new();
+        loop {
+            let event = subscription
+                .events()
+                .recv_timeout(CALL_TIMEOUT)
+                .map_err(|_| CallError::TimedOut)?;
+            match event {
+                StreamEvent::Item(StreamItem::BlobDownload(item)) => meta = Some(item),
+                StreamEvent::Data { bytes: body, .. } => {
+                    subscription.consumed(u32::try_from(body.len()).unwrap_or(u32::MAX));
+                    bytes.extend_from_slice(&body);
+                }
+                StreamEvent::End(end) => {
+                    return match end.reason {
+                        EndReason::Completed => meta
+                            .map(|meta| (meta, bytes))
+                            .ok_or(CallError::Disconnected),
+                        EndReason::Error { error } => Err(CallError::Remote(error)),
+                        other => Err(CallError::Remote(Error::new(
+                            ErrorCode::NotFound,
+                            format!("the download ended: {other:?}"),
+                        ))),
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn send_data(&self, channel: u32, fin: bool, body: Vec<u8>) {
+        let _ = self
+            .inner
+            .outgoing
+            .send(Outgoing::Data { channel, fin, body });
     }
 
     /// Subscribe to `S`. Events arrive on [`Subscription::events`].
@@ -350,6 +476,7 @@ impl V8Client {
                     spec: spec.clone(),
                     window: options.window,
                     cursor: options.after.clone(),
+                    replay_left: 0,
                     events: events_tx,
                     channel: channel.clone(),
                 },
@@ -409,6 +536,12 @@ impl Subscription {
         self.client.inner.send(&ClientMessage::Unsubscribe {
             channel: self.channel(),
         });
+    }
+
+    /// Send DATA on this subscription's channel: input of an interactive
+    /// terminal.
+    pub fn send_data(&self, bytes: Vec<u8>) {
+        self.client.send_data(self.channel(), false, bytes);
     }
 }
 
@@ -572,6 +705,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Writer<S> {
         Ok(())
     }
 
+    async fn feed_data(&mut self, channel: u32, fin: bool, body: &[u8]) -> anyhow::Result<()> {
+        match self {
+            Self::Local(write) => {
+                write
+                    .write_all(&frame::FrameHeader::data(channel, body.len(), fin).encode())
+                    .await?;
+                write.write_all(body).await?;
+            }
+            Self::WebSocket(sink) => {
+                sink.feed(Message::Binary(
+                    frame::encode_data(channel, fin, body).into(),
+                ))
+                .await?
+            }
+        }
+        Ok(())
+    }
+
     async fn flush(&mut self) -> anyhow::Result<()> {
         match self {
             Self::Local(write) => write.flush().await?,
@@ -694,6 +845,11 @@ async fn write_frames<S>(
                         return;
                     }
                 }
+                Outgoing::Data { channel, fin, body } => {
+                    if writer.feed_data(channel, fin, &body).await.is_err() {
+                        return;
+                    }
+                }
                 Outgoing::Close => {
                     let _ = writer.flush().await;
                     writer.close().await;
@@ -725,7 +881,8 @@ where
         };
         match frame {
             frame::Frame::Data { channel, fin, body } => {
-                if let Some(state) = inner.routing.lock().subscriptions.get(&channel) {
+                if let Some(state) = inner.routing.lock().subscriptions.get_mut(&channel) {
+                    advance_offset(state, body.len() as u64);
                     let _ = state.events.send(StreamEvent::Data { bytes: body, fin });
                 }
             }
@@ -753,9 +910,41 @@ where
     }
 }
 
+/// DATA of an offset stream moves its cursor, past any replay first.
+fn advance_offset(state: &mut SubscriptionState, bytes: u64) {
+    let live = bytes.saturating_sub(state.replay_left);
+    state.replay_left = state.replay_left.saturating_sub(bytes);
+    if live > 0
+        && let Some(StreamCursor::Offset { offset, .. }) = &mut state.cursor
+    {
+        *offset += live;
+    }
+}
+
 /// The cursor an item advances its subscription to.
 fn item_cursor(item: &StreamItem, previous: Option<&StreamCursor>) -> Option<StreamCursor> {
     match item {
+        StreamItem::Drafts(DraftsItem::Snapshot { revision, .. })
+        | StreamItem::Drafts(DraftsItem::Changed { revision, .. })
+        | StreamItem::Providers(ProvidersItem::Snapshot { revision, .. })
+        | StreamItem::Providers(ProvidersItem::StatusUpdated { revision, .. }) => {
+            Some(StreamCursor::Revision {
+                revision: *revision,
+            })
+        }
+        StreamItem::Drafts(DraftsItem::Synchronized { cursor })
+        | StreamItem::Providers(ProvidersItem::Synchronized { cursor }) => Some(cursor.clone()),
+        StreamItem::Terminal(
+            TerminalItem::Attached {
+                generation, offset, ..
+            }
+            | TerminalItem::Reset {
+                generation, offset, ..
+            },
+        ) => Some(StreamCursor::Offset {
+            generation: *generation,
+            offset: *offset,
+        }),
         StreamItem::Settings(SettingsItem::Snapshot { revision, .. })
         | StreamItem::Settings(SettingsItem::Updated { revision, .. }) => {
             Some(StreamCursor::Revision {
@@ -810,6 +999,12 @@ fn deliver(message: ServerMessage, inner: &Inner) -> bool {
                 for item in items {
                     if let Some(cursor) = item_cursor(&item, state.cursor.as_ref()) {
                         state.cursor = Some(cursor);
+                    }
+                    if let StreamItem::Terminal(
+                        TerminalItem::Attached { replay, .. } | TerminalItem::Reset { replay, .. },
+                    ) = &item
+                    {
+                        state.replay_left = *replay;
                     }
                     let _ = state.events.send(StreamEvent::Item(item));
                 }

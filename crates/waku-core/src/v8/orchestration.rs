@@ -747,6 +747,43 @@ fn find(context: &V8Context, params: ThreadFindParams) -> Result<ThreadFindResul
     })
 }
 
+/// The orchestrator, or `unsupported` from a server composed without one.
+pub(crate) fn orchestrator(context: &V8Context) -> Result<&Arc<Orchestrator>, Error> {
+    Ok(&orchestration(context)?.orchestrator)
+}
+
+/// Whether `project_id` is a project that is not removed.
+pub(crate) fn live_project(context: &V8Context, project_id: uuid::Uuid) -> Result<bool, Error> {
+    Ok(orchestration(context)?
+        .orchestrator
+        .project(waku_protocol::orchestration::ProjectId(project_id))
+        .is_some_and(|project| project.removed_at.is_none()))
+}
+
+/// Which of `thread_ids` are threads that exist and are not deleted. Reads
+/// the thread rows, not the projections, so it stays cheap for many ids.
+pub(crate) fn live_threads(
+    context: &V8Context,
+    thread_ids: impl IntoIterator<Item = uuid::Uuid>,
+) -> Result<std::collections::HashSet<uuid::Uuid>, Error> {
+    let orchestration = orchestration(context)?;
+    orchestration.orchestrator.reader().with(|connection| {
+        let mut statement = connection
+            .prepare_cached("SELECT 1 FROM p_threads WHERE thread_id = ?1 AND deleted_at IS NULL")
+            .map_err(storage)?;
+        let mut live = std::collections::HashSet::new();
+        for thread_id in thread_ids {
+            if statement
+                .exists([ThreadId(thread_id).to_string()])
+                .map_err(storage)?
+            {
+                live.insert(thread_id);
+            }
+        }
+        Ok(live)
+    })
+}
+
 /// A thread's root for files, vcs and terminal calls: its worktree, or its
 /// project's path.
 pub(crate) fn thread_root(context: &V8Context, thread_id: ThreadId) -> Result<PathBuf, Error> {

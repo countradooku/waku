@@ -34,7 +34,7 @@ use waku_protocol::v8::{
 
 use super::orchestration::HubMessage;
 use super::transport::{FrameReader, FrameWriter, Incoming, Outgoing, ReadError};
-use super::{V8Context, methods, orchestration, streams};
+use super::{V8Context, catalog, orchestration, streams};
 
 /// Frames written before the writer flushes even with more queued.
 const MAX_FRAMES_PER_FLUSH: usize = 64;
@@ -68,10 +68,23 @@ pub(crate) struct Conn {
     pub(crate) scopes: Vec<Scope>,
     /// From `hello`; the creation source of dispatched commands.
     pub(crate) client_kind: ClientKind,
+    /// The connection came over the local socket (RFC 0003 §6.3: local-only
+    /// requests, `blobs.stat.localPath`).
+    pub(crate) local: bool,
     budget: Budget,
     state: Mutex<State>,
     wake: Notify,
 }
+
+/// One DATA frame the client sent: upload bytes or terminal input.
+pub(crate) struct DataChunk {
+    pub(crate) fin: bool,
+    pub(crate) body: Vec<u8>,
+}
+
+/// DATA frames a channel's consumer may have queued before the reader
+/// waits for it (backpressure on the socket).
+const DATA_QUEUE_CHUNKS: usize = 32;
 
 #[derive(Default)]
 struct State {
@@ -81,6 +94,9 @@ struct State {
     /// Bytes of replies, items and DATA waiting for the writer.
     queued_bytes: usize,
     channels: HashMap<u32, Channel>,
+    /// Channels of `blobs.put` uploads in progress; they share the channel
+    /// space with subscriptions.
+    uploads: HashMap<u32, tokio::sync::mpsc::Sender<DataChunk>>,
     /// In-flight calls; `None` until the call's task is registered.
     calls: HashMap<u32, Option<AbortHandle>>,
     /// A `goodbye` is queued; the writer stops once it is written.
@@ -104,6 +120,9 @@ enum DataEntry {
     },
     /// An `end` that must follow the stream's DATA.
     Message(Vec<u8>),
+    /// An `items` message that must follow the stream's DATA queued before
+    /// it (a terminal `reset` after output).
+    Item { channel: u32, bytes: Vec<u8> },
 }
 
 struct Channel {
@@ -114,8 +133,12 @@ struct Channel {
     delivered: Option<StreamCursor>,
     credit: u64,
     credit_wake: Arc<Notify>,
-    /// DATA chunks of this channel still in the data queue.
+    /// DATA chunks (and items ordered after them) of this channel still in
+    /// the data queue.
     pending_data: usize,
+    /// Where DATA the client sends on this channel goes (an interactive
+    /// terminal's input).
+    input: Option<tokio::sync::mpsc::Sender<DataChunk>>,
     task: Option<AbortHandle>,
     /// The hub queue of a `thread` or `shell` stream, for read-your-writes
     /// barriers.
@@ -147,12 +170,14 @@ impl Conn {
         scopes: Vec<Scope>,
         client_kind: ClientKind,
         budget: Budget,
+        local: bool,
     ) -> Self {
         Self {
             encoding,
             limits,
             scopes,
             client_kind,
+            local,
             budget,
             state: Mutex::new(State {
                 next_nonce: 1,
@@ -308,7 +333,7 @@ impl Conn {
 
     pub(crate) fn open_channel(&self, channel: u32, window: u32) -> Result<(), OpenRejected> {
         let mut state = self.state.lock();
-        if state.channels.contains_key(&channel) {
+        if state.channels.contains_key(&channel) || state.uploads.contains_key(&channel) {
             return Err(OpenRejected::InUse);
         }
         if state.channels.len() >= self.limits.max_subscriptions as usize {
@@ -324,11 +349,57 @@ impl Conn {
                 credit: u64::from(window),
                 credit_wake: Arc::new(Notify::new()),
                 pending_data: 0,
+                input: None,
                 task: None,
                 barrier: None,
             },
         );
         Ok(())
+    }
+
+    /// Route the client's DATA on `channel` to the returned receiver (an
+    /// interactive terminal's input).
+    pub(crate) fn accept_input(
+        &self,
+        channel: u32,
+    ) -> Option<tokio::sync::mpsc::Receiver<DataChunk>> {
+        let (sender, receiver) = tokio::sync::mpsc::channel(DATA_QUEUE_CHUNKS);
+        let mut state = self.state.lock();
+        state.channels.get_mut(&channel)?.input = Some(sender);
+        Some(receiver)
+    }
+
+    /// Reserve `channel` for a `blobs.put` upload.
+    pub(crate) fn open_upload(
+        &self,
+        channel: u32,
+    ) -> Result<tokio::sync::mpsc::Receiver<DataChunk>, OpenRejected> {
+        let mut state = self.state.lock();
+        if channel == 0
+            || state.channels.contains_key(&channel)
+            || state.uploads.contains_key(&channel)
+        {
+            return Err(OpenRejected::InUse);
+        }
+        let (sender, receiver) = tokio::sync::mpsc::channel(DATA_QUEUE_CHUNKS);
+        state.uploads.insert(channel, sender);
+        Ok(receiver)
+    }
+
+    /// The upload on `channel` is over; later DATA on it is discarded.
+    pub(crate) fn close_upload(&self, channel: u32) {
+        self.state.lock().uploads.remove(&channel);
+    }
+
+    /// Where the client's DATA on `channel` goes, if anywhere.
+    fn data_target(&self, channel: u32) -> Option<tokio::sync::mpsc::Sender<DataChunk>> {
+        let state = self.state.lock();
+        state.uploads.get(&channel).cloned().or_else(|| {
+            state
+                .channels
+                .get(&channel)
+                .and_then(|open| open.input.clone())
+        })
     }
 
     /// The hub queues of this connection's `thread` and `shell` streams.
@@ -410,6 +481,13 @@ impl Conn {
                 Next::Write(Outgoing::Data { channel, fin, body })
             }
             Some(DataEntry::Message(bytes)) => Next::Write(Outgoing::Message(bytes)),
+            Some(DataEntry::Item { channel, bytes }) => {
+                state.queued_bytes -= bytes.len();
+                if let Some(open) = state.channels.get_mut(&channel) {
+                    open.pending_data -= 1;
+                }
+                Next::Write(Outgoing::Message(bytes))
+            }
             None => Next::Idle,
         }
     }
@@ -456,6 +534,13 @@ fn remove_channel(state: &mut State, channel: u32, drop_data: bool) -> Option<Ch
                 ..
             } if *owner == channel => {
                 freed += body.len();
+                false
+            }
+            DataEntry::Item {
+                channel: owner,
+                bytes,
+            } if *owner == channel => {
+                freed += bytes.len();
                 false
             }
             _ => true,
@@ -538,6 +623,48 @@ impl StreamSink {
         drop(guard);
         conn.wake.notify_one();
         Ok(())
+    }
+
+    /// Queue an item behind the DATA this stream already queued, so the
+    /// client sees them in order (DATA is written after messages otherwise).
+    pub(crate) fn push_after_data<T: Serialize>(&self, item: &T) -> Result<(), Ended> {
+        let bytes = self.conn.encode(item);
+        let conn = &self.conn;
+        let mut guard = conn.state.lock();
+        let state = &mut *guard;
+        if state.closing || state.stopped {
+            return Err(Ended);
+        }
+        let open = state.channels.get_mut(&self.channel).ok_or(Ended)?;
+        if open.pending_data == 0 {
+            drop(guard);
+            return self.push_encoded(bytes.into(), None);
+        }
+        // Inside the live budget like any other item.
+        if state.queued_bytes + bytes.len() > conn.budget.connection_bytes {
+            drop(guard);
+            return self.push_encoded(bytes.into(), None);
+        }
+        open.pending_data += 1;
+        let envelope = encode_items_envelope(conn.encoding, self.channel, &[bytes]);
+        state.queued_bytes += envelope.len();
+        state.data.push_back(DataEntry::Item {
+            channel: self.channel,
+            bytes: envelope,
+        });
+        drop(guard);
+        conn.wake.notify_one();
+        Ok(())
+    }
+
+    /// The DATA credit left right now, without waiting.
+    pub(crate) fn available_credit(&self) -> u64 {
+        self.conn
+            .state
+            .lock()
+            .channels
+            .get(&self.channel)
+            .map_or(0, |open| open.credit)
     }
 
     /// Wait until the client has granted DATA credit; returns the credit.
@@ -737,6 +864,7 @@ pub(crate) async fn serve<S>(
     mut reader: FrameReader<S>,
     mut writer: FrameWriter<S>,
     context: Arc<V8Context>,
+    local: bool,
     authenticated: impl FnOnce(),
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -820,6 +948,7 @@ pub(crate) async fn serve<S>(
         scopes,
         hello.client.kind.clone(),
         context.budget,
+        local,
     ));
     let mut writer_task = tokio::spawn(run_writer(conn.clone(), writer));
     tokio::select! {
@@ -866,9 +995,18 @@ where
             }
         };
         match next {
-            // Uploads (`blobs.put`) are not served yet. DATA on a channel
-            // without a transfer is discarded (RFC 0003 §5.6).
-            Incoming::Data { .. } => {}
+            // Upload bytes and terminal input. DATA on a channel without a
+            // consumer is discarded (RFC 0003 §5.6). A consumer that falls
+            // behind holds up this reader, which is the socket's
+            // backpressure.
+            Incoming::Data { channel, fin, body } => {
+                if let Some(target) = conn.data_target(channel)
+                    && target.send(DataChunk { fin, body }).await.is_err()
+                {
+                    // Its call was cancelled: free the channel.
+                    conn.close_upload(channel);
+                }
+            }
             Incoming::Message(body, encoding) => {
                 if encoding != conn.encoding {
                     conn.goodbye(
@@ -961,7 +1099,7 @@ fn handle_message(conn: &Arc<Conn>, context: &Arc<V8Context>, message: ClientMes
 }
 
 fn handle_call(conn: &Arc<Conn>, context: &Arc<V8Context>, id: u32, method: Method) {
-    let Some(scope) = method.scope() else {
+    let Some(scopes) = method.required_scopes() else {
         conn.push_reply(Reply::error(
             id,
             Error::new(
@@ -971,7 +1109,10 @@ fn handle_call(conn: &Arc<Conn>, context: &Arc<V8Context>, id: u32, method: Meth
         ));
         return;
     };
-    if !scope.granted_by(&conn.scopes) {
+    if let Some(scope) = scopes
+        .into_iter()
+        .find(|scope| !scope.granted_by(&conn.scopes))
+    {
         conn.push_reply(Reply::error(
             id,
             Error::new(
@@ -1003,6 +1144,25 @@ fn handle_call(conn: &Arc<Conn>, context: &Arc<V8Context>, id: u32, method: Meth
             return;
         }
     }
+    // An upload's DATA follows the call at once: route it before the
+    // call's task exists.
+    let upload = match &method {
+        Method::BlobsPut(params) => match conn.open_upload(params.channel) {
+            Ok(upload) => Some(upload),
+            Err(_) => {
+                conn.finish_call(id);
+                conn.push_reply(Reply::error(
+                    id,
+                    Error::new(
+                        ErrorCode::BadRequest,
+                        format!("channel {} is in use", params.channel),
+                    ),
+                ));
+                return;
+            }
+        },
+        _ => None,
+    };
     let task_conn = conn.clone();
     let task_context = context.clone();
     let task = tokio::spawn(async move {
@@ -1015,13 +1175,13 @@ fn handle_call(conn: &Arc<Conn>, context: &Arc<V8Context>, id: u32, method: Meth
                 }
             }
             method => {
-                let outcome =
-                    tokio::task::spawn_blocking(move || methods::handle(&task_context, method))
-                        .await;
-                match outcome {
-                    Ok(Ok(result)) => Reply::ok(id, result),
-                    Ok(Err(error)) => Reply::error(id, error),
-                    Err(_) => Reply::error(id, Error::new(ErrorCode::Internal, "the call failed")),
+                let call = catalog::CallContext {
+                    conn: task_conn.clone(),
+                    upload,
+                };
+                match catalog::run(task_context, call, method).await {
+                    Ok(result) => Reply::ok(id, result),
+                    Err(error) => Reply::error(id, error),
                 }
             }
         };
@@ -1072,17 +1232,31 @@ fn handle_subscribe(conn: &Arc<Conn>, context: &Arc<V8Context>, subscribe: Subsc
         conn: conn.clone(),
         channel,
     };
-    let Some(scope) = stream.scope() else {
+    let Some(scopes) = stream.required_scopes() else {
         sink.end(EndReason::Error {
             error: Error::new(ErrorCode::Unsupported, "unknown stream"),
         });
         return true;
     };
-    if !scope.granted_by(&conn.scopes) {
+    if !scopes.iter().all(|scope| scope.granted_by(&conn.scopes)) {
         sink.end(EndReason::Forbidden);
         return true;
     }
+    // Input DATA may follow the subscribe at once: route it before the
+    // stream's task exists.
+    let input = match &stream {
+        StreamSpec::Terminal(spec) if spec.interactive => conn.accept_input(channel),
+        _ => None,
+    };
     let context = context.clone();
+    let stream = match catalog::subscribe(sink, context.clone(), stream, after.clone(), input) {
+        Ok(task) => {
+            conn.set_channel_task(channel, task.abort_handle());
+            return true;
+        }
+        Err(rejected) => rejected,
+    };
+    let (sink, stream) = stream;
     let task = match stream {
         StreamSpec::Settings(_) => tokio::spawn(streams::settings(sink, context, after)),
         StreamSpec::BlobDownload(spec) => tokio::spawn(streams::blob_download(sink, context, spec)),
@@ -1095,7 +1269,8 @@ fn handle_subscribe(conn: &Arc<Conn>, context: &Arc<V8Context>, subscribe: Subsc
         StreamSpec::CommandOutput(spec) => {
             tokio::spawn(orchestration::command_output_stream(sink, context, spec))
         }
-        StreamSpec::Unknown => return true,
+        // Started by `catalog::subscribe` above; `Unknown` ended earlier.
+        _ => return true,
     };
     conn.set_channel_task(channel, task.abort_handle());
     true
@@ -1114,6 +1289,7 @@ mod tests {
             vec![Scope::Admin],
             ClientKind::Desktop,
             budget,
+            true,
         ))
     }
 
