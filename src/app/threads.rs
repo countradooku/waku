@@ -98,6 +98,12 @@ impl Threads {
     }
 
     /// Every thread the sidebar can list: the shell's rows, then drafts.
+    /// The daemon's threads, in catalog order (no local drafts).
+    #[cfg(feature = "perf-counters")]
+    pub(super) fn shell_ids(&self) -> impl Iterator<Item = Uuid> + '_ {
+        self.shell.threads.iter().map(|thread| thread.id)
+    }
+
     pub(super) fn listed(&self) -> impl Iterator<Item = &ThreadView> {
         self.shell.threads.iter().map(Arc::as_ref).chain(
             self.drafts

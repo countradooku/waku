@@ -473,6 +473,20 @@ def write_app_state(home: Path, project_id: str, thread_id: str) -> None:
     path.write_text(json.dumps(state))
 
 
+def bring_to_front(pid: int) -> None:
+    """Raise the app's window: a covered GPUI window draws nothing, and the
+    run is then discarded. Best effort (macOS only, needs Automation access
+    to System Events)."""
+    if sys.platform != "darwin":
+        return
+    subprocess.run(
+        ["osascript", "-e",
+         f'tell application "System Events" to set frontmost of '
+         f'(first process whose unix id is {pid}) to true'],
+        capture_output=True, timeout=10, check=False,
+    )
+
+
 class App:
     def __init__(self, bins: Path, run_dir: Path, home: Path, daemon: BenchDaemon,
                  extra_env: dict[str, str] | None = None):
@@ -504,7 +518,9 @@ class App:
             report = self.counters()
             return report if report and report.get("startup", {}).get(key) is not None else None
 
-        return wait_for(ready, timeout, what=f"app {key}")
+        report = wait_for(ready, timeout, what=f"app {key}")
+        bring_to_front(self.pid)
+        return report
 
     def fresh_counters(self, after: float) -> dict:
         """The first report written after monotonic time `after`."""

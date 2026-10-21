@@ -22,10 +22,11 @@ impl Waku {
     }
 
     /// Bench harness hook, compiled only with `perf-counters`: when
-    /// `WAKU_PERF_VISIT_SESSIONS_MS` is set, select every started session
+    /// `WAKU_PERF_VISIT_SESSIONS_MS` is set, select every daemon thread
     /// once, in catalog order, one per interval, through the same path as a
     /// sidebar click. The memory scenarios use it to visit N long sessions
-    /// without UI input. Each visit bumps `totals.session_visits`.
+    /// without UI input. Each visit bumps `totals.session_visits`. It waits
+    /// for the shell stream to list threads before it can run out of them.
     #[cfg(feature = "perf-counters")]
     pub(super) fn start_perf_session_visits(&mut self, cx: &mut Context<Self>) {
         let Some(interval) = std::env::var("WAKU_PERF_VISIT_SESSIONS_MS")
@@ -42,10 +43,8 @@ impl Waku {
                 let next = waku.update(cx, |waku, cx| {
                     let next = waku
                         .threads
-                        .listed()
-                        .filter(|session| session.has_started() && !visited.contains(&session.id))
-                        .map(|session| session.id)
-                        .next();
+                        .shell_ids()
+                        .find(|id| !visited.contains(id));
                     if let Some(session_id) = next {
                         waku.select_session(session_id, cx);
                         crate::perf_counters::session_visit();
@@ -56,6 +55,8 @@ impl Waku {
                     Ok(Some(session_id)) => {
                         visited.insert(session_id);
                     }
+                    // The thread list has not arrived yet.
+                    Ok(None) if visited.is_empty() => {}
                     _ => break,
                 }
             }
