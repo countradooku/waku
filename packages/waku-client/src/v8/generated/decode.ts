@@ -1302,6 +1302,7 @@ export const resultNormalizers: { readonly [M in MethodName]: (value: any) => Me
   "providers.probe": (value: any) => value,
   "providers.models": (value: any) => value,
   "providers.planUsage": (value: any) => value,
+  "providerSessions.list": (value: any) => value,
   "usage.history": (value: any) => normalizeUsageHistory(value),
   "settings.update": (value: any) => value,
   "storage.worktreeCleanupStatus": (value: any) => normalizeWorktreeCleanupStatus(value),

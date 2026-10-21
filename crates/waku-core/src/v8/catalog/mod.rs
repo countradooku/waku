@@ -181,6 +181,9 @@ pub(crate) fn handle(
         Method::ProvidersPlanUsage(params) => {
             R::ProvidersPlanUsage(providers::plan_usage(context, params)?)
         }
+        Method::ProviderSessionsList(params) => {
+            R::ProviderSessionsList(providers::provider_sessions(context, params)?)
+        }
         Method::UsageHistoryGet(params) => R::UsageHistoryGet(providers::usage(context, params)?),
         Method::ComputerUsePermissions(params) => {
             R::ComputerUsePermissions(providers::computer_permissions(context, local, params)?)

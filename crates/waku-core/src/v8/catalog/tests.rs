@@ -1171,6 +1171,24 @@ fn providers_models_probe_usage_and_skills() {
         refresh: false,
     });
     assert_eq!(remote_code(unknown).code, ErrorCode::NotFound);
+    // A disabled provider lists no sessions (and its CLI is not asked).
+    client
+        .call::<method::SettingsUpdate>(SettingsUpdateParams {
+            base_revision: None,
+            patch: SettingsPatch {
+                disabled_providers: Some(vec!["codex".into()]),
+                ..SettingsPatch::default()
+            },
+            op_id: op(),
+        })
+        .unwrap();
+    let sessions = client
+        .call::<method::ProviderSessionsList>(ProviderSessionsListParams {
+            instance_id: "codex".into(),
+            limit: Some(10),
+        })
+        .unwrap();
+    assert!(sessions.is_empty());
 
     let history = client
         .call::<method::UsageHistoryGet>(UsageHistoryParams {

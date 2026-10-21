@@ -192,6 +192,10 @@ export interface Methods {
     params: T.InstanceParams;
     result: T.PlanUsage | null;
   };
+  "providerSessions.list": {
+    params: T.ProviderSessionsListParams;
+    result: Array<T.ProviderSessionSummary>;
+  };
   "usage.history": {
     params: T.UsageHistoryParams;
     result: T.UsageHistory;
@@ -273,6 +277,7 @@ export const METHODS: { readonly [M in MethodName]: MethodInfo } = {
   "providers.probe": { scope: "read", opId: false },
   "providers.models": { scope: "read", opId: false },
   "providers.planUsage": { scope: "read", opId: false },
+  "providerSessions.list": { scope: "read", opId: false },
   "usage.history": { scope: "read", opId: false },
   "settings.update": { scope: "settings:write", opId: true },
   "storage.worktreeCleanupStatus": { scope: "read", opId: false },

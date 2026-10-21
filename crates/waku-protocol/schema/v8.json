@@ -7270,6 +7270,69 @@
       ],
       "type": "object"
     },
+    "ProviderSessionSummary": {
+      "description": "A provider-native conversation a thread can be imported from\n(`threadImport`).",
+      "properties": {
+        "createdAt": {
+          "description": "Milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "cwd": {
+          "description": "Where the conversation ran, on the daemon host.",
+          "type": "string"
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "nativeId": {
+          "description": "The provider's id for the conversation.",
+          "type": "string"
+        },
+        "resumeCursor": {
+          "$ref": "#/$defs/JsonText",
+          "description": "The driver's opaque resume cursor, passed back unchanged."
+        },
+        "title": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "instanceId",
+        "nativeId",
+        "resumeCursor",
+        "title",
+        "cwd",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ProviderSessionsListParams": {
+      "description": "`providerSessions.list` params: one provider's resumable CLI\nconversations on the daemon host, newest first, without those already\nimported. Only the chosen provider's CLI is asked.",
+      "properties": {
+        "instanceId": {
+          "type": "string"
+        },
+        "limit": {
+          "description": "At most [`MAX_PROVIDER_SESSIONS`], which is also the default.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "instanceId"
+      ],
+      "type": "object"
+    },
     "ProviderStatus": {
       "description": "A provider instance as the providers list shows it.",
       "properties": {
@@ -14452,6 +14515,20 @@
             "type": "null"
           }
         ]
+      },
+      "scope": "read"
+    },
+    {
+      "name": "providerSessions.list",
+      "opId": false,
+      "params": {
+        "$ref": "#/$defs/ProviderSessionsListParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/ProviderSessionSummary"
+        },
+        "type": "array"
       },
       "scope": "read"
     },

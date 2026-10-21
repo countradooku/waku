@@ -1717,6 +1717,35 @@ export type ProviderSession = {
   updatedAt: number;
 };
 
+/**
+ * A provider-native conversation a thread can be imported from
+ * (`threadImport`).
+ */
+export type ProviderSessionSummary = {
+  /** Milliseconds since the Unix epoch. */
+  createdAt: number;
+  /** Where the conversation ran, on the daemon host. */
+  cwd: string;
+  instanceId: string;
+  /** The provider's id for the conversation. */
+  nativeId: string;
+  /** The driver's opaque resume cursor, passed back unchanged. */
+  resumeCursor: JsonText;
+  title: string;
+  updatedAt: number;
+};
+
+/**
+ * `providerSessions.list` params: one provider's resumable CLI
+ * conversations on the daemon host, newest first, without those already
+ * imported. Only the chosen provider's CLI is asked.
+ */
+export type ProviderSessionsListParams = {
+  instanceId: string;
+  /** At most [`MAX_PROVIDER_SESSIONS`], which is also the default. */
+  limit?: number;
+};
+
 /** A provider instance as the providers list shows it. */
 export type ProviderStatus = {
   binaryOverride?: string;

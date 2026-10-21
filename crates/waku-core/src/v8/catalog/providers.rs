@@ -16,13 +16,19 @@ use waku_protocol::v8::{
     UsageMonth, UsageProject, UsageProviderPart, UsageProviderSlice, UsageWindow,
 };
 
-use super::{Domain, call, content_revision, display_path, provider_kind, unexpected};
+use super::{
+    Domain, call, content_revision, display_path, provider_kind, seconds_to_ms, unexpected,
+};
 use crate::model::ProviderKind;
 use crate::protocol::{Command, ResponsePayload};
 use crate::settings::DaemonSettings;
 use crate::v8::V8Context;
 use crate::v8::connection::StreamSink;
 use crate::v8::methods::projects;
+use waku_protocol::orchestration::JsonText;
+use waku_protocol::v8::{
+    MAX_PROVIDER_SESSIONS, ProviderSessionSummary, ProviderSessionsListParams,
+};
 
 /// Provider statuses and plan usage for the `providers` stream. Statuses
 /// change through settings and probes; nothing here runs on a timer.
@@ -428,6 +434,44 @@ pub(super) async fn providers_stream(
             }
         }
     }
+}
+
+pub(super) fn provider_sessions(
+    context: &V8Context,
+    params: ProviderSessionsListParams,
+) -> Result<Vec<ProviderSessionSummary>, Error> {
+    let kind = provider_kind(&params.instance_id)?;
+    let limit = params
+        .limit
+        .unwrap_or(MAX_PROVIDER_SESSIONS)
+        .min(MAX_PROVIDER_SESSIONS) as usize;
+    let sessions = match call(
+        context,
+        Command::ListProviderSessions {
+            provider: kind,
+            limit,
+        },
+        Domain::Provider,
+    )? {
+        ResponsePayload::ProviderSessions { sessions } => sessions,
+        other => return Err(unexpected(&other)),
+    };
+    sessions
+        .into_iter()
+        .map(|session| {
+            Ok(ProviderSessionSummary {
+                instance_id: kind.id().into(),
+                native_id: session.cursor.native_id().to_owned(),
+                resume_cursor: JsonText(
+                    serde_json::to_string(&session.cursor).map_err(super::internal)?,
+                ),
+                title: session.title,
+                cwd: display_path(&session.cwd),
+                created_at: seconds_to_ms(session.created_at),
+                updated_at: seconds_to_ms(session.updated_at),
+            })
+        })
+        .collect()
 }
 
 fn legacy_window(window: UsageWindow) -> Result<crate::usage_history::UsageWindow, Error> {

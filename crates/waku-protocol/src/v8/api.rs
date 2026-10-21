@@ -187,6 +187,8 @@ methods! {
     "providers.models" => ProvidersModels(ProvidersModelsParams) -> ProviderModels, scope = Read;
     /// The account's plan usage; absent when the provider reports none.
     "providers.planUsage" => ProvidersPlanUsage(InstanceParams) -> Option<PlanUsage>, scope = Read;
+    /// One provider's resumable CLI conversations, for `threadImport`.
+    "providerSessions.list" => ProviderSessionsList(ProviderSessionsListParams) -> Vec<ProviderSessionSummary>, scope = Read;
     "usage.history" => UsageHistoryGet(UsageHistoryParams) -> UsageHistory, scope = Read;
     "settings.update" => SettingsUpdate(SettingsUpdateParams) -> SettingsSnapshot, scope = SettingsWrite, op_id;
     "storage.worktreeCleanupStatus" => StorageWorktreeCleanupStatus(NoParams) -> WorktreeCleanupStatus, scope = Read;

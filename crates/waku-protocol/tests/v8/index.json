@@ -510,6 +510,14 @@
     },
     {
       "direction": "client",
+      "name": "client_call_provider_sessions_list"
+    },
+    {
+      "direction": "server",
+      "name": "server_reply_provider_sessions_list"
+    },
+    {
+      "direction": "client",
       "name": "client_subscribe_drafts"
     },
     {
@@ -607,7 +615,8 @@
       "50": "settings.update",
       "51": "storage.worktreeCleanupStatus",
       "52": "storage.runWorktreeCleanup",
-      "53": "computerUse.permissions"
+      "53": "computerUse.permissions",
+      "54": "providerSessions.list"
     },
     "channels": {
       "1": "settings",

@@ -219,6 +219,43 @@ pub enum ProvidersItem {
     Unknown,
 }
 
+// -- providerSessions.list --------------------------------------------------
+
+/// `providerSessions.list` returns at most this many sessions.
+pub const MAX_PROVIDER_SESSIONS: u32 = 500;
+
+/// `providerSessions.list` params: one provider's resumable CLI
+/// conversations on the daemon host, newest first, without those already
+/// imported. Only the chosen provider's CLI is asked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSessionsListParams {
+    pub instance_id: String,
+    /// At most [`MAX_PROVIDER_SESSIONS`], which is also the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// A provider-native conversation a thread can be imported from
+/// (`threadImport`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSessionSummary {
+    pub instance_id: String,
+    /// The provider's id for the conversation.
+    pub native_id: String,
+    /// The driver's opaque resume cursor, passed back unchanged.
+    pub resume_cursor: crate::orchestration::JsonText,
+    pub title: String,
+    /// Where the conversation ran, on the daemon host.
+    pub cwd: String,
+    /// Milliseconds since the Unix epoch.
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 // -- usage.history ----------------------------------------------------------
 
 /// A usage reporting window.

@@ -824,6 +824,24 @@ pub fn calls() -> Vec<CallSample> {
                 accessibility: false,
             }),
         ),
+        (
+            Method::ProviderSessionsList(ProviderSessionsListParams {
+                instance_id: "codex".into(),
+                limit: Some(50),
+            }),
+            R::ProviderSessionsList(vec![ProviderSessionSummary {
+                instance_id: "codex".into(),
+                native_id: "01900000-0000-7000-8000-000000000001".into(),
+                resume_cursor: waku_protocol::orchestration::JsonText(
+                    r#"{"provider":"codex","threadId":"01900000-0000-7000-8000-000000000001"}"#
+                        .into(),
+                ),
+                title: "Refactor the parser".into(),
+                cwd: "/Users/dev/waku".into(),
+                created_at: 1_760_000_000_000,
+                updated_at: 1_760_000_500_000,
+            }]),
+        ),
     ];
     samples
         .into_iter()
