@@ -885,18 +885,25 @@ fn replay_is_deterministic() {
         let second = replay_as(&scenario, &provider);
         // Only the temporary workspace path differs between two runs.
         let normalize = |result: &ScenarioResult| -> Vec<String> {
-            let workspace = result.workspace.display().to_string();
-            // Inside JSON a Windows path's backslashes are escaped.
-            let escaped = serde_json::to_string(&workspace).unwrap();
-            let escaped = &escaped[1..escaped.len() - 1];
+            // Inside JSON a Windows path's backslashes are escaped, once per
+            // level (a resume cursor is JSON inside a JSON string): the most
+            // escaped spelling is replaced first.
+            let mut spellings = vec![result.workspace.display().to_string()];
+            for _ in 0..3 {
+                let escaped = serde_json::to_string(spellings.last().unwrap()).unwrap();
+                spellings.push(escaped[1..escaped.len() - 1].to_owned());
+            }
+            spellings.dedup();
             result
                 .events
                 .iter()
                 .map(|event| {
-                    serde_json::to_string(event)
-                        .unwrap()
-                        .replace(escaped, "<workspace>")
-                        .replace(&workspace, "<workspace>")
+                    spellings
+                        .iter()
+                        .rev()
+                        .fold(serde_json::to_string(event).unwrap(), |json, spelling| {
+                            json.replace(spelling, "<workspace>")
+                        })
                 })
                 .collect()
         };

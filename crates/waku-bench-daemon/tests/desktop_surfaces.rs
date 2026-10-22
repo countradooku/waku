@@ -491,7 +491,14 @@ fn settings_write_and_follow() {
         heard.storage.worktree_cleanup.merged,
         other.storage.worktree_cleanup.merged
     );
-    assert!(remote.try_recv().is_err());
+    // A storage change can be broadcast again (the cleanup scheduler wakes),
+    // but never as this desktop's own edit.
+    while let Ok(again) = remote.try_recv() {
+        assert_eq!(
+            again.storage.worktree_cleanup.merged,
+            other.storage.worktree_cleanup.merged
+        );
+    }
 
     // Storage status reads through the same surface.
     let status = settings::worktree_cleanup_status(&desktop).unwrap();
