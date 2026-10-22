@@ -6,7 +6,7 @@
 //! shape, writes them without ever blocking the UI thread, and reports
 //! changes made by other clients.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +30,8 @@ use waku_protocol::storage as legacy;
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// A lost settings stream is resubscribed after this.
 const RESUBSCRIBE_INTERVAL: Duration = Duration::from_secs(1);
+/// Confirmed writes whose echo the settings stream has not delivered yet.
+const MAX_UNECHOED: usize = 16;
 
 /// The provider a settings key names: its instance id, or the camelCase
 /// name the daemon's settings snapshot still uses for a few kinds.
@@ -296,6 +298,10 @@ struct WriterState {
     desired: Option<DaemonSettings>,
     /// What the daemon last confirmed holding.
     persisted: Option<DaemonSettings>,
+    /// Documents the daemon confirmed for this writer, oldest first, until
+    /// the settings stream delivers them; the stream can lag behind the
+    /// writer, so `persisted` alone cannot tell an echo from a remote edit.
+    unechoed: VecDeque<DaemonSettings>,
     stopped: bool,
 }
 
@@ -338,6 +344,7 @@ impl SettingsSync {
             state: Mutex::new(WriterState {
                 desired: None,
                 persisted,
+                unechoed: VecDeque::new(),
                 stopped: false,
             }),
             idle: Condvar::new(),
@@ -430,7 +437,12 @@ fn write_settings(weak: &std::sync::Weak<WriterInner>, wakes: &Receiver<()>) {
             match update(&inner.daemon, &desired) {
                 Ok(snapshot) => {
                     let mut state = inner.state.lock();
-                    state.persisted = Some(settings_from_wire(&snapshot.settings));
+                    let confirmed = settings_from_wire(&snapshot.settings);
+                    if state.unechoed.len() == MAX_UNECHOED {
+                        state.unechoed.pop_front();
+                    }
+                    state.unechoed.push_back(confirmed.clone());
+                    state.persisted = Some(confirmed);
                     // The daemon normalizes some fields (paths, cleanup
                     // bounds); what it confirmed is what it holds, and the
                     // desire is met once it was sent unchanged.
@@ -459,6 +471,10 @@ fn write_settings(weak: &std::sync::Weak<WriterInner>, wakes: &Receiver<()>) {
 
 fn follow_settings(inner: &WriterInner, mut on_change: impl FnMut(RemoteSettings) -> bool) {
     let mut after = None;
+    // The last document the stream delivered. A subscription's snapshot can
+    // predate this writer's latest confirmation, so items are compared with
+    // the stream's own history, not with `persisted`.
+    let mut seen = inner.state.lock().persisted.clone();
     loop {
         let Ok(client) = inner.daemon.client() else {
             std::thread::sleep(RESUBSCRIBE_INTERVAL);
@@ -485,20 +501,32 @@ fn follow_settings(inner: &WriterInner, mut on_change: impl FnMut(RemoteSettings
                 _ => continue,
             };
             let settings = settings_from_wire(&settings);
+            if seen
+                .as_ref()
+                .is_some_and(|seen| same_settings(seen, &settings))
+            {
+                continue;
+            }
+            seen = Some(settings.clone());
             let mut state = inner.state.lock();
+            // An echo of this writer's own edit, and of nothing after it.
+            if let Some(echo) = state
+                .unechoed
+                .iter()
+                .position(|own| same_settings(own, &settings))
+            {
+                state.unechoed.drain(..=echo);
+                continue;
+            }
             // While this desktop's own edit is in flight, the daemon's
             // document is about to change again; the writer's confirmation
             // settles it.
             if !WriterInner::settled(&state) {
                 continue;
             }
-            if state
-                .persisted
-                .as_ref()
-                .is_some_and(|persisted| same_settings(persisted, &settings))
-            {
-                continue;
-            }
+            // Another client's edit supersedes every earlier write; an echo
+            // still owed was coalesced away by the stream.
+            state.unechoed.clear();
             state.persisted = Some(settings.clone());
             drop(state);
             if !on_change(settings) {
