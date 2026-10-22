@@ -582,14 +582,24 @@ fn acp_replay_is_deterministic() {
     for scenario in ["simple", "steering_restart", "tool_call_approval"] {
         for provider in ["acp", "grok"] {
             let normalize = |result: &ScenarioResult| -> Vec<String> {
-                let workspace = result.workspace.display().to_string();
+                // A Windows path's backslashes are escaped once per JSON
+                // level; the most escaped spelling is replaced first.
+                let mut spellings = vec![result.workspace.display().to_string()];
+                for _ in 0..3 {
+                    let escaped = serde_json::to_string(spellings.last().unwrap()).unwrap();
+                    spellings.push(escaped[1..escaped.len() - 1].to_owned());
+                }
+                spellings.dedup();
                 result
                     .events
                     .iter()
                     .map(|event| {
-                        serde_json::to_string(event)
-                            .unwrap()
-                            .replace(&workspace, "<workspace>")
+                        spellings
+                            .iter()
+                            .rev()
+                            .fold(serde_json::to_string(event).unwrap(), |json, spelling| {
+                                json.replace(spelling, "<workspace>")
+                            })
                     })
                     .collect()
             };
