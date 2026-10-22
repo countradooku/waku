@@ -1,14 +1,4 @@
-import type {
-  DaySlice,
-  ModelSlice,
-  MonthSlice,
-  Project,
-  ProjectSlice,
-  ProviderDay,
-  ProviderSlice,
-  UsageHistory,
-  UsageWindow,
-} from '@waku/client'
+import type * as T from '@waku/client/v8'
 import { useState, type ReactNode } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import { ControlMenu } from '@/components/control-menu'
@@ -20,26 +10,35 @@ import type { Translator } from '@/lib/transcript-presentation'
 import { projectDisplayName } from '@/lib/project-presentation'
 import { cn } from '@/lib/utils'
 
+type UsageHistory = T.UsageHistory
+type UsageWindow = T.UsageWindow
+type DaySlice = T.UsageDay
+type ModelSlice = T.UsageModelSlice
+type MonthSlice = T.UsageMonth
+type ProjectSlice = T.UsageProject
+type ProviderSlice = T.UsageProviderSlice
+type ProviderParts = T.UsageProviderPart[]
+
 type UsageView = 'daily' | 'monthly' | 'projects'
 type UsageBreakdown = 'model' | 'day'
 
 const USAGE_WINDOWS: Array<{ window: UsageWindow; labelKey: string }> = [
-  { window: { trailingDays: 7 }, labelKey: 'usage.last_7_days' },
-  { window: { trailingDays: 30 }, labelKey: 'usage.last_30_days' },
-  { window: { trailingDays: 90 }, labelKey: 'usage.last_90_days' },
-  { window: 'thisMonth', labelKey: 'usage.this_month' },
-  { window: 'lastMonth', labelKey: 'usage.last_month' },
+  { window: { type: 'trailingDays', days: 7 }, labelKey: 'usage.last_7_days' },
+  { window: { type: 'trailingDays', days: 30 }, labelKey: 'usage.last_30_days' },
+  { window: { type: 'trailingDays', days: 90 }, labelKey: 'usage.last_90_days' },
+  { window: { type: 'thisMonth' }, labelKey: 'usage.this_month' },
+  { window: { type: 'lastMonth' }, labelKey: 'usage.last_month' },
 ]
 
-export function UsageSettings({ projects }: { projects: Project[] }) {
+export function UsageSettings({ projects }: { projects: T.Project[] }) {
   const { locale, t } = useI18n()
   const [view, setView] = useState<UsageView>('daily')
-  const [window, setWindow] = useState<UsageWindow>({ trailingDays: 30 })
+  const [window, setWindow] = useState<UsageWindow>({ type: 'trailingDays', days: 30 })
   const [metric, setMetric] = useState<UsageMetric>('cost')
   const [breakdown, setBreakdown] = useState<UsageBreakdown>('model')
   const [projectFilter, setProjectFilter] = useState('')
-  const requestedWindow: UsageWindow = view === 'monthly' ? { months: 12 } : window
-  const usage = useUsageHistory(requestedWindow, projects)
+  const requestedWindow: UsageWindow = view === 'monthly' ? { type: 'months', months: 12 } : window
+  const usage = useUsageHistory(requestedWindow, projects.map((project) => project.id))
   const history = usage.data && historyMatchesView(usage.data, view) ? usage.data : undefined
   const range = history
     ? formatUsageRange(history.sinceDay, history.untilDay, view === 'monthly', locale, t)
@@ -106,7 +105,7 @@ export function UsageSettings({ projects }: { projects: Project[] }) {
               scanned: formatCount(history.scannedFiles, locale),
               skipped: formatCount(history.skippedFiles, locale),
               records: formatCount(history.records, locale),
-              seconds: formatDurationValue(history.scanDuration, locale),
+              seconds: formatDurationValue(history.scanDurationMs, locale),
             })}
           </div>
         </>
@@ -292,8 +291,8 @@ function DayTable({ days }: { days: DaySlice[] }) {
       {days.length ? [...days].reverse().slice(0, 8).map((day) => (
         <div className="flex min-w-[600px] items-center gap-3 border-b py-2 text-[11.5px]" key={day.day}>
           <span className="flex-1">{formatDay(day.day, locale)}</span>
-          <span className="w-20 text-right tabular-nums text-[var(--text-tertiary)]">{formatMoney(day.byProvider[0].costUsd, locale)}</span>
-          <span className="w-20 text-right tabular-nums text-[var(--text-tertiary)]">{formatMoney(day.byProvider[1].costUsd, locale)}</span>
+          <span className="w-20 text-right tabular-nums text-[var(--text-tertiary)]">{formatMoney(providerPart(day.byProvider, 'claude', true), locale)}</span>
+          <span className="w-20 text-right tabular-nums text-[var(--text-tertiary)]">{formatMoney(providerPart(day.byProvider, 'codex', true), locale)}</span>
           <span className="w-20 text-right tabular-nums">{formatMoney(day.costUsd, locale)}</span>
           <span className="w-20 text-right tabular-nums text-[var(--text-tertiary)]">{formatNumber(day.totalTokens, locale)}</span>
         </div>
@@ -395,8 +394,8 @@ function MonthUsageRow({
       </div>
       <UsageSplitBar byProvider={month.byProvider} byCost={byCost} length={peak ? usageValue(month, byCost) / peak : 0} />
       <div className="mt-1.5 flex items-center gap-3 text-[9.5px] text-[var(--text-tertiary)]">
-        <ProviderValue provider="claude" value={providerValue(month.byProvider[0], byCost)} byCost={byCost} locale={locale} />
-        <ProviderValue provider="codex" value={providerValue(month.byProvider[1], byCost)} byCost={byCost} locale={locale} />
+        <ProviderValue provider="claude" value={providerPart(month.byProvider, 'claude', byCost)} byCost={byCost} locale={locale} />
+        <ProviderValue provider="codex" value={providerPart(month.byProvider, 'codex', byCost)} byCost={byCost} locale={locale} />
         <span className="min-w-0 flex-1 truncate text-right">{topModelsLabel(month.topModels)}</span>
       </div>
     </div>
@@ -410,7 +409,7 @@ function ProjectsUsage({
   onFilterChange,
 }: {
   history: UsageHistory
-  projects: Project[]
+  projects: T.Project[]
   filter: string
   onFilterChange: (filter: string) => void
 }) {
@@ -472,7 +471,7 @@ function ProjectUsageRow({
   t,
 }: {
   project: ProjectSlice
-  projects: Project[]
+  projects: T.Project[]
   byCost: boolean
   peak: number
   locale: AppLocale
@@ -495,8 +494,8 @@ function ProjectUsageRow({
       <div className="mt-0.5 truncate text-[10.5px] text-[var(--text-tertiary)]">{caption}</div>
       <UsageSplitBar byProvider={project.byProvider} byCost={byCost} length={peak ? usageValue(project, byCost) / peak : 0} />
       <div className="mt-1.5 flex items-center gap-3 text-[9.5px] text-[var(--text-tertiary)]">
-        <ProviderValue provider="claude" value={providerValue(project.byProvider[0], byCost)} byCost={byCost} locale={locale} />
-        <ProviderValue provider="codex" value={providerValue(project.byProvider[1], byCost)} byCost={byCost} locale={locale} />
+        <ProviderValue provider="claude" value={providerPart(project.byProvider, 'claude', byCost)} byCost={byCost} locale={locale} />
+        <ProviderValue provider="codex" value={providerPart(project.byProvider, 'codex', byCost)} byCost={byCost} locale={locale} />
         <span className="min-w-0 flex-1 truncate text-right">{topModelsLabel(project.topModels)}</span>
       </div>
     </div>
@@ -521,9 +520,9 @@ function UsageListCard({ title, caption, total, action, children }: { title: str
   )
 }
 
-function UsageSplitBar({ byProvider, byCost, length }: { byProvider: [ProviderDay, ProviderDay]; byCost: boolean; length: number }) {
-  const claude = providerValue(byProvider[0], byCost)
-  const codex = providerValue(byProvider[1], byCost)
+function UsageSplitBar({ byProvider, byCost, length }: { byProvider: ProviderParts; byCost: boolean; length: number }) {
+  const claude = providerPart(byProvider, 'claude', byCost)
+  const codex = providerPart(byProvider, 'codex', byCost)
   const total = claude + codex
   return (
     <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--inset)]">
@@ -542,8 +541,8 @@ function MonthActivityStrip({ history, month, byCost }: { history: UsageHistory;
     <div className="flex h-5 w-[168px] shrink-0 items-end gap-px" aria-hidden="true">
       {days.map((day) => {
         const value = byCost ? day.costUsd : day.totalTokens
-        const claude = providerValue(day.byProvider[0], byCost)
-        const total = claude + providerValue(day.byProvider[1], byCost)
+        const claude = providerPart(day.byProvider, 'claude', byCost)
+        const total = claude + providerPart(day.byProvider, 'codex', byCost)
         return (
           <div className="flex h-full min-w-px flex-1 flex-col-reverse overflow-hidden rounded-t-[1px] bg-[var(--inset)]" key={day.day}>
             <div className="w-full bg-[var(--provider-codex)]" style={{ height: `${peak ? value / peak * 100 * (total ? 1 - claude / total : 0) : 0}%` }} />
@@ -628,12 +627,19 @@ function UsageEmpty({ message }: { message?: string }) {
 }
 
 function historyMatchesView(history: UsageHistory, view: UsageView) {
-  const monthly = typeof history.window === 'object' && 'months' in history.window
+  const monthly = history.window.type === 'months'
   return view === 'monthly' ? monthly : !monthly
 }
 
 function usageWindowKey(window: UsageWindow) {
-  return typeof window === 'string' ? window : 'trailingDays' in window ? `days:${window.trailingDays}` : `months:${window.months}`
+  switch (window.type) {
+    case 'trailingDays':
+      return `days:${window.days}`
+    case 'months':
+      return `months:${window.months}`
+    default:
+      return window.type
+  }
 }
 
 function usageWindowLabel(window: UsageWindow, t: Translator) {
@@ -669,7 +675,7 @@ function parseDay(day: string) {
   return new Date(`${day}T00:00:00Z`)
 }
 
-function projectIdentity(project: ProjectSlice, projects: Project[], t?: Translator) {
+function projectIdentity(project: ProjectSlice, projects: T.Project[], t?: Translator) {
   if (!project.path) return { name: t ? t('usage.other_sessions') : 'Other sessions', path: null }
   const known = projects.find((candidate) => candidate.path === project.path)
   const normalized = project.path.replace(/[\\/]+$/, '')
@@ -681,13 +687,16 @@ function projectIdentity(project: ProjectSlice, projects: Project[], t?: Transla
   }
 }
 
-function topModelsLabel(models: Array<[string, number]>) {
+function topModelsLabel(models: T.ModelCost[]) {
   if (!models.length) return ''
-  return models.slice(0, 2).map(([model]) => model).join(' · ')
+  return models.slice(0, 2).map(({ model }) => model).join(' · ')
 }
 
-function providerValue(provider: ProviderDay, byCost: boolean) {
-  return byCost ? provider.costUsd : provider.totalTokens
+/** One provider's part of a day, month or project (`0` when it has none). */
+function providerPart(parts: ProviderParts, provider: string, byCost: boolean) {
+  const part = parts.find((candidate) => candidate.provider === provider)
+  if (!part) return 0
+  return byCost ? part.costUsd : part.totalTokens
 }
 
 function usageValue(item: { costUsd: number; totalTokens: number }, byCost: boolean) {
@@ -710,10 +719,8 @@ function formatCount(value: number, locale?: AppLocale) {
   return new Intl.NumberFormat(locale).format(value)
 }
 
-function formatDurationValue(duration: { secs: number; nanos: number }, locale: AppLocale) {
-  return new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(
-    duration.secs + duration.nanos / 1_000_000_000,
-  )
+function formatDurationValue(durationMs: number, locale: AppLocale) {
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(durationMs / 1_000)
 }
 
 function errorMessage(error: unknown) {

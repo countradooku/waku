@@ -2,35 +2,27 @@
 //!
 //! DeepSeek Harness exposes client-grade unary RPC over HTTP and two
 //! downlink-only WebSockets. One process hosts every Harness session; callers
-//! share it through `deepseek_pool`, while this module owns startup, typed RPC
-//! envelopes, stream fan-out, and process-tree teardown.
+//! share it through `deepseek_pool`, while this module owns startup, blocking
+//! typed RPC (session listing and history import) and process-tree teardown.
+//! Live sessions talk to the Host through the async driver
+//! (`driver::deepseek`), which opens its own downlinks.
 
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow, bail};
-use base64::Engine as _;
-use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::model::{
-    AgentTurn, Message, MessageRole, ProviderResumeCursor, ProviderSessionHistory,
-    ProviderSessionSummary, TurnStatus,
-};
+use crate::model::{ProviderResumeCursor, ProviderSessionSummary};
 
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(20);
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
-const STREAM_RETRY_DELAY: Duration = Duration::from_millis(200);
-const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 
 fn provider_timestamp(value: &Value) -> u64 {
     value
@@ -110,168 +102,6 @@ pub fn list_provider_sessions(
     Ok(parse_provider_summaries(&value, limit))
 }
 
-fn visible_text(value: &Value) -> Option<String> {
-    let text = value
-        .as_array()?
-        .iter()
-        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    (!text.trim().is_empty()).then_some(text)
-}
-
-fn start_import_turn(history: &mut ProviderSessionHistory, timestamp: u64) -> Uuid {
-    let id = Uuid::new_v4();
-    history.turns.push(AgentTurn {
-        id,
-        turn_count: history.turns.len() + 1,
-        status: TurnStatus::Interrupted,
-        provider_turn_started: true,
-        provider_resume_at: None,
-        started_at: timestamp,
-        completed_at: None,
-        checkpoint: None,
-    });
-    id
-}
-
-fn parse_provider_history(entries: &[Value]) -> ProviderSessionHistory {
-    let mut ordered = entries.to_vec();
-    ordered.sort_by_key(|entry| {
-        entry
-            .pointer("/event/seq")
-            .or_else(|| entry.get("seq"))
-            .and_then(Value::as_u64)
-            .unwrap_or(u64::MAX)
-    });
-    let mut history = ProviderSessionHistory::default();
-    let mut current_has_user = false;
-
-    for entry in ordered {
-        let event = entry.get("event").unwrap_or(&entry);
-        let kind = event.get("type").and_then(Value::as_str);
-        let timestamp = provider_timestamp(event.get("time").unwrap_or(&Value::Null));
-        let data = event.get("data").unwrap_or(&Value::Null);
-        match kind {
-            Some("turn/start") => {
-                if !current_has_user {
-                    start_import_turn(&mut history, timestamp);
-                } else if let Some(turn) = history.turns.last_mut() {
-                    turn.started_at = turn.started_at.min(timestamp);
-                }
-            }
-            Some("user/message")
-                if data.pointer("/source/kind").and_then(Value::as_str) == Some("user") =>
-            {
-                if history.turns.is_empty() || current_has_user {
-                    start_import_turn(&mut history, timestamp);
-                }
-                current_has_user = true;
-                let Some(text) = visible_text(data.get("content").unwrap_or(&Value::Null)) else {
-                    continue;
-                };
-                let turn_id = history.turns.last().expect("started above").id;
-                let mut message = Message::new_for_turn(MessageRole::User, text, turn_id);
-                message.created_at = timestamp;
-                history.messages.push(message);
-            }
-            Some("assistant/message") => {
-                let Some(turn) = history.turns.last_mut() else {
-                    continue;
-                };
-                let Some(text) =
-                    visible_text(data.pointer("/message/content").unwrap_or(&Value::Null))
-                else {
-                    continue;
-                };
-                if let Some(previous) = history.messages.last_mut().filter(|message| {
-                    message.role == MessageRole::Assistant && message.turn_id == Some(turn.id)
-                }) {
-                    if !previous.content.is_empty() {
-                        previous.content.push_str("\n\n");
-                    }
-                    previous.content.push_str(&text);
-                    previous.created_at = previous.created_at.max(timestamp);
-                } else {
-                    let mut message = Message::new_for_turn(MessageRole::Assistant, text, turn.id);
-                    message.created_at = timestamp;
-                    history.messages.push(message);
-                }
-            }
-            Some("turn/end") => {
-                let Some(turn) = history.turns.last_mut() else {
-                    continue;
-                };
-                turn.status = match data.pointer("/reason/kind").and_then(Value::as_str) {
-                    Some("completed" | "max-tokens") => TurnStatus::Completed,
-                    Some("aborted" | "cancelled" | "interrupted") => TurnStatus::Interrupted,
-                    _ => TurnStatus::Failed,
-                };
-                turn.completed_at = Some(timestamp.max(turn.started_at));
-                current_has_user = false;
-            }
-            _ => {}
-        }
-    }
-    history
-}
-
-pub fn provider_session_history(
-    binary: &Path,
-    session_id: &str,
-    visible_turn_limit: usize,
-) -> anyhow::Result<ProviderSessionHistory> {
-    let server = crate::deepseek_pool::acquire(binary)?;
-    let mut entries = Vec::new();
-    let mut before_seq = None;
-    let mut seen = std::collections::HashSet::new();
-    loop {
-        let mut payload = json!({"sessionId": session_id, "maxMessages": 200});
-        if let Some(before_seq) = before_seq {
-            payload["beforeSeq"] = json!(before_seq);
-        }
-        let page = server.rpc("session.history", payload)?;
-        let page_entries = page
-            .get("events")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let oldest = page_entries
-            .iter()
-            .filter_map(|entry| entry.pointer("/event/seq").or_else(|| entry.get("seq")))
-            .filter_map(Value::as_u64)
-            .min();
-        entries.extend(page_entries);
-        if !page
-            .get("hasMore")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            break;
-        }
-        let Some(oldest) = oldest.filter(|oldest| *oldest > 0) else {
-            break;
-        };
-        if !seen.insert(oldest) {
-            break;
-        }
-        before_seq = Some(oldest);
-    }
-    let mut history = parse_provider_history(&entries);
-    let retained = history
-        .turns
-        .iter()
-        .rev()
-        .take(visible_turn_limit)
-        .map(|turn| turn.id)
-        .collect::<std::collections::HashSet<_>>();
-    history
-        .messages
-        .retain(|message| message.turn_id.is_some_and(|id| retained.contains(&id)));
-    Ok(history)
-}
-
 // The development watcher terminates the app with SIGTERM, which does not run
 // Rust destructors. Keep one pipe open in Waku and let this wrapper terminate
 // the resident Host when that pipe closes, so a rebuild cannot orphan `dsh
@@ -304,85 +134,9 @@ while IFS= read -r _; do :; done
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 
-#[derive(Default)]
-struct EventHub {
-    subscribers: Mutex<HashMap<String, Vec<Sender<Value>>>>,
-}
-
-impl EventHub {
-    fn subscribe(&self, session_id: &str) -> Receiver<Value> {
-        let (sender, receiver) = unbounded();
-        self.subscribers
-            .lock()
-            .entry(session_id.to_owned())
-            .or_default()
-            .push(sender);
-        receiver
-    }
-
-    fn publish(&self, envelope: Value) {
-        let session_id = envelope
-            .pointer("/payload/sessionId")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let mut subscribers = self.subscribers.lock();
-        match session_id {
-            Some(session_id) => {
-                if let Some(targets) = subscribers.get_mut(&session_id) {
-                    targets.retain(|target| target.send(envelope.clone()).is_ok());
-                    if targets.is_empty() {
-                        subscribers.remove(&session_id);
-                    }
-                }
-            }
-            None => {
-                for targets in subscribers.values_mut() {
-                    targets.retain(|target| target.send(envelope.clone()).is_ok());
-                }
-                subscribers.retain(|_, targets| !targets.is_empty());
-            }
-        }
-    }
-}
-
-#[derive(Default)]
-struct StreamControl {
-    cancelled: AtomicBool,
-    sockets: Mutex<HashMap<&'static str, TcpStream>>,
-}
-
-impl StreamControl {
-    fn attach(&self, name: &'static str, stream: &TcpStream) -> std::io::Result<bool> {
-        let socket = stream.try_clone()?;
-        if self.cancelled.load(Ordering::Acquire) {
-            let _ = socket.shutdown(Shutdown::Both);
-            return Ok(false);
-        }
-        self.sockets.lock().insert(name, socket);
-        Ok(true)
-    }
-
-    fn detach(&self, name: &'static str) {
-        self.sockets.lock().remove(name);
-    }
-
-    fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        for (_, socket) in self.sockets.lock().drain() {
-            let _ = socket.shutdown(Shutdown::Both);
-        }
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-}
-
 pub(crate) struct DeepSeekServer {
     child: Arc<Mutex<Child>>,
     pub(crate) port: u16,
-    events: Arc<EventHub>,
-    streams: Arc<StreamControl>,
 }
 
 impl DeepSeekServer {
@@ -495,67 +249,7 @@ impl DeepSeekServer {
         };
 
         let child = Arc::new(Mutex::new(child));
-        let events = Arc::new(EventHub::default());
-        let streams = Arc::new(StreamControl::default());
-        for (name, path) in [("mux", "/api/events.mux"), ("host", "/api/events.host")] {
-            let events = Arc::clone(&events);
-            let streams = Arc::clone(&streams);
-            thread::Builder::new()
-                .name(format!("waku-deepseek-{name}-events"))
-                .spawn(move || run_downlink(name, port, path, &events, &streams))?;
-        }
-
-        let monitor_child = Arc::clone(&child);
-        let monitor_events = Arc::clone(&events);
-        let monitor_streams = Arc::clone(&streams);
-        thread::Builder::new()
-            .name("waku-deepseek-process-monitor".into())
-            .spawn(move || {
-                loop {
-                    if monitor_streams.is_cancelled() {
-                        return;
-                    }
-                    let status = monitor_child.lock().try_wait();
-                    match status {
-                        Ok(Some(status)) => {
-                            monitor_events.publish(json!({
-                                "type": "server-request",
-                                "rpcId": format!("waku-process-{}", Uuid::new_v4()),
-                                "method": "waku/process-exited",
-                                "payload": {
-                                    "type": "waku/process-exited",
-                                    "message": format!("DeepSeek Harness exited ({status})")
-                                }
-                            }));
-                            return;
-                        }
-                        Ok(None) => thread::sleep(Duration::from_millis(100)),
-                        Err(error) => {
-                            monitor_events.publish(json!({
-                            "type": "server-request",
-                            "rpcId": format!("waku-process-{}", Uuid::new_v4()),
-                            "method": "waku/process-exited",
-                            "payload": {
-                                "type": "waku/process-exited",
-                                "message": format!("could not observe DeepSeek Harness: {error}")
-                            }
-                        }));
-                            return;
-                        }
-                    }
-                }
-            })?;
-
-        Ok(Self {
-            child,
-            port,
-            events,
-            streams,
-        })
-    }
-
-    pub(crate) fn subscribe(&self, session_id: &str) -> Receiver<Value> {
-        self.events.subscribe(session_id)
+        Ok(Self { child, port })
     }
 
     pub(crate) fn rpc(&self, method: &str, payload: Value) -> anyhow::Result<Value> {
@@ -581,55 +275,6 @@ impl DeepSeekServer {
         rpc_result_value(method, &response)
     }
 
-    pub(crate) fn respond(&self, rpc_id: &str, value: Value) -> anyhow::Result<()> {
-        let body = json!({
-            "type": "client-response",
-            "rpcId": rpc_id,
-            "result": {"ok": true, "value": value},
-        });
-        let response = crate::http_wire::request_json(
-            &crate::http_wire::Endpoint::local(self.port),
-            "POST",
-            "/api/respond",
-            Some(&body),
-            RPC_TIMEOUT,
-        )?;
-        if response.get("accepted").and_then(Value::as_bool) == Some(true) {
-            Ok(())
-        } else {
-            bail!(
-                "DeepSeek Harness rejected an interaction response ({})",
-                response
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown reason")
-            )
-        }
-    }
-
-    pub(crate) fn reject_response(&self, rpc_id: &str, message: &str) -> anyhow::Result<()> {
-        let body = json!({
-            "type": "client-response",
-            "rpcId": rpc_id,
-            "result": {
-                "ok": false,
-                "error": {"code": "cancelled", "message": message, "details": {}}
-            },
-        });
-        let response = crate::http_wire::request_json(
-            &crate::http_wire::Endpoint::local(self.port),
-            "POST",
-            "/api/respond",
-            Some(&body),
-            RPC_TIMEOUT,
-        )?;
-        if response.get("accepted").and_then(Value::as_bool) == Some(true) {
-            Ok(())
-        } else {
-            bail!("DeepSeek Harness rejected a cancellation response")
-        }
-    }
-
     pub(crate) fn is_alive(&self) -> bool {
         self.child
             .lock()
@@ -638,7 +283,6 @@ impl DeepSeekServer {
     }
 
     pub(crate) fn shutdown(&self, timeout: Duration) {
-        self.streams.cancel();
         terminate_child(&mut self.child.lock(), timeout);
     }
 }
@@ -723,232 +367,6 @@ fn terminate_child(child: &mut Child, timeout: Duration) {
     let _ = child.wait();
 }
 
-fn run_downlink(
-    name: &'static str,
-    port: u16,
-    path: &'static str,
-    events: &EventHub,
-    control: &StreamControl,
-) {
-    let mut failures = 0_u32;
-    while !control.is_cancelled() {
-        match WebSocketReader::connect(port, path) {
-            Ok(mut reader) => {
-                failures = 0;
-                if control.attach(name, &reader.stream).ok() != Some(true) {
-                    return;
-                }
-                while !control.is_cancelled() {
-                    match reader.read_text_message() {
-                        Ok(Some(text)) => match serde_json::from_str::<Value>(&text) {
-                            Ok(envelope) => events.publish(envelope),
-                            Err(error) => events.publish(stream_error(format!(
-                                "DeepSeek Harness sent invalid {name} event JSON: {error}"
-                            ))),
-                        },
-                        Ok(None) => break,
-                        Err(_) if control.is_cancelled() => break,
-                        Err(_) => break,
-                    }
-                }
-                control.detach(name);
-            }
-            Err(_) => {
-                failures = failures.saturating_add(1);
-                if failures == 25 {
-                    events.publish(stream_error(format!(
-                        "DeepSeek Harness {name} event stream could not reconnect"
-                    )));
-                }
-            }
-        }
-        if !control.is_cancelled() {
-            thread::sleep(STREAM_RETRY_DELAY);
-        }
-    }
-}
-
-fn stream_error(message: String) -> Value {
-    json!({
-        "type": "server-request",
-        "rpcId": format!("waku-stream-{}", Uuid::new_v4()),
-        "method": "stream/error",
-        "payload": {
-            "type": "stream/error",
-            "error": {"code": "internal", "message": message, "details": {}}
-        }
-    })
-}
-
-struct WebSocketReader {
-    stream: TcpStream,
-    fragmented: Vec<u8>,
-    fragmented_opcode: Option<u8>,
-}
-
-impl WebSocketReader {
-    fn connect(port: u16, path: &str) -> anyhow::Result<Self> {
-        let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let key = base64::engine::general_purpose::STANDARD.encode(Uuid::new_v4().as_bytes());
-        write!(
-            stream,
-            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
-        )?;
-        stream.flush()?;
-
-        let mut header = Vec::new();
-        let mut byte = [0_u8; 1];
-        while !header.ends_with(b"\r\n\r\n") {
-            stream.read_exact(&mut byte)?;
-            header.push(byte[0]);
-            if header.len() > 64 * 1024 {
-                bail!("DeepSeek Harness WebSocket response headers are too large");
-            }
-        }
-        let header = String::from_utf8(header).context("invalid WebSocket response headers")?;
-        let mut lines = header.lines();
-        let status = lines.next().unwrap_or_default();
-        if !status.starts_with("HTTP/1.1 101 ") && status != "HTTP/1.1 101" {
-            bail!("DeepSeek Harness refused WebSocket upgrade: {status}");
-        }
-        let has_upgrade = lines.any(|line| {
-            line.split_once(':').is_some_and(|(name, value)| {
-                name.eq_ignore_ascii_case("upgrade")
-                    && value.trim().eq_ignore_ascii_case("websocket")
-            })
-        });
-        if !has_upgrade {
-            bail!("DeepSeek Harness returned no WebSocket upgrade header");
-        }
-        stream.set_read_timeout(None)?;
-        stream.set_write_timeout(None)?;
-        Ok(Self {
-            stream,
-            fragmented: Vec::new(),
-            fragmented_opcode: None,
-        })
-    }
-
-    fn read_text_message(&mut self) -> anyhow::Result<Option<String>> {
-        loop {
-            let Some((fin, opcode, payload)) = self.read_frame()? else {
-                return Ok(None);
-            };
-            match opcode {
-                0x0 => {
-                    if self.fragmented_opcode.is_none() {
-                        bail!("unexpected DeepSeek Harness WebSocket continuation frame");
-                    }
-                    self.fragmented.extend_from_slice(&payload);
-                    if self.fragmented.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
-                        bail!("DeepSeek Harness WebSocket message is too large");
-                    }
-                    if fin {
-                        let opcode = self.fragmented_opcode.take().unwrap_or_default();
-                        let payload = std::mem::take(&mut self.fragmented);
-                        if opcode == 0x1 {
-                            return String::from_utf8(payload)
-                                .map(Some)
-                                .context("DeepSeek Harness sent non-UTF-8 WebSocket text");
-                        }
-                    }
-                }
-                0x1 | 0x2 => {
-                    if fin {
-                        if opcode == 0x1 {
-                            return String::from_utf8(payload)
-                                .map(Some)
-                                .context("DeepSeek Harness sent non-UTF-8 WebSocket text");
-                        }
-                    } else {
-                        self.fragmented_opcode = Some(opcode);
-                        self.fragmented = payload;
-                    }
-                }
-                0x8 => return Ok(None),
-                0x9 => self.write_control_frame(0xA, &payload)?,
-                0xA => {}
-                _ => bail!("DeepSeek Harness sent unsupported WebSocket opcode {opcode}"),
-            }
-        }
-    }
-
-    fn read_frame(&mut self) -> anyhow::Result<Option<(bool, u8, Vec<u8>)>> {
-        let mut header = [0_u8; 2];
-        match self.stream.read_exact(&mut header) {
-            Ok(()) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::UnexpectedEof
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
-        }
-        if header[0] & 0x70 != 0 {
-            bail!("DeepSeek Harness used unsupported WebSocket extensions");
-        }
-        let fin = header[0] & 0x80 != 0;
-        let opcode = header[0] & 0x0f;
-        let masked = header[1] & 0x80 != 0;
-        let mut length = u64::from(header[1] & 0x7f);
-        if length == 126 {
-            let mut bytes = [0_u8; 2];
-            self.stream.read_exact(&mut bytes)?;
-            length = u64::from(u16::from_be_bytes(bytes));
-        } else if length == 127 {
-            let mut bytes = [0_u8; 8];
-            self.stream.read_exact(&mut bytes)?;
-            length = u64::from_be_bytes(bytes);
-        }
-        let length =
-            usize::try_from(length).context("WebSocket frame length does not fit usize")?;
-        if length > MAX_WEBSOCKET_MESSAGE_BYTES {
-            bail!("DeepSeek Harness WebSocket frame is too large");
-        }
-        let mask = if masked {
-            let mut mask = [0_u8; 4];
-            self.stream.read_exact(&mut mask)?;
-            Some(mask)
-        } else {
-            None
-        };
-        let mut payload = vec![0_u8; length];
-        self.stream.read_exact(&mut payload)?;
-        if let Some(mask) = mask {
-            for (index, byte) in payload.iter_mut().enumerate() {
-                *byte ^= mask[index % 4];
-            }
-        }
-        Ok(Some((fin, opcode, payload)))
-    }
-
-    fn write_control_frame(&mut self, opcode: u8, payload: &[u8]) -> std::io::Result<()> {
-        if payload.len() > 125 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "WebSocket control frame is too large",
-            ));
-        }
-        let mask = *Uuid::new_v4().as_bytes().first_chunk::<4>().unwrap();
-        self.stream
-            .write_all(&[0x80 | opcode, 0x80 | payload.len() as u8])?;
-        self.stream.write_all(&mask)?;
-        let mut masked = payload.to_vec();
-        for (index, byte) in masked.iter_mut().enumerate() {
-            *byte ^= mask[index % 4];
-        }
-        self.stream.write_all(&masked)?;
-        self.stream.flush()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,65 +389,6 @@ mod tests {
         assert!(!web_help_supports_no_open(
             b"  --port <port>  listen port\n"
         ));
-    }
-
-    #[test]
-    fn event_hub_routes_session_frames_and_broadcasts_stream_errors() {
-        let hub = EventHub::default();
-        let first = hub.subscribe("one");
-        let second = hub.subscribe("two");
-        hub.publish(json!({"payload": {"type": "session/event", "sessionId": "one"}}));
-        assert!(first.try_recv().is_ok());
-        assert!(second.try_recv().is_err());
-
-        hub.publish(stream_error("broken".into()));
-        assert!(first.try_recv().is_ok());
-        assert!(second.try_recv().is_ok());
-    }
-
-    #[test]
-    fn maps_deepseek_catalog_and_visible_history() {
-        let cwd = std::env::temp_dir().join("project");
-        let summaries = parse_provider_summaries(
-            &json!({"items":[
-                {
-                    "sessionId":"session-1",
-                    "cwd":cwd,
-                    "updatedAt":1_700_000_000_000_u64,
-                    "blank":false,
-                    "projections":{"values":{"title":"Resume DeepSeek"}}
-                },
-                {"sessionId":"blank","cwd":std::env::temp_dir(),"blank":true,"updatedAt":2},
-                {"sessionId":"child","cwd":std::env::temp_dir(),"parentSessionId":"parent","updatedAt":3}
-            ]}),
-            10,
-        );
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].title, "Resume DeepSeek");
-        assert_eq!(summaries[0].updated_at, 1_700_000_000);
-
-        let history = parse_provider_history(&[
-            json!({"type":"event","event":{"type":"turn/start","seq":1,"time":1000,"data":{"turn":1}}}),
-            json!({"type":"event","event":{"type":"user/message","seq":2,"time":2000,"data":{"source":{"kind":"user"},"content":[{"type":"text","text":"question"}]}}}),
-            json!({"type":"event","event":{"type":"assistant/message","seq":3,"time":3000,"data":{"message":{"content":[{"type":"reasoning","text":"private"},{"type":"text","text":"answer"}]}}}}),
-            json!({"type":"event","event":{"type":"turn/end","seq":4,"time":4000,"data":{"reason":{"kind":"completed"}}}}),
-        ]);
-        assert_eq!(history.turns.len(), 1);
-        assert_eq!(history.turns[0].status, TurnStatus::Completed);
-        assert_eq!(history.messages.len(), 2);
-        assert_eq!(history.messages[1].content, "answer");
-    }
-
-    #[test]
-    fn a_queued_user_event_before_turn_start_does_not_create_an_empty_turn() {
-        let history = parse_provider_history(&[
-            json!({"event":{"type":"user/message","seq":1,"time":1000,"data":{"source":{"kind":"user"},"content":[{"type":"text","text":"queued"}]}}}),
-            json!({"event":{"type":"turn/start","seq":2,"time":2000,"data":{"turn":1}}}),
-            json!({"event":{"type":"turn/end","seq":3,"time":3000,"data":{"reason":{"kind":"aborted"}}}}),
-        ]);
-        assert_eq!(history.turns.len(), 1);
-        assert_eq!(history.turns[0].status, TurnStatus::Interrupted);
-        assert_eq!(history.messages[0].content, "queued");
     }
 
     /// Exercises Waku's HTTP envelope, WebSocket handshakes, and process-tree
@@ -1085,7 +444,6 @@ mod tests {
             let server = DeepSeekServer::start_with_dsh_home(&binary, Some(&root.0))
                 .expect("Harness Host should start");
             let session_id = format!("waku-test-{}", Uuid::new_v4());
-            let events = server.subscribe(&session_id);
             let created = server
                 .rpc(
                     "session.create",
@@ -1130,26 +488,6 @@ mod tests {
                     Some("success")
                 );
             }
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let received_session_frame = loop {
-                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                    break false;
-                };
-                let Ok(frame) = events.recv_timeout(remaining) else {
-                    break false;
-                };
-                if frame
-                    .pointer("/payload/sessionId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|received| received == session_id)
-                {
-                    break true;
-                }
-            };
-            assert!(
-                received_session_frame,
-                "the event downlink should publish session state"
-            );
             server.shutdown(Duration::from_secs(5));
         }
     }

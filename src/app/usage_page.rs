@@ -52,6 +52,10 @@ impl Waku {
         if page == SettingsPage::Skills {
             self.ensure_skills_catalog(false, cx);
         }
+        if page == SettingsPage::Storage {
+            self.sync_worktree_location_input(cx);
+            self.ensure_worktree_cleanup_status(cx);
+        }
         cx.notify();
     }
 
@@ -90,10 +94,9 @@ impl Waku {
         self.usage_history_pending_for = Some(window);
         self.usage_history_generation += 1;
         let generation = self.usage_history_generation;
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         let project_roots: Vec<PathBuf> = self
-            .state
-            .projects
+            .projects()
             .iter()
             .map(|project| project.path.clone())
             .collect();
@@ -101,17 +104,11 @@ impl Waku {
             let history = cx
                 .background_executor()
                 .spawn(async move {
-                    match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::LoadUsageHistory {
-                            window,
-                            project_roots,
-                        },
-                    )? {
-                        waku_client::ResponsePayload::UsageHistory { history } => Ok(history),
-                        _ => anyhow::bail!("the daemon returned an invalid usage response"),
-                    }
+                    waku_client::surfaces::providers::usage_history(
+                        &daemon_v8,
+                        window,
+                        &project_roots,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -1427,8 +1424,7 @@ impl Waku {
         }
         let path = Path::new(&project.path);
         let name = self
-            .state
-            .projects
+            .projects()
             .iter()
             .find(|known| known.path.as_path() == path)
             .map(|known| known.name.clone())

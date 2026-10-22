@@ -8,24 +8,16 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    ClientCapabilities, Implementation, InitializeRequest, ListSessionsRequest, LoadSessionRequest,
-    SessionNotification,
+    ClientCapabilities, Implementation, InitializeRequest, ListSessionsRequest,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo};
 use anyhow::{Context as _, anyhow};
-use parking_lot::Mutex;
-use serde_json::Value;
-use uuid::Uuid;
 
-use crate::model::{
-    AgentTurn, Message, MessageRole, ProviderKind, ProviderResumeCursor, ProviderSessionHistory,
-    ProviderSessionSummary, TurnStatus,
-};
+use crate::model::{ProviderKind, ProviderResumeCursor, ProviderSessionSummary};
 
 const MAX_CATALOG_PAGES: usize = 20;
 const MAX_CATALOG_WORKSPACES: usize = 100;
@@ -184,172 +176,8 @@ pub fn list_provider_sessions(
     .with_context(|| format!("{} could not list ACP sessions", provider.display_name()))
 }
 
-/// Replays the provider's user-visible transcript through ACP `session/load`.
-pub fn provider_session_history(
-    provider: ProviderKind,
-    binary: &Path,
-    cwd: &Path,
-    session_id: &str,
-    visible_turn_limit: usize,
-) -> anyhow::Result<ProviderSessionHistory> {
-    if session_id.trim().is_empty() || visible_turn_limit == 0 {
-        return Ok(ProviderSessionHistory::default());
-    }
-    let agent = crate::driver::catalog_agent(provider, binary, cwd)?;
-    let updates = Arc::new(Mutex::new(Vec::<Value>::new()));
-    let captured = Arc::clone(&updates);
-    let cwd = cwd.to_path_buf();
-    let session_id = session_id.to_owned();
-
-    let request = Client
-        .builder()
-        .name("waku-session-import")
-        .on_receive_notification(
-            async move |notification: SessionNotification, _connection| {
-                if let Ok(update) = serde_json::to_value(notification.update) {
-                    captured.lock().push(update);
-                }
-                Ok(())
-            },
-            agent_client_protocol::on_receive_notification!(),
-        )
-        .connect_with(agent, async move |connection: ConnectionTo<Agent>| {
-            let initialize = connection
-                .send_request(initialize_request())
-                .block_task()
-                .await?;
-            if !initialize.agent_capabilities.load_session {
-                return Err(agent_client_protocol::Error::new(
-                    agent_client_protocol::ErrorCode::MethodNotFound.into(),
-                    "the agent does not support session/load",
-                ));
-            }
-            connection
-                .send_request(LoadSessionRequest::new(session_id, cwd))
-                .block_task()
-                .await?;
-            // ACP ordering places replay before the load response. A short
-            // grace still covers providers that flush their final queued
-            // notification immediately after that response.
-            smol::Timer::after(Duration::from_millis(50)).await;
-            Ok(())
-        });
-    smol::block_on(smol::future::race(
-        async move { request.await.map_err(anyhow::Error::new) },
-        async move {
-            smol::Timer::after(ACP_REQUEST_TIMEOUT).await;
-            Err(anyhow!(
-                "{} ACP session replay timed out",
-                provider.display_name()
-            ))
-        },
-    ))
-    .with_context(|| format!("{} could not replay the session", provider.display_name()))?;
-
-    let updates = std::mem::take(&mut *updates.lock());
-    let mut history = history_from_updates(provider, &updates);
-    retain_recent_messages(&mut history, visible_turn_limit);
-    Ok(history)
-}
-
-fn history_from_updates(provider: ProviderKind, updates: &[Value]) -> ProviderSessionHistory {
-    let mut history = ProviderSessionHistory::default();
-    let mut saw_agent_activity = true;
-
-    for update in updates {
-        let kind = update.get("sessionUpdate").and_then(Value::as_str);
-        if kind == Some("user_message_chunk") {
-            let Some(text) = update
-                .pointer("/content/text")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-            else {
-                continue;
-            };
-            if history.turns.is_empty() || saw_agent_activity {
-                let turn_id = Uuid::new_v4();
-                history.turns.push(AgentTurn {
-                    id: turn_id,
-                    turn_count: history.turns.len() + 1,
-                    status: TurnStatus::Completed,
-                    provider_turn_started: true,
-                    provider_resume_at: None,
-                    started_at: 0,
-                    completed_at: Some(0),
-                    checkpoint: None,
-                });
-                history
-                    .messages
-                    .push(Message::new_for_turn(MessageRole::User, text, turn_id));
-                saw_agent_activity = false;
-            } else if let Some(message) = history.messages.last_mut().filter(|message| {
-                message.role == MessageRole::User
-                    && message.turn_id == history.turns.last().map(|turn| turn.id)
-            }) {
-                message.content.push_str(text);
-            }
-            continue;
-        }
-
-        if matches!(
-            kind,
-            Some(
-                "agent_message_chunk"
-                    | "agent_thought_chunk"
-                    | "tool_call"
-                    | "tool_call_update"
-                    | "plan"
-            )
-        ) {
-            saw_agent_activity = true;
-        }
-        if kind != Some("agent_message_chunk") {
-            continue;
-        }
-        let Some(text) = update
-            .pointer("/content/text")
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-        else {
-            continue;
-        };
-        if provider == ProviderKind::Fx
-            && (text.starts_with("[context] ") || text.starts_with("skill discovery warning: "))
-        {
-            continue;
-        }
-        let Some(turn_id) = history.turns.last().map(|turn| turn.id) else {
-            continue;
-        };
-        if let Some(message) = history.messages.last_mut().filter(|message| {
-            message.role == MessageRole::Assistant && message.turn_id == Some(turn_id)
-        }) {
-            message.content.push_str(text);
-        } else {
-            history
-                .messages
-                .push(Message::new_for_turn(MessageRole::Assistant, text, turn_id));
-        }
-    }
-    history
-}
-
-fn retain_recent_messages(history: &mut ProviderSessionHistory, limit: usize) {
-    let retained = history
-        .turns
-        .iter()
-        .rev()
-        .take(limit)
-        .map(|turn| turn.id)
-        .collect::<HashSet<_>>();
-    history
-        .messages
-        .retain(|message| message.turn_id.is_some_and(|id| retained.contains(&id)));
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
 
     use super::*;
 
@@ -371,49 +199,5 @@ mod tests {
                 assert!(!directory.starts_with(home.join(protected)));
             }
         }
-    }
-
-    #[test]
-    fn imports_only_visible_acp_chunks_and_preserves_empty_turn_shells() {
-        let history = history_from_updates(
-            ProviderKind::Kimi,
-            &[
-                json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"one"}}),
-                json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"private"}}),
-                json!({"sessionUpdate":"tool_call","toolCallId":"call-1","title":"read"}),
-                json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}),
-                json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"two"}}),
-                json!({"sessionUpdate":"tool_call","toolCallId":"call-2","title":"bash"}),
-            ],
-        );
-
-        assert_eq!(history.turns.len(), 2);
-        assert_eq!(history.messages.len(), 3);
-        assert_eq!(history.messages[0].content, "one");
-        assert_eq!(history.messages[1].content, "done");
-        assert_eq!(history.messages[2].content, "two");
-        assert!(
-            history
-                .messages
-                .iter()
-                .all(|message| !message.content.contains("private"))
-        );
-    }
-
-    #[test]
-    fn joins_consecutive_content_blocks_without_inventing_turns() {
-        let history = history_from_updates(
-            ProviderKind::Kimi,
-            &[
-                json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello "}}),
-                json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"world"}}),
-                json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"part 1"}}),
-                json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" + part 2"}}),
-            ],
-        );
-
-        assert_eq!(history.turns.len(), 1);
-        assert_eq!(history.messages[0].content, "hello world");
-        assert_eq!(history.messages[1].content, "part 1 + part 2");
     }
 }

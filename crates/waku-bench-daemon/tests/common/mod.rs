@@ -10,9 +10,14 @@ use base64::Engine as _;
 use crossbeam_channel::{Receiver, unbounded};
 use serde_json::{Value, json};
 use uuid::Uuid;
+use waku_bench_daemon::server::{BenchOptions, BenchServer};
 use waku_bench_daemon::{TimedEvent, Timeline};
+use waku_client::v8::V8Client;
 use waku_protocol::model::{
     ActivityFileChange, ActivityFileChangeStatus, ActivityItem, ActivityKind,
+};
+use waku_protocol::v8::orchestration::{
+    DispatchCommand, DispatchParams, ThreadSnapshot, ThreadSnapshotParams,
 };
 
 pub const DIFF: &str = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,2 @@\n fn keep() {}\n-fn old() {}\n+fn new() {}";
@@ -207,4 +212,120 @@ impl Driven {
         drop(self.stdin.take());
         self.child.wait().unwrap()
     }
+}
+
+pub const BENCH_TOKEN: &str = "bench-secret";
+
+/// A bench daemon over a scratch directory that is removed on drop, with
+/// a timeline written to a file as its default timeline.
+pub struct Bench {
+    pub server: Option<BenchServer>,
+    root: PathBuf,
+}
+
+impl Bench {
+    /// Options for a bench daemon whose `--timeline` is `timeline`, played
+    /// at `rate`, plus the scratch directory they live in.
+    pub fn options(timeline: &Timeline, rate: &str) -> (BenchOptions, PathBuf) {
+        let root = std::env::temp_dir().join(format!("waku-bench-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(format!("{}.jsonl", timeline.name));
+        std::fs::write(&path, timeline.to_jsonl()).unwrap();
+        let mut options = BenchOptions::new(root.join("state"), BENCH_TOKEN);
+        options.timeline = path.display().to_string();
+        options.rate = rate.parse().unwrap();
+        options.fakes_dir = Some(
+            Path::new(env!("CARGO_BIN_EXE_fake-codex"))
+                .parent()
+                .unwrap()
+                .to_path_buf(),
+        );
+        (options, root)
+    }
+
+    pub fn start(options: BenchOptions, root: PathBuf) -> Self {
+        let server = BenchServer::start(options).unwrap();
+        Self {
+            server: Some(server),
+            root,
+        }
+    }
+
+    pub fn server(&self) -> &BenchServer {
+        self.server.as_ref().unwrap()
+    }
+
+    pub fn connect(&self) -> V8Client {
+        V8Client::connect(&self.server().client_address(), BENCH_TOKEN).unwrap()
+    }
+}
+
+impl Drop for Bench {
+    fn drop(&mut self) {
+        drop(self.server.take());
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// `thread.create`-style dispatch over v8 with a fresh command id.
+pub fn dispatch(client: &V8Client, command: waku_protocol::orchestration::Command) {
+    client
+        .call::<waku_client::v8::method::OrchestrationDispatch>(DispatchParams {
+            command_id: waku_protocol::orchestration::CommandId::new(format!(
+                "test:{}",
+                Uuid::new_v4().simple()
+            ))
+            .unwrap(),
+            command: DispatchCommand(command),
+        })
+        .unwrap_or_else(|error| panic!("dispatch failed: {error:?}"));
+}
+
+pub fn snapshot(client: &V8Client, thread_id: Uuid) -> ThreadSnapshot {
+    client
+        .call::<waku_client::v8::method::ThreadsSnapshot>(ThreadSnapshotParams {
+            thread_id: waku_protocol::orchestration::ThreadId(thread_id),
+            compact_turn_items: false,
+        })
+        .unwrap()
+}
+
+/// Polls the daemon until `thread_id` has at least `runs` runs, all
+/// terminal.
+pub fn wait_settled(client: &V8Client, thread_id: Uuid, runs: usize) -> ThreadSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let snapshot = snapshot(client, thread_id);
+        let projection = &snapshot.projection;
+        if projection.runs.len() >= runs
+            && projection.runs.iter().all(|run| run.status.is_terminal())
+        {
+            return snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the thread never settled: {:#?}",
+            projection.runs
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The assistant text of the items of `run`, in transcript order.
+pub fn run_text(snapshot: &ThreadSnapshot, run: waku_protocol::orchestration::RunId) -> String {
+    use waku_protocol::orchestration::TurnItemKind;
+    let mut items = snapshot
+        .projection
+        .turn_items
+        .iter()
+        .filter(|item| item.run_id == Some(run))
+        .collect::<Vec<_>>();
+    items.sort_by_key(|item| item.position);
+    items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            TurnItemKind::AssistantMessage { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
 }

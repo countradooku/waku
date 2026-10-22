@@ -1,0 +1,1 @@
+{"type":"call","id":15,"method":"files.write","params":{"root":{"type":"project","projectId":"9a0ec700-0000-4000-8000-000000000003"},"path":"README.md","content":"# waku\n","baseRevision":"sha256:4a1f","opId":"0b1d0000-0000-4000-8000-000000000010"}}

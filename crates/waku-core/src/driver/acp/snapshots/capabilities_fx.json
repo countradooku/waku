@@ -1,0 +1,111 @@
+{
+  "sessions": {
+    "multiple_threads_per_session": false,
+    "model_switch_in_session": true,
+    "provider_switching_via_handoff": true,
+    "runtime_mode_switch_in_session": false,
+    "pending_requests_survive_restart": false
+  },
+  "threads": {
+    "create_empty_thread": true,
+    "read_snapshot": true,
+    "rollback": false,
+    "fork": false,
+    "fork_from_turn": false,
+    "fork_in_target_session": false,
+    "fork_from_subagent_thread": false,
+    "native_thread_id": true
+  },
+  "turns": {
+    "native_turn_id": false,
+    "emits_turn_started": false,
+    "emits_turn_completed": true,
+    "interrupt": true,
+    "active_steering": false,
+    "active_steering_interrupts_tools": false,
+    "steering_by_interrupt_restart": true,
+    "queued_messages": true,
+    "terminal_status_quality": "strong"
+  },
+  "streaming": {
+    "assistant_text": true,
+    "reasoning": true,
+    "tool_output": false,
+    "plan_text": false,
+    "emits_message_completed": false
+  },
+  "tools": {
+    "tool_item_ids": true,
+    "emits_tool_started": true,
+    "emits_tool_completed": true,
+    "emits_tool_output": true,
+    "mcp_tools": true,
+    "dynamic_tool_callbacks": false
+  },
+  "approvals": {
+    "command": true,
+    "file_read": true,
+    "file_change": true,
+    "apply_patch": false,
+    "native_request_ids": true,
+    "callbacks_are_live_only": true,
+    "from_subagents": false
+  },
+  "planning": {
+    "emits_plan_updated": true,
+    "emits_todo_list": true,
+    "emits_proposed_plan": false,
+    "structured_questions": false,
+    "plan_deltas_have_item_ids": false
+  },
+  "subagents": {
+    "supported": false,
+    "exposes_thread_ids": false,
+    "emits_lifecycle": false,
+    "can_wait": false,
+    "can_close": false,
+    "can_fork_thread": false
+  },
+  "context": {
+    "accepts_system_context": false,
+    "accepts_developer_context": false,
+    "accepts_synthetic_user_context": true,
+    "can_generate_summaries": false,
+    "can_consume_handoff_summaries": true,
+    "delta_handoff": true,
+    "full_thread_handoff": true,
+    "native_history_injection": false
+  },
+  "checkpointing": {
+    "app_can_checkpoint_filesystem": true,
+    "nested_scopes": true,
+    "provider_can_rollback_conversation": false,
+    "provider_rollback_returns_snapshot": false,
+    "provider_can_read_conversation_snapshot": true
+  },
+  "identity": {
+    "thread_ids": "strong",
+    "turn_ids": "none",
+    "item_ids": "weak",
+    "request_ids": "strong"
+  },
+  "runtime_policy": {
+    "enforcement": "native",
+    "supported_modes": [
+      "ask",
+      "full_access"
+    ],
+    "plan_mode_toggle": false
+  },
+  "extras": {
+    "native_image_input": false,
+    "image_mime_types": [],
+    "goals": false,
+    "compaction": false,
+    "background_work": false,
+    "account_usage_stream": false,
+    "agent_presets": false,
+    "computer_use": false,
+    "model_discovery": true
+  }
+}

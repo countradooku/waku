@@ -1,0 +1,6 @@
+# Golden fixtures and snapshots are compared byte for byte, so a Windows
+# checkout must not convert their line endings (launcher.cmd keeps its CRLF).
+crates/waku-protocol/tests/v8/** -text
+crates/waku-daemon/src/snapshots/** -text
+crates/waku-core/src/driver/acp/snapshots/** -text
+packages/waku-client/src/v8/fixtures/** -text

@@ -90,20 +90,13 @@ impl Waku {
         self.skills_scan_generation += 1;
         let generation = self.skills_scan_generation;
         let projects = self.skill_scan_projects();
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |this, cx| {
             let catalog = cx
                 .background_executor()
-                .spawn(async move {
-                    match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::LoadSkills { projects },
-                    )? {
-                        waku_client::ResponsePayload::SkillsCatalog { catalog } => Ok(catalog),
-                        _ => anyhow::bail!("the daemon returned an invalid skills response"),
-                    }
-                })
+                .spawn(
+                    async move { waku_client::surfaces::composer::skills(&daemon_v8, &projects) },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.skills_scan_generation != generation {
@@ -134,14 +127,14 @@ impl Waku {
         self.ensure_skills_catalog(true, cx);
     }
 
-    /// `(display name, path)` per scannable project. Projectless workspaces
-    /// are generated directories that never hold curated skills.
-    fn skill_scan_projects(&self) -> Vec<(String, PathBuf)> {
-        self.state
-            .projects
+    /// The path of every scannable project; the daemon names them.
+    /// Projectless workspaces are generated directories that never hold
+    /// curated skills.
+    fn skill_scan_projects(&self) -> Vec<PathBuf> {
+        self.projects()
             .iter()
             .filter(|project| !project.is_projectless())
-            .map(|project| (project.display_name(), project.path.clone()))
+            .map(|project| project.path.clone())
             .collect()
     }
 
@@ -193,16 +186,12 @@ impl Waku {
         }
         self.skills_scan_generation += 1;
         self.skills_scan_pending = false;
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::SetSkillsEnabled { dirs, enabled },
-                    )
+                    waku_client::surfaces::composer::set_skills_enabled(&daemon_v8, &dirs, enabled)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -257,17 +246,13 @@ impl Waku {
         self.skills_delete_arming = None;
         self.skills_scan_generation += 1;
         self.skills_scan_pending = false;
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::TrashSkills { dirs },
-                    )
-                })
+                .spawn(
+                    async move { waku_client::surfaces::composer::trash_skills(&daemon_v8, &dirs) },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match result {
@@ -981,39 +966,33 @@ impl Waku {
                 .child(SharedString::from(label))
         };
 
-        let open_button = action_button(
-            SharedString::from(format!("skill-open-{}", skill.row_key)),
-            "icons/pencil.svg",
-            tr!("skills.open_file"),
-        )
-        .on_click(cx.listener({
-            let skill_file = skill_file.clone();
-            move |this, _, _, cx| {
-                if this.daemon.is_remote() {
-                    this.show_toast(tr!("errors.remote_host_path"));
-                    cx.notify();
-                } else {
-                    crate::platform::open_with_default_app(&skill_file, cx);
-                }
-            }
-        }));
+        // Opening and revealing act on this machine's files. A remote
+        // daemon's skills live on its host, so those two actions are not
+        // offered for it (#61); copying the path still is.
+        let host_actions = !self.daemon.is_remote();
+        let open_button = host_actions.then(|| {
+            action_button(
+                SharedString::from(format!("skill-open-{}", skill.row_key)),
+                "icons/pencil.svg",
+                tr!("skills.open_file"),
+            )
+            .on_click(cx.listener({
+                let skill_file = skill_file.clone();
+                move |_, _, _, cx| crate::platform::open_with_default_app(&skill_file, cx)
+            }))
+        });
 
-        let reveal_button = action_button(
-            SharedString::from(format!("skill-reveal-{}", skill.row_key)),
-            "icons/folder.svg",
-            tr!("skills.reveal"),
-        )
-        .on_click(cx.listener({
-            let skill_file = skill_file.clone();
-            move |this, _, _, cx| {
-                if this.daemon.is_remote() {
-                    this.show_toast(tr!("errors.remote_host_path"));
-                    cx.notify();
-                } else {
-                    crate::platform::reveal_in_file_manager(&skill_file, cx);
-                }
-            }
-        }));
+        let reveal_button = host_actions.then(|| {
+            action_button(
+                SharedString::from(format!("skill-reveal-{}", skill.row_key)),
+                "icons/folder.svg",
+                tr!("skills.reveal"),
+            )
+            .on_click(cx.listener({
+                let skill_file = skill_file.clone();
+                move |_, _, _, cx| crate::platform::reveal_in_file_manager(&skill_file, cx)
+            }))
+        });
 
         let copy_feedback_id = format!("skill-copy-{}", skill.row_key);
         let copied = self.control_was_copied(&copy_feedback_id);
@@ -1264,8 +1243,8 @@ impl Waku {
                     .items_center()
                     .flex_wrap()
                     .gap(px(7.0))
-                    .child(open_button)
-                    .child(reveal_button)
+                    .children(open_button)
+                    .children(reveal_button)
                     .child(copy_button)
                     .child(div().flex_1())
                     .child(delete_button),

@@ -106,6 +106,7 @@ settings.search: 設定を検索
 daemon.expose_title: 管理対象デーモンを公開
 daemon.expose_description: このマシン以外の Waku クライアントから接続できるようにします。変更時はデーモンだけが再起動します。
 daemon.status_local: このマシンのみ
+daemon.version: "デーモン %{version}"
 daemon.status_exposed: 公開中
 daemon.status_restarting: 再起動中
 daemon.connection_title: リスナーアクセス
@@ -140,6 +141,12 @@ daemon.phase_disconnected: 接続解除済み
 daemon.phase_connecting: 接続中
 daemon.phase_connected: 接続済み
 daemon.phase_error: エラー
+daemon.phase_reconnecting: 再接続中
+transcript.loading_earlier: 以前のメッセージを読み込み中
+common.archive: アーカイブ
+goal.unsupported: このデーモンはまだゴールに対応していません
+errors.archive_task: タスクをアーカイブできませんでした：%{error}
+files.changed_on_disk: ファイルがディスク上で変更されました。最新版を見るには開き直してください。
 daemon.invalid_port: 1 から 65535 のポートを入力してください
 daemon.invalid_settings: デーモン設定が無効です：%{error}
 daemon.stop_active_tasks: デーモンのアクセス設定を変更する前に実行中のタスクを停止してください
@@ -319,6 +326,8 @@ common.send: 送信
 
 session.fork_task: タスクをフォーク
 session.fork_task_title: タスクをフォーク
+session.rewind_unavailable: このメッセージには戻せるチェックポイントがありません
+session.archive: アーカイブ
 session.forking_task: タスクをフォーク中…
 session.forking_task_title: タスクをフォーク中…
 session.revert_to_here: ここまで戻す
@@ -661,7 +670,13 @@ workspace.worktree: ワークツリー
 terminal.starting: ターミナルを起動中…
 
 project.add_project: プロジェクトを追加
-errors.remote_project_picker: デーモンホスト上のプロジェクトを追加するにはリモートパス選択が必要ですが、まだ利用できません
+project.remote_picker_title: デーモンホスト上のフォルダを開く
+project.remote_picker_open: フォルダを開く
+project.remote_picker_up: 上へ
+project.remote_picker_home: ホーム
+project.remote_picker_loading: 読み込み中…
+project.remote_picker_empty: フォルダがありません
+project.remote_picker_hint: デーモンホスト上のフォルダ
 
 session.stopped: 停止しました
 session.turn_completed: ターンが完了しました
@@ -711,6 +726,11 @@ errors.task_already_rewinding: このタスクはすでに巻き戻し中です
 errors.no_live_runtime: このタスクには実行中のエージェントがありません
 errors.unexpected_daemon_response: "デーモンから %{expected} が返るはずでしたが、%{actual} を受信しました"
 errors.daemon_disconnected: Waku デーモンに接続されていません
+errors.daemon_reconnecting: Waku デーモンとの接続が切れました。再接続しています…
+errors.send_message: "メッセージを送信できませんでした：%{error}"
+errors.create_task: "タスクを作成できませんでした：%{error}"
+errors.daemon_command: "デーモンが %{command} を拒否しました：%{error}"
+errors.load_history: "以前のメッセージを読み込めませんでした：%{error}"
 errors.path_outside_workspace: このパスはデーモンホスト上の現在のワークスペース外にあります
 errors.rename_task: "タスクの名前を変更できませんでした：%{error}"
 errors.remove_task: "タスクを削除できませんでした：%{error}"
@@ -830,6 +850,7 @@ background.no_work: バックグラウンドの作業はありません
 background.no_work_description: 長時間実行されるコマンドとサブエージェントがここに表示されます。
 background.view: 表示
 background.stop: 停止
+background.refresh: バックグラウンド作業を更新
 background.stop_named: "%{name} を停止"
 background.stop_all: すべて停止
 background.stop_not_running: プロセスはすでに停止しています。
@@ -915,6 +936,7 @@ diff.no_changes_description: このソースにはレビューするファイル
 diff.filter_files: ファイルを絞り込む…
 diff.source_last_turn: 前回のターン
 diff.source_turn: ターン %{turn}
+diff.source_all_turns: すべてのターン
 diff.source_uncommitted: 未コミット
 diff.source_unstaged: 未ステージ
 diff.source_staged: ステージ済み
@@ -943,6 +965,8 @@ diff.rows_hidden: "残り %{count} 行 · レビューを開くと変更全体�
 terminal.transport_failed: ターミナル転送に失敗しました
 terminal.no_workspace_description: ターミナルを開く前にタスクを選択してください。
 terminal.process_exited: プロセスが終了しました
+terminal.clear: クリア
+terminal.restart: シェルを再起動
 
 browser.back: 戻る（%{shortcut}）
 browser.forward: 進む（%{shortcut}）
@@ -969,6 +993,7 @@ find.toggle_replace: 置換欄の表示を切り替える
 
 common.dismiss_notification: 通知を閉じる
 common.reveal_in_finder: ファイルマネージャーで表示
+common.reveal_unavailable_remote: ファイルマネージャーで表示（リモートデーモンでは利用不可）
 
 attachments.close_preview: 画像プレビューを閉じる
 attachments.open_preview: "%{name} を開く"
@@ -1134,3 +1159,81 @@ usage_error.curl_did_not_finish: curl がリクエストを完了しませんで
 usage_error.curl_failed: "curl に失敗しました：%{error}"
 usage_error.unknown_error: 不明なエラー
 usage_error.curl_no_status: curl から HTTP ステータス行が返されませんでした
+
+settings.storage: "ストレージ"
+settings.storage_keywords: "ストレージ ワークツリー クリーンアップ 削除 ディスク 容量 場所 フォルダ ブランチ マージ 非アクティブ worktree"
+storage.worktrees_title: "ワークツリー"
+storage.location: "ワークツリーの場所"
+storage.location_description: "新しいタスクのワークツリーを作成する場所です。以前の場所にあるワークツリーも引き続き管理されます。"
+storage.location_placeholder: "~/.waku-fork/worktrees"
+storage.location_apply: "適用"
+storage.location_reset: "デフォルトに戻す"
+storage.location_empty: "フォルダのパスを入力してください。"
+storage.location_not_absolute: "絶対パス、または ~/ で始まるパスを指定してください。"
+storage.location_root: "ファイルシステムのルートより下のフォルダを選んでください。"
+storage.cleanup_title: "自動クリーンアップ"
+storage.cleanup_description: "デーモンの起動時と定期的にタスクのワークツリーを削除します。ブランチが残っているタスクは、次のターンでワークツリーを再びチェックアウトします。"
+storage.inactive: "非アクティブなタスク"
+storage.inactive_description: "タスクにこの期間アクティビティがなければワークツリーを削除します。"
+storage.finished: "完了したタスク"
+storage.finished_description: "タスクの最後のターンが完了してからこの期間後にワークツリーを削除します。"
+storage.merged: "マージ済みのブランチ"
+storage.merged_description: "ブランチがベースブランチにマージされたワークツリーを削除します。"
+storage.unchanged: "変更のないワークツリー"
+storage.unchanged_description: "ベースブランチより先のコミットがないワークツリーを削除します。"
+storage.deleted: "削除したタスク"
+storage.deleted_description: "削除したタスクのワークツリーを削除します。コミットが失われない場合は waku/ ブランチも削除します。"
+storage.keep_when: "ローカルの変更を保持"
+storage.keep_when_description: "この種類のローカル作業があるワークツリーは削除されません。"
+storage.keep_any_local_files: "すべてのローカルファイル"
+storage.keep_uncommitted_changes: "未コミットの変更"
+storage.keep_tracked_changes: "追跡中の変更のみ"
+storage.unpushed: "未プッシュのコミットがあっても削除"
+storage.unpushed_description: "ほかに存在しないコミットを持つブランチのワークツリーも削除します。ブランチ自体は常に保持されます。"
+storage.interval: "確認の間隔"
+storage.interval_description: "自動クリーンアップを実行する頻度です。デーモンの起動時にも実行されます。"
+storage.off: "オフ"
+storage.immediately: "すぐに"
+storage.one_day: "1 日"
+storage.days: "%{count} 日"
+storage.one_hour: "1 時間"
+storage.hours: "%{count} 時間"
+storage.run_title: "クリーンアップ"
+storage.delete_now: "今すぐ削除"
+storage.deleting: "クリーンアップ中…"
+storage.last_run: "前回の実行：%{time}"
+storage.never_run: "クリーンアップはまだ実行されていません"
+storage.next_run: "次回の自動実行：%{time}"
+storage.next_run_soon: "次回の自動実行はまもなく始まります。"
+storage.automatic_off: "自動クリーンアップはオフです。上でルールをオンにするか、今すぐ削除して保持理由を確認してください。"
+storage.summary: "削除 %{removed}・保持 %{kept}・失敗 %{failed}"
+storage.omitted: "ほか %{count} 件は表示されていません"
+storage.outcome_removed: "削除"
+storage.outcome_kept: "保持"
+storage.outcome_failed: "失敗"
+storage.status_failed: "クリーンアップの状態を読み込めませんでした：%{error}"
+storage.run_failed: "クリーンアップに失敗しました：%{error}"
+storage.reason_task_deleted: "タスクが削除されました"
+storage.reason_inactive: "%{duration}アクティビティなし"
+storage.reason_finished: "%{duration}前に完了"
+storage.reason_merged: "%{base} にマージ済み"
+storage.reason_unchanged: "%{base} より先のコミットなし"
+storage.reason_no_rule: "適用される有効なルールがありません"
+storage.reason_task_running: "タスクが実行中です"
+storage.reason_live_runtime: "エージェントのセッションが開いています"
+storage.reason_open_terminal: "ターミナルが開いています"
+storage.reason_outside: "管理対象のワークツリーフォルダの外にあります"
+storage.reason_not_waku_branch: "Waku のワークツリーブランチではありません"
+storage.reason_not_linked: "リポジトリにリンクされたワークツリーではありません"
+storage.reason_branch_changed: "別のブランチがチェックアウトされています"
+storage.reason_uncommitted: "未コミットの変更があります（%{count} ファイル）"
+storage.reason_ignored: "無視されたファイルがあります（%{example}）"
+storage.reason_unpushed: "未プッシュのコミットがあります（%{count}）"
+storage.reason_inactive_for: "%{limit}のうち%{duration}アクティビティなし"
+storage.reason_finished_for: "%{duration}前に完了、%{limit}後に削除"
+storage.reason_not_finished: "タスクはまだ完了していません"
+storage.reason_not_merged: "%{base} にマージされていません"
+storage.reason_has_commits: "%{base} より先のコミット：%{count}"
+storage.reason_base_unavailable: "ベースブランチを利用できません"
+storage.reason_changed: "クリーンアップ中に変更されました"
+storage.reason_with_branch: "%{reason}・ブランチを削除"

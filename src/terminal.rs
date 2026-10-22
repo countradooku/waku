@@ -4,11 +4,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
 use alacritty_terminal::event::{Event, EventListener, VoidListener, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::{BidirectionalIterator, Dimensions, Row, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point as TerminalPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
@@ -17,9 +16,8 @@ use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
-use alacritty_terminal::tty::{self, Shell};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
     App, AppContext, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId, FocusHandle,
@@ -31,6 +29,9 @@ use gpui::{
     UnderlineStyle, Window, canvas, div, fill, font, point, px, relative, rgb, size,
 };
 use parking_lot::Mutex;
+use waku_client::terminal::{
+    TerminalLink as DaemonTerminalLink, TerminalSink, TerminalUpdate, TerminalWriter,
+};
 
 use crate::persistence::DEFAULT_RIGHT_PANEL_WIDTH;
 use crate::theme::{Theme, sp};
@@ -105,6 +106,10 @@ enum TerminalUiEvent {
     ClipboardStore(String),
     ClipboardLoad(Arc<dyn Fn(&str) -> String + Send + Sync>),
     Exited,
+    /// The daemon cleared or restarted the terminal.
+    Reset,
+    /// The daemon could not run or reach the terminal.
+    Error(String),
 }
 
 #[derive(Clone)]
@@ -116,18 +121,21 @@ struct TerminalEventProxy {
     /// Cleared while the view is not on screen: content changes then only set
     /// `dirty`, and the next render picks them up through the damage state.
     visible: Arc<AtomicBool>,
-    sender: Arc<OnceLock<EventLoopSender>>,
+    /// The daemon terminal's input, for the emulator's own replies. Set once
+    /// the link exists; the proxy is built first because the terminal needs
+    /// it.
+    writer: Arc<OnceLock<TerminalWriter>>,
     ui_events: Sender<TerminalUiEvent>,
     window_size: Arc<Mutex<WindowSize>>,
-    /// Palette OSC replies run on the PTY thread; `snapshot` refreshes this
+    /// Palette OSC replies run on the link thread; `snapshot` refreshes this
     /// so they track the active theme.
     dark_theme: Arc<AtomicBool>,
 }
 
 impl TerminalEventProxy {
     fn write_pty(&self, bytes: impl Into<Cow<'static, [u8]>>) {
-        if let Some(sender) = self.sender.get() {
-            let _ = sender.send(Msg::Input(bytes.into()));
+        if let Some(writer) = self.writer.get() {
+            writer.write(bytes.into().into_owned());
         }
     }
 
@@ -197,9 +205,60 @@ impl Dimensions for TerminalDimensions {
     }
 }
 
+/// Feeds a daemon terminal's output into the emulator, on the link's thread
+/// (#60). This is the work alacritty's own PTY event loop used to do: parse
+/// under the terminal lock, then mark the grid dirty so the view redraws the
+/// damaged rows on its next frame.
+struct TerminalFeed {
+    term: Arc<FairMutex<Term<TerminalEventProxy>>>,
+    processor: Processor,
+    proxy: TerminalEventProxy,
+}
+
+impl TerminalFeed {
+    fn advance(&mut self, bytes: &[u8]) {
+        self.processor.advance(&mut *self.term.lock(), bytes);
+        self.proxy.content_changed();
+    }
+}
+
+impl TerminalSink for TerminalFeed {
+    fn update(&mut self, update: TerminalUpdate) {
+        match update {
+            TerminalUpdate::Output(bytes) => self.advance(&bytes),
+            TerminalUpdate::Reset => {
+                // A fresh parser drops any half-read sequence; RIS clears the
+                // screen, the scrollback and the modes.
+                self.processor = Processor::new();
+                self.advance(b"\x1bc");
+                self.proxy.send_ui_event(TerminalUiEvent::Reset);
+            }
+            TerminalUpdate::Exited => {
+                self.proxy.dirty.store(true, Ordering::Release);
+                self.proxy.send_ui_event(TerminalUiEvent::Exited);
+            }
+            TerminalUpdate::Error(message) => {
+                self.proxy.send_ui_event(TerminalUiEvent::Error(message));
+            }
+        }
+    }
+
+    /// A synchronized update (DEC mode 2026) holds output back until it ends
+    /// or times out.
+    fn deadline(&self) -> Option<Instant> {
+        self.processor.sync_timeout().sync_timeout()
+    }
+
+    fn tick(&mut self) {
+        self.processor.stop_sync(&mut *self.term.lock());
+        self.proxy.content_changed();
+    }
+}
+
 struct TerminalSession {
     term: Arc<FairMutex<Term<TerminalEventProxy>>>,
-    sender: EventLoopSender,
+    /// The daemon terminal. Dropping it closes the shell.
+    link: DaemonTerminalLink,
     dirty: Arc<AtomicBool>,
     visible: Arc<AtomicBool>,
     ui_events: Receiver<TerminalUiEvent>,
@@ -210,7 +269,11 @@ struct TerminalSession {
 }
 
 impl TerminalSession {
+    /// Open a shell on the daemon in `working_directory` (a daemon-host path)
+    /// and attach an emulator to it. The same path serves a local and a
+    /// remote daemon.
     fn new(
+        daemon_v8: &waku_client::surfaces::DaemonV8,
         working_directory: &Path,
         columns: usize,
         rows: usize,
@@ -227,7 +290,7 @@ impl TerminalSession {
         let shared_window_size = Arc::new(Mutex::new(window_size));
         let dirty = Arc::new(AtomicBool::new(true));
         let visible = Arc::new(AtomicBool::new(true));
-        let sender_slot = Arc::new(OnceLock::new());
+        let writer_slot = Arc::new(OnceLock::new());
         let dark_theme = Arc::new(AtomicBool::new(true));
         let (ui_event_tx, ui_events) = unbounded();
         let url_regex = RegexSearch::new(TERMINAL_LINK_REGEX)
@@ -236,7 +299,7 @@ impl TerminalSession {
             dirty: dirty.clone(),
             wakeup,
             visible: visible.clone(),
-            sender: sender_slot.clone(),
+            writer: writer_slot.clone(),
             ui_events: ui_event_tx,
             window_size: shared_window_size.clone(),
             dark_theme: dark_theme.clone(),
@@ -253,35 +316,23 @@ impl TerminalSession {
             proxy.clone(),
         )));
 
-        let shell = crate::command_env::default_terminal_shell();
-        let shell_args = crate::command_env::default_terminal_shell_args(&shell);
-        let mut options = tty::Options {
-            shell: Some(Shell::new(shell.to_string_lossy().into_owned(), shell_args)),
-            working_directory: Some(working_directory.to_path_buf()),
-            drain_on_exit: false,
-            ..Default::default()
+        let feed = TerminalFeed {
+            term: term.clone(),
+            processor: Processor::new(),
+            proxy,
         };
-        options.env.insert("TERM".into(), "xterm-256color".into());
-        options.env.insert("COLORTERM".into(), "truecolor".into());
-        if let Some(path) = crate::command_env::executable_search_path() {
-            options
-                .env
-                .insert("PATH".into(), path.to_string_lossy().into_owned());
-        }
-
-        let pty = tty::new(&options, window_size, 0)
-            .with_context(|| format!("spawn terminal in {}", working_directory.display()))?;
-        let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)
-            .context("create Alacritty PTY event loop")?;
-        let sender = event_loop.channel();
-        sender_slot
-            .set(sender.clone())
-            .map_err(|_| anyhow::anyhow!("initialize Alacritty PTY sender"))?;
-        event_loop.spawn();
+        let link = DaemonTerminalLink::open(
+            daemon_v8.clone(),
+            working_directory.to_path_buf(),
+            window_size.num_cols,
+            window_size.num_lines,
+            feed,
+        )?;
+        let _ = writer_slot.set(link.writer());
 
         Ok(Self {
             term,
-            sender,
+            link,
             dirty,
             visible,
             ui_events,
@@ -293,10 +344,15 @@ impl TerminalSession {
     }
 
     fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
-        let bytes = bytes.into();
-        if !bytes.is_empty() {
-            let _ = self.sender.send(Msg::Input(bytes));
-        }
+        self.link.write(bytes.into().into_owned());
+    }
+
+    fn clear(&self) {
+        self.link.clear();
+    }
+
+    fn restart(&self) {
+        self.link.restart();
     }
 
     fn resize(&mut self, columns: usize, rows: usize, cell_width: f32) {
@@ -316,7 +372,7 @@ impl TerminalSession {
             cell_height: TERMINAL_CELL_HEIGHT.round() as u16,
         };
         *self.window_size.lock() = size;
-        let _ = self.sender.send(Msg::Resize(size));
+        self.link.resize(size.num_cols, size.num_lines);
         self.dirty.store(true, Ordering::Release);
     }
 
@@ -772,12 +828,6 @@ impl SnapshotBench {
     }
 }
 
-impl Drop for TerminalSession {
-    fn drop(&mut self) {
-        let _ = self.sender.send(Msg::Shutdown);
-    }
-}
-
 /// Adapts the alacritty grid to the overlay scrollbar: the scrollback history
 /// is the content above the viewport, and `display_offset` is how far back up
 /// into it the view currently sits (0 = pinned to the live bottom).
@@ -962,6 +1012,9 @@ pub struct TerminalView {
     error: Option<String>,
     focus_handle: FocusHandle,
     working_directory: PathBuf,
+    /// The daemon runs on this machine, so its paths are this machine's and
+    /// file links can be revealed here.
+    local_paths: bool,
     title: String,
     exited: bool,
     scroll_accumulator: f32,
@@ -999,14 +1052,23 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(working_directory: PathBuf, cx: &mut Context<Self>) -> Self {
+    /// A terminal tab: a shell the daemon runs in `working_directory`, a path
+    /// on the daemon host, whether the daemon is local or remote.
+    pub fn new(
+        daemon_v8: waku_client::surfaces::DaemonV8,
+        working_directory: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let local_paths = daemon_v8.is_local();
         let terminal_cwd = working_directory.clone();
         let (wakeup_tx, wakeups) = smol::channel::bounded(1);
         cx.spawn(async move |this, cx| {
-            let started = cx
-                .background_executor()
-                .spawn(async move { TerminalSession::new(&terminal_cwd, 52, 36, wakeup_tx) })
-                .await;
+            let started =
+                cx.background_executor()
+                    .spawn(async move {
+                        TerminalSession::new(&daemon_v8, &terminal_cwd, 52, 36, wakeup_tx)
+                    })
+                    .await;
             let _ = this.update(cx, |this, cx| {
                 match started {
                     Ok(session) => this.session = Some(session),
@@ -1027,6 +1089,7 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             title: tr!("right_panel.terminal"),
             working_directory,
+            local_paths,
             exited: false,
             scroll_accumulator: 0.0,
             panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
@@ -1175,6 +1238,12 @@ impl TerminalView {
                     session.write(formatter(&text).into_bytes());
                 }
                 TerminalUiEvent::Exited => self.exited = true,
+                TerminalUiEvent::Reset => {
+                    self.exited = false;
+                    self.error = None;
+                    self.title = tr!("right_panel.terminal");
+                }
+                TerminalUiEvent::Error(message) => self.error = Some(message),
             }
         }
         changed
@@ -1274,8 +1343,11 @@ impl TerminalView {
                 .session
                 .as_mut()
                 .and_then(|session| session.link_at(point))
-            && let Some(target) =
-                terminal_link_target(&link.value, self.working_directory.as_path())
+            && let Some(target) = terminal_link_target(
+                &link.value,
+                self.working_directory.as_path(),
+                self.local_paths,
+            )
         {
             self.selecting = false;
             self.hovered_link = Some(link);
@@ -1559,6 +1631,13 @@ impl Render for TerminalView {
             .and_then(|name| name.to_str())
             .map(str::to_owned)
             .unwrap_or_else(|| tr!("workspace.workspace"));
+        // The toolbar's right side: the directory, or why the shell is not
+        // running. A startup error shows in the body instead.
+        let (status, status_color) = match (&self.error, has_session) {
+            (Some(error), true) => (error.clone(), theme.danger),
+            _ if self.exited => (tr!("terminal.process_exited"), theme.text_tertiary),
+            _ => (directory, theme.text_tertiary),
+        };
 
         let mut screen = div()
             .flex_1()
@@ -1646,6 +1725,8 @@ impl Render for TerminalView {
                 let copy_terminal = context_terminal.clone();
                 let paste_terminal = context_terminal.clone();
                 let select_all_terminal = context_terminal.clone();
+                let clear_terminal = context_terminal.clone();
+                let restart_terminal = context_terminal.clone();
                 vec![
                     MenuItem::new(tr!("menu.copy"), move |_, cx| {
                         let selected_text = { copy_terminal.read(cx).selected_text() };
@@ -1665,6 +1746,19 @@ impl Render for TerminalView {
                     MenuItem::Separator,
                     MenuItem::new(tr!("menu.select_all"), move |_, cx| {
                         select_all_terminal.update(cx, |terminal, cx| terminal.select_all(cx));
+                    })
+                    .disabled(!has_session),
+                    MenuItem::Separator,
+                    MenuItem::new(tr!("terminal.clear"), move |_, cx| {
+                        if let Some(session) = &clear_terminal.read(cx).session {
+                            session.clear();
+                        }
+                    })
+                    .disabled(!has_session),
+                    MenuItem::new(tr!("terminal.restart"), move |_, cx| {
+                        if let Some(session) = &restart_terminal.read(cx).session {
+                            session.restart();
+                        }
                     })
                     .disabled(!has_session),
                 ]
@@ -1739,10 +1833,13 @@ impl Render for TerminalView {
                     )
                     .child(
                         div()
-                            .flex_none()
+                            .flex_shrink_0()
+                            .min_w_0()
+                            .max_w(relative(0.6))
+                            .truncate()
                             .text_size(sp(12.5))
-                            .text_color(theme.text_tertiary)
-                            .child(directory),
+                            .text_color(status_color)
+                            .child(status),
                     ),
             )
             .child(grid)
@@ -2088,8 +2185,14 @@ fn hyperlink_at<T: EventListener>(term: &Term<T>, point: TerminalPoint) -> Optio
     Some((hyperlink.uri().to_owned(), start..=end))
 }
 
-fn terminal_link_target(value: &str, working_directory: &Path) -> Option<TerminalLinkTarget> {
-    if let Some(path) = existing_terminal_file_path(value, working_directory) {
+/// What a clicked link opens. File paths resolve only when `local_paths`: a
+/// remote daemon's paths name files on its host, not on this machine (#61).
+fn terminal_link_target(
+    value: &str,
+    working_directory: &Path,
+    local_paths: bool,
+) -> Option<TerminalLinkTarget> {
+    if local_paths && let Some(path) = existing_terminal_file_path(value, working_directory) {
         return Some(TerminalLinkTarget::File(path));
     }
 
@@ -2421,21 +2524,30 @@ mod tests {
     fn resolves_terminal_urls_and_existing_project_paths() {
         let working_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert_eq!(
-            terminal_link_target("https://example.com/docs", working_directory),
+            terminal_link_target("https://example.com/docs", working_directory, true),
             Some(TerminalLinkTarget::Url(
                 "https://example.com/docs".to_owned()
             ))
         );
         assert_eq!(
-            terminal_link_target("src/terminal.rs:42:8", working_directory),
+            terminal_link_target("src/terminal.rs:42:8", working_directory, true),
             Some(TerminalLinkTarget::File(
                 working_directory.join("src/terminal.rs")
             ))
         );
         assert_eq!(
-            terminal_link_target("src/does-not-exist.rs", working_directory),
+            terminal_link_target("src/does-not-exist.rs", working_directory, true),
             None
         );
+        // A remote daemon's paths are not this machine's: only URLs open.
+        assert_eq!(
+            terminal_link_target("src/terminal.rs:42:8", working_directory, false),
+            None
+        );
+        assert!(matches!(
+            terminal_link_target("https://example.com/docs", working_directory, false),
+            Some(TerminalLinkTarget::Url(_))
+        ));
     }
 
     #[test]
@@ -2806,15 +2918,20 @@ mod tests {
         assert_eq!(spans[0].2, theme.selection);
     }
 
-    #[test]
-    fn hidden_terminal_output_sets_dirty_without_waking() {
+    fn test_proxy(
+        visible: bool,
+    ) -> (
+        TerminalEventProxy,
+        smol::channel::Receiver<()>,
+        Receiver<TerminalUiEvent>,
+    ) {
         let (wakeup, wakeups) = smol::channel::bounded(1);
-        let (ui_events, _ui_events) = unbounded();
+        let (ui_events, ui_events_rx) = unbounded();
         let proxy = TerminalEventProxy {
             dirty: Arc::new(AtomicBool::new(false)),
             wakeup,
-            visible: Arc::new(AtomicBool::new(false)),
-            sender: Arc::new(OnceLock::new()),
+            visible: Arc::new(AtomicBool::new(visible)),
+            writer: Arc::new(OnceLock::new()),
             ui_events,
             window_size: Arc::new(Mutex::new(WindowSize {
                 num_lines: 10,
@@ -2824,6 +2941,133 @@ mod tests {
             })),
             dark_theme: Arc::new(AtomicBool::new(true)),
         };
+        (proxy, wakeups, ui_events_rx)
+    }
+
+    fn screen_text<T: EventListener>(term: &Term<T>) -> Vec<String> {
+        (0..term.screen_lines() as i32)
+            .map(|line| {
+                let row = &term.grid()[Line(line)];
+                (0..term.columns())
+                    .map(|column| row[Column(column)].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn feed_for(proxy: &TerminalEventProxy) -> TerminalFeed {
+        let dimensions = TerminalDimensions {
+            columns: 20,
+            rows: 4,
+        };
+        TerminalFeed {
+            term: Arc::new(FairMutex::new(Term::new(
+                Config::default(),
+                &dimensions,
+                proxy.clone(),
+            ))),
+            processor: Processor::new(),
+            proxy: proxy.clone(),
+        }
+    }
+
+    fn attached(offset: u64, replay: u64) -> waku_client::v8::TerminalItem {
+        waku_client::v8::TerminalItem::Attached {
+            generation: uuid::Uuid::from_u128(1),
+            cols: 20,
+            rows: 4,
+            offset,
+            replay,
+            truncated: false,
+            exited: false,
+            exit_code: None,
+            title: None,
+        }
+    }
+
+    /// The desktop's attach path without a window or a daemon: a reattach
+    /// that cannot continue where the screen stopped resets the emulator,
+    /// replays the retained tail, and applies the live output after it
+    /// (#60, #55).
+    #[test]
+    fn daemon_terminal_replay_and_live_output_drive_the_emulator() {
+        let (proxy, wakeups, ui_events) = test_proxy(true);
+        let mut feed = feed_for(&proxy);
+        let mut stream = waku_client::terminal::TerminalStream::default();
+        for update in stream.item(attached(0, 0)) {
+            feed.update(update);
+        }
+        for update in stream.data(b"stale".to_vec()) {
+            feed.update(update);
+        }
+        let _ = ui_events.try_iter().count();
+
+        // The connection dropped; the daemon replays its last 17 bytes.
+        let replay = b"$ ls\r\nREADME.md\r\n".to_vec();
+        for update in stream.item(attached(17, replay.len() as u64)) {
+            feed.update(update);
+        }
+        for update in stream.data(replay) {
+            feed.update(update);
+        }
+        for update in stream.data(b"$ ".to_vec()) {
+            feed.update(update);
+        }
+        assert_eq!(
+            screen_text(&feed.term.lock()),
+            vec!["$ ls", "README.md", "$", ""]
+        );
+        assert!(proxy.dirty.load(Ordering::Acquire));
+        assert!(wakeups.try_recv().is_ok());
+        assert!(matches!(ui_events.try_recv(), Ok(TerminalUiEvent::Reset)));
+
+        feed.update(TerminalUpdate::Exited);
+        assert!(matches!(ui_events.try_recv(), Ok(TerminalUiEvent::Exited)));
+        feed.update(TerminalUpdate::Error("gone".into()));
+        assert!(matches!(
+            ui_events.try_recv(),
+            Ok(TerminalUiEvent::Error(message)) if message == "gone"
+        ));
+    }
+
+    #[test]
+    fn a_reset_clears_the_screen_and_the_scrollback() {
+        let (proxy, _wakeups, _ui_events) = test_proxy(true);
+        let mut feed = feed_for(&proxy);
+        feed.update(TerminalUpdate::Output(
+            (0..20)
+                .map(|line| format!("line {line}\r\n"))
+                .collect::<String>()
+                .into_bytes(),
+        ));
+        assert!(feed.term.lock().grid().history_size() > 0);
+        // A half-read escape sequence must not swallow the next output.
+        feed.update(TerminalUpdate::Output(b"\x1b[3".to_vec()));
+        feed.update(TerminalUpdate::Reset);
+        feed.update(TerminalUpdate::Output(b"fresh".to_vec()));
+        let term = feed.term.lock();
+        assert_eq!(term.grid().history_size(), 0);
+        assert_eq!(screen_text(&term), vec!["fresh", "", "", ""]);
+    }
+
+    #[test]
+    fn synchronized_output_is_flushed_by_its_deadline() {
+        let (proxy, _wakeups, _ui_events) = test_proxy(true);
+        let mut feed = feed_for(&proxy);
+        assert_eq!(feed.deadline(), None);
+        feed.update(TerminalUpdate::Output(b"\x1b[?2026hheld".to_vec()));
+        assert!(feed.deadline().is_some());
+        assert_eq!(screen_text(&feed.term.lock())[0], "");
+        feed.tick();
+        assert_eq!(feed.deadline(), None);
+        assert_eq!(screen_text(&feed.term.lock())[0], "held");
+    }
+
+    #[test]
+    fn hidden_terminal_output_sets_dirty_without_waking() {
+        let (proxy, wakeups, _ui_events) = test_proxy(false);
 
         for _ in 0..100 {
             proxy.send_event(Event::Wakeup);

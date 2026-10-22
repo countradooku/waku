@@ -159,23 +159,20 @@ impl Waku {
                     self.slash_command_index_key = None;
                 }
                 let path = project_path.clone();
-                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+                let daemon_v8 = self.daemon_v8.clone();
+                let settings_sync = self.settings_sync.clone();
                 cx.spawn(async move |waku, cx| {
                     let commands = cx
                         .background_executor()
                         .spawn(async move {
-                            match workspace.request(
-                                waku_client::WorkspaceOperation::DiscoverSlashCommands {
-                                    provider,
-                                    project_root: path,
-                                    binary_override,
-                                },
-                            ) {
-                                Ok(waku_client::WorkspaceResult::SlashCommands { commands }) => {
-                                    commands
-                                }
-                                Ok(_) | Err(_) => Vec::new(),
-                            }
+                            // The cache key carries the binary override; the
+                            // daemon discovers with the one its settings
+                            // name, so let an edit of it land first.
+                            settings_sync.wait_settled(PROVIDER_SETTINGS_SETTLE);
+                            waku_client::surfaces::composer::slash_commands(
+                                &daemon_v8, provider, &path,
+                            )
+                            .unwrap_or_default()
                         })
                         .await;
                     waku.update(cx, |waku, cx| {
@@ -210,22 +207,17 @@ impl Waku {
                     self.mention_file_index_path = None;
                 }
                 let path = project_path.clone();
-                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+                let daemon_v8 = self.daemon_v8.clone();
                 cx.spawn(async move |waku, cx| {
                     let files = cx
                         .background_executor()
                         .spawn(async move {
-                            match workspace.request(
-                                waku_client::WorkspaceOperation::ListProjectFiles {
-                                    root: path,
-                                    cap: FILE_INDEX_CAP,
-                                },
-                            ) {
-                                Ok(waku_client::WorkspaceResult::ProjectFiles { entries }) => {
-                                    entries
-                                }
-                                Ok(_) | Err(_) => Vec::new(),
-                            }
+                            waku_client::surfaces::files::mention_index(
+                                &daemon_v8,
+                                &path,
+                                FILE_INDEX_CAP,
+                            )
+                            .unwrap_or_default()
                         })
                         .await;
                     waku.update(cx, |waku, cx| {

@@ -1,6 +1,6 @@
 use super::*;
 
-fn should_render_empty_state(session: Option<&AgentSession>) -> bool {
+fn should_render_empty_state(session: Option<&ThreadView>) -> bool {
     // Turns count as content even before any message exists: a
     // provider-initiated turn (Codex goal continuation) reasons for a while
     // before its first text delta, and the transcript's working indicator —
@@ -299,6 +299,7 @@ impl Render for Waku {
             let command_palette = self.render_command_palette(window, cx);
             let commit_dialog = self.render_commit_dialog(cx);
             let goal_dialog = self.render_goal_dialog(window, cx);
+            let remote_folder_picker = self.render_remote_folder_picker(window, cx);
             let toast = self.render_active_toast(cx);
             let content = div()
                 .relative()
@@ -317,6 +318,7 @@ impl Render for Waku {
                 .children(command_palette)
                 .children(commit_dialog)
                 .children(goal_dialog)
+                .children(remote_folder_picker)
                 .children(image_preview)
                 .children(task_switcher)
                 .child(self.root_frame.clone())
@@ -330,10 +332,10 @@ impl Render for Waku {
         let theme = Theme::current(cx);
         let empty = should_render_empty_state(self.selected_session());
         let permission = self.render_permission(cx);
-        let computer_use = self.render_computer_use_overlay(window, cx);
         let command_palette = self.render_command_palette(window, cx);
         let commit_dialog = self.render_commit_dialog(cx);
         let goal_dialog = self.render_goal_dialog(window, cx);
+        let remote_folder_picker = self.render_remote_folder_picker(window, cx);
         let toast = self.render_active_toast(cx);
         let content = div()
             .key_context("Waku")
@@ -466,10 +468,10 @@ impl Render for Waku {
                         ),
                 )
             })
-            .children(computer_use)
             .children(command_palette)
             .children(commit_dialog)
             .children(goal_dialog)
+            .children(remote_folder_picker)
             .children(image_preview)
             .children(task_switcher)
             .child(self.root_frame.clone())
@@ -642,12 +644,12 @@ mod tests {
 
     #[test]
     fn unloaded_history_never_renders_the_new_task_prompt() {
-        let mut stored = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let mut stored = super::test_support::test_session(Uuid::new_v4(), ProviderKind::Codex);
         stored.detail_loaded = false;
 
         assert!(!should_render_empty_state(Some(&stored)));
 
-        let draft = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let draft = super::test_support::test_session(Uuid::new_v4(), ProviderKind::Codex);
         assert!(should_render_empty_state(Some(&draft)));
         assert!(should_render_empty_state(None));
     }

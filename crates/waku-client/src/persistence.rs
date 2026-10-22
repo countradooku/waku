@@ -1,11 +1,14 @@
-//! Desktop-owned preferences and RPC proxies for daemon-owned task state.
+//! Desktop-owned preferences and UI state (layout, selection, remembered
+//! model choices). Task state — projects, threads, transcripts — belongs to
+//! the daemon and reaches the desktop only through the v8 shell and thread
+//! streams ([`crate::store`]); nothing here reads or writes it (#55).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -17,20 +20,25 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Command, DaemonExposureSettings, DaemonSettings, DaemonSupervisor, ResponsePayload};
+use crate::{DaemonExposureSettings, DaemonSettings};
 use waku_protocol::computer_use::ComputerAppGrant;
 use waku_protocol::i18n::AppLanguage;
 use waku_protocol::identity::DATA_DIRECTORY_NAME;
-use waku_protocol::model::{
-    AgentSession, FavoriteModel, Project, ProviderKind, ProviderResumeCursor,
-    ProviderSessionHistory, ProviderSessionSummary, RuntimeMode,
-};
+use waku_protocol::model::{FavoriteModel, ProviderKind, RuntimeMode};
 use waku_protocol::theme::ThemePreference;
 
 pub use waku_protocol::persistence::{
     ComposerDraft, ComposerDraftAttachment, ComposerDraftChange, ComposerDraftKey,
-    ComposerDraftTarget, ComposerDrafts, SessionMessageMatch,
+    ComposerDraftTarget, ComposerDrafts,
 };
+
+/// One thread's best transcript match for the command palette's search.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionMessageMatch {
+    pub session_id: Uuid,
+    pub source: waku_protocol::model::MessageRole,
+    pub snippet: String,
+}
 
 const STATE_VERSION: u32 = 5;
 const APP_STATE_VERSION: u32 = 1;
@@ -107,124 +115,6 @@ pub struct RememberedModelTraits {
     service_tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     context_window: Option<String>,
-}
-
-/// Remote composer-draft proxy. Draft bytes and attachments remain owned by
-/// the daemon even though the desktop keeps an in-memory editing snapshot.
-#[derive(Clone)]
-pub struct ComposerDraftStore {
-    daemon: DaemonSupervisor,
-    save_state: Arc<Mutex<ComposerDraftSaveState>>,
-}
-
-#[derive(Default)]
-struct ComposerDraftSaveState {
-    snapshot: ComposerDrafts,
-    latest_generation: u64,
-}
-
-impl ComposerDraftStore {
-    pub fn remote(daemon: DaemonSupervisor) -> Self {
-        Self {
-            daemon,
-            save_state: Arc::new(Mutex::new(ComposerDraftSaveState::default())),
-        }
-    }
-
-    pub fn load(&self) -> io::Result<ComposerDrafts> {
-        match self
-            .daemon
-            .client()
-            .request(Uuid::nil(), Uuid::nil(), Command::LoadComposerDrafts)
-            .map_err(to_io_error)?
-        {
-            ResponsePayload::ComposerDrafts { drafts } => {
-                self.save_state.lock().snapshot = drafts.clone();
-                Ok(drafts)
-            }
-            _ => Err(io::Error::other(
-                "Waku daemon returned an invalid composer-drafts response",
-            )),
-        }
-    }
-
-    pub fn save(&self, drafts: ComposerDrafts, generation: u64) -> io::Result<()> {
-        // Serialize this client's detached background saves and compare only
-        // against its last local snapshot. A second client may add or remove
-        // other keys without those changes being interpreted as ours.
-        let mut state = self.save_state.lock();
-        if generation < state.latest_generation {
-            return Ok(());
-        }
-        let changes = composer_draft_changes(&state.snapshot, &drafts);
-        if changes.is_empty() {
-            state.latest_generation = generation;
-            return Ok(());
-        }
-        match self
-            .daemon
-            .client()
-            .request(
-                Uuid::nil(),
-                Uuid::nil(),
-                Command::ApplyComposerDraftChanges { changes },
-            )
-            .map_err(to_io_error)?
-        {
-            ResponsePayload::Ack => {
-                state.snapshot = drafts;
-                state.latest_generation = generation;
-                Ok(())
-            }
-            _ => Err(io::Error::other(
-                "Waku daemon returned an invalid composer-drafts save response",
-            )),
-        }
-    }
-}
-
-fn composer_draft_changes(
-    previous: &ComposerDrafts,
-    next: &ComposerDrafts,
-) -> Vec<ComposerDraftChange> {
-    let mut changes = Vec::new();
-    collect_composer_draft_changes(
-        &previous.new_sessions,
-        &next.new_sessions,
-        |project_id| ComposerDraftTarget::NewSession { project_id },
-        &mut changes,
-    );
-    collect_composer_draft_changes(
-        &previous.sessions,
-        &next.sessions,
-        |session_id| ComposerDraftTarget::Session { session_id },
-        &mut changes,
-    );
-    changes
-}
-
-fn collect_composer_draft_changes(
-    previous: &HashMap<Uuid, ComposerDraft>,
-    next: &HashMap<Uuid, ComposerDraft>,
-    target: impl Fn(Uuid) -> ComposerDraftTarget,
-    changes: &mut Vec<ComposerDraftChange>,
-) {
-    for (id, draft) in next {
-        if previous.get(id) != Some(draft) {
-            changes.push(ComposerDraftChange {
-                target: target(*id),
-                draft: Some(draft.clone()),
-            });
-        }
-    }
-    for id in previous.keys() {
-        if !next.contains_key(id) {
-            changes.push(ComposerDraftChange {
-                target: target(*id),
-                draft: None,
-            });
-        }
-    }
 }
 
 /// Last observed main-window frame in logical pixels. GPUI window bounds are
@@ -358,8 +248,6 @@ pub struct PersistedState {
     pub analytics_id: Uuid,
     #[serde(default = "default_analytics_enabled")]
     pub analytics_enabled: bool,
-    pub projects: Vec<Project>,
-    pub sessions: Vec<AgentSession>,
     pub selected_project: Option<Uuid>,
     pub selected_session: Option<Uuid>,
     pub last_provider: ProviderKind,
@@ -419,54 +307,20 @@ pub struct PersistedState {
     pub disabled_providers: Vec<ProviderKind>,
     #[serde(default)]
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
+    /// Daemon-owned worktree storage settings. Never written to the app's
+    /// own file: the daemon document is the only source of truth.
+    #[serde(skip)]
+    pub daemon_storage: waku_protocol::storage::StorageSettings,
     #[serde(skip)]
     daemon_settings_extra: BTreeMap<String, serde_json::Value>,
-    #[serde(skip)]
-    dirty_sessions: HashSet<Uuid>,
 }
 
 impl PersistedState {
-    pub fn session_mut(&mut self, id: Uuid) -> Option<&mut AgentSession> {
-        let session = self.sessions.iter_mut().find(|session| session.id == id)?;
-        self.dirty_sessions.insert(id);
-        Some(session)
-    }
-
-    pub fn mark_session_dirty(&mut self, id: Uuid) {
-        self.dirty_sessions.insert(id);
-    }
-
-    /// Whether `id` has changes the next save has yet to send the daemon.
-    pub fn is_session_dirty(&self, id: Uuid) -> bool {
-        self.dirty_sessions.contains(&id)
-    }
-
-    /// Snapshots of the dirty sessions for `SaveTaskState`. Cheap: their
-    /// transcripts are shared, not copied.
-    ///
-    /// A skeleton (`detail_loaded == false`: never hydrated, or released by
-    /// dehydration) is left out. The wire cannot say "not loaded", so the
-    /// daemon would take its empty transcript as the real one.
-    fn dirty_session_snapshots(&self) -> Vec<AgentSession> {
-        self.sessions
-            .iter()
-            .filter(|session| session.detail_loaded && self.dirty_sessions.contains(&session.id))
-            .cloned()
-            .collect()
-    }
-
-    pub fn push_session(&mut self, session: AgentSession) {
-        self.dirty_sessions.insert(session.id);
-        self.sessions.push(session);
-    }
-
     pub fn empty() -> Self {
         Self {
             version: STATE_VERSION,
             analytics_id: Uuid::new_v4(),
             analytics_enabled: default_analytics_enabled(),
-            projects: Vec::new(),
-            sessions: Vec::new(),
             selected_project: None,
             selected_session: None,
             last_provider: ProviderKind::Codex,
@@ -497,35 +351,9 @@ impl PersistedState {
             computer_use_allowed_apps: Vec::new(),
             disabled_providers: Vec::new(),
             provider_binary_overrides: HashMap::new(),
+            daemon_storage: Default::default(),
             daemon_settings_extra: BTreeMap::new(),
-            dirty_sessions: HashSet::new(),
         }
-    }
-
-    pub fn fresh(cwd: PathBuf) -> Self {
-        let project = Project::from_path(cwd);
-        let session = AgentSession::new(project.id, ProviderKind::Codex);
-        Self {
-            selected_project: Some(project.id),
-            selected_session: Some(session.id),
-            projects: vec![project],
-            sessions: vec![session],
-            ..Self::empty()
-        }
-    }
-
-    pub fn new_session(&self, project_id: Uuid, provider: ProviderKind) -> AgentSession {
-        let mut session = AgentSession::new(project_id, provider);
-        session.runtime_mode = self.last_runtime_mode;
-        if provider == self.last_provider {
-            session.model.clone_from(&self.last_model);
-            session
-                .reasoning_effort
-                .clone_from(&self.last_reasoning_effort);
-            session.service_tier.clone_from(&self.last_service_tier);
-            session.context_window.clone_from(&self.last_context_window);
-        }
-        session
     }
 
     pub fn remember_model_traits(
@@ -586,6 +414,7 @@ impl PersistedState {
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
             disabled_providers: self.disabled_providers.clone(),
             provider_binary_overrides: self.provider_binary_overrides.clone(),
+            storage: self.daemon_storage.clone(),
             extra: self.daemon_settings_extra.clone(),
         }
     }
@@ -599,6 +428,7 @@ impl PersistedState {
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
         self.disabled_providers = settings.disabled_providers;
         self.provider_binary_overrides = settings.provider_binary_overrides;
+        self.daemon_storage = settings.storage;
         self.daemon_settings_extra = settings.extra;
     }
 
@@ -622,7 +452,7 @@ impl PersistedState {
             app_state_version: APP_STATE_VERSION,
             analytics_id: self.analytics_id,
             selected_project: self.selected_project,
-            selected_session: self.persistable_selected_session(),
+            selected_session: self.selected_session,
             last_provider: self.last_provider,
             last_runtime_mode: self.last_runtime_mode,
             last_model: self.last_model.clone(),
@@ -675,83 +505,9 @@ impl PersistedState {
         self.window_state = app_state.window_state;
     }
 
-    fn persistable_selected_session(&self) -> Option<Uuid> {
-        self.selected_session.filter(|selected| {
-            self.sessions
-                .iter()
-                .any(|session| session.id == *selected && session.has_started())
-        })
-    }
-
-    fn ensure_runtime_session(&mut self) {
-        if self
-            .selected_session
-            .is_some_and(|selected| self.sessions.iter().any(|session| session.id == selected))
-        {
-            return;
-        }
-        self.selected_session = None;
-        let Some(project_id) = self
-            .selected_project
-            .filter(|selected| self.projects.iter().any(|project| project.id == *selected))
-        else {
-            return;
-        };
-        let session = self.new_session(project_id, self.last_provider);
-        self.selected_session = Some(session.id);
-        self.sessions.push(session);
-    }
-
     fn migrate_loaded(&mut self) {
-        for session in &mut self.sessions {
-            let checkpoint_totals_current = session.turns.iter().all(|turn| {
-                turn.checkpoint
-                    .as_ref()
-                    .is_none_or(waku_protocol::model::Checkpoint::totals_are_current)
-            });
-            let before = (
-                session.turns.len(),
-                session.last_reply_at,
-                session.provider_cursor.is_some(),
-            );
-            session.migrate_legacy_state();
-            session.backfill_last_reply_at();
-            if !checkpoint_totals_current
-                || before
-                    != (
-                        session.turns.len(),
-                        session.last_reply_at,
-                        session.provider_cursor.is_some(),
-                    )
-            {
-                self.dirty_sessions.insert(session.id);
-            }
-        }
         self.version = STATE_VERSION;
         normalize_computer_app_grants(&mut self.computer_use_allowed_apps);
-        self.backfill_remembered_selection();
-    }
-
-    fn backfill_remembered_selection(&mut self) {
-        let Some(session) = self
-            .selected_session
-            .and_then(|selected| self.sessions.iter().find(|session| session.id == selected))
-            .cloned()
-        else {
-            return;
-        };
-        if self.last_model.is_none() {
-            self.last_model = session.model;
-        }
-        if self.last_reasoning_effort.is_none() {
-            self.last_reasoning_effort = session.reasoning_effort;
-        }
-        if self.last_service_tier.is_none() {
-            self.last_service_tier = session.service_tier;
-        }
-        if self.last_context_window.is_none() {
-            self.last_context_window = session.context_window;
-        }
     }
 }
 
@@ -761,14 +517,14 @@ fn configuration_directory() -> PathBuf {
 
 fn default_app_settings_path() -> PathBuf {
     if cfg!(debug_assertions) {
-        StateStore::default_path().with_file_name("app.json")
+        StateStore::default_dir().join("app.json")
     } else {
         configuration_directory().join("app.json")
     }
 }
 
 fn default_app_state_path() -> PathBuf {
-    StateStore::default_path().with_file_name("state.json")
+    StateStore::default_dir().join("state.json")
 }
 
 fn read_app_state_file(path: &Path) -> Option<AppState> {
@@ -784,31 +540,14 @@ pub fn load_window_state() -> Option<PersistedWindowState> {
     read_app_state_file(&default_app_state_path())?.window_state
 }
 
-fn default_legacy_settings_paths() -> Vec<PathBuf> {
-    if cfg!(debug_assertions) {
-        vec![StateStore::default_path().with_file_name("settings.json")]
-    } else {
-        vec![configuration_directory().join("settings.json")]
-    }
-}
-
-fn read_app_settings_source(
-    app_settings_path: &Path,
-    legacy_settings_paths: &[PathBuf],
-) -> io::Result<Option<(Vec<u8>, bool)>> {
+/// The bytes of `app.json`, or `None` when it does not exist yet (D6: no
+/// settings are imported from another layout).
+fn read_app_settings_source(app_settings_path: &Path) -> io::Result<Option<Vec<u8>>> {
     match fs::read(app_settings_path) {
-        Ok(bytes) => return Ok(Some((bytes, true))),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
-    for path in legacy_settings_paths {
-        match fs::read(path) {
-            Ok(bytes) => return Ok(Some((bytes, false))),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(None)
 }
 
 /// Load the app-owned launch settings before the managed daemon starts.
@@ -816,11 +555,11 @@ fn read_app_settings_source(
 /// stable between this process launch and the later UI state load.
 pub fn load_or_create_app_settings() -> io::Result<AppSettings> {
     let path = default_app_settings_path();
-    let source = read_app_settings_source(&path, &default_legacy_settings_paths())?;
-    let loaded_from_primary = source.as_ref().is_some_and(|(_, primary)| *primary);
+    let source = read_app_settings_source(&path)?;
+    let loaded = source.is_some();
     let token_was_persisted = source
         .as_ref()
-        .and_then(|(bytes, _)| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
         .and_then(|value| {
             value
                 .get("daemon_exposure")
@@ -830,51 +569,43 @@ pub fn load_or_create_app_settings() -> io::Result<AppSettings> {
         })
         .unwrap_or(false);
     let mut settings: AppSettings = source
-        .map(|(bytes, _)| serde_json::from_slice::<AppSettings>(&bytes).map_err(to_io_error))
+        .map(|bytes| serde_json::from_slice::<AppSettings>(&bytes).map_err(to_io_error))
         .transpose()?
         .unwrap_or_default();
     let generated_token = settings.daemon_exposure.ensure_token();
-    if !loaded_from_primary || !token_was_persisted || generated_token {
+    if !loaded || !token_was_persisted || generated_token {
         write_json_atomically(&path, &settings)?;
     }
     Ok(settings)
 }
 
-/// Desktop state store: app files stay local, task data crosses RPC.
+/// The desktop's own files: `app.json` (preferences) and `state.json` (UI
+/// state). Task data is never stored here.
 pub struct StateStore {
-    path: PathBuf,
     app_state_path: PathBuf,
     app_settings_path: PathBuf,
-    legacy_settings_paths: Vec<PathBuf>,
-    daemon: DaemonSupervisor,
-    remote_default_cwd: Mutex<Option<PathBuf>>,
-    /// A task snapshot may only be written after this client has successfully
-    /// loaded the daemon's authoritative state. Falling back to an empty UI
-    /// after a transient RPC failure must never turn the next ordinary save
-    /// into a destructive replacement of the daemon database.
-    task_state_loaded: AtomicBool,
     /// Writes `app.json` and `state.json` off the UI thread.
     app_files: AppFileWriter,
 }
 
 impl StateStore {
-    pub fn default_path() -> PathBuf {
+    /// The directory of the desktop's own files: the checkout's `temp/` in
+    /// debug builds, the per-user data directory in release builds.
+    pub fn default_dir() -> PathBuf {
         if cfg!(debug_assertions) {
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(Path::parent)
                 .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
                 .join("temp")
-                .join("app.db")
         } else {
             dirs::data_local_dir()
                 .unwrap_or_else(std::env::temp_dir)
                 .join(DATA_DIRECTORY_NAME)
-                .join("app.db")
         }
     }
 
-    pub fn remote(daemon: DaemonSupervisor) -> Self {
+    pub fn open() -> Self {
         let app_state_path = default_app_state_path();
         let app_settings_path = default_app_settings_path();
         Self {
@@ -885,139 +616,12 @@ impl StateStore {
             ),
             app_state_path,
             app_settings_path,
-            legacy_settings_paths: default_legacy_settings_paths(),
-            path: Self::default_path(),
-            daemon,
-            remote_default_cwd: Mutex::new(None),
-            task_state_loaded: AtomicBool::new(false),
         }
     }
 
-    pub fn session_message_search(
-        &self,
-        query: String,
-        limit: usize,
-    ) -> impl FnOnce() -> io::Result<Vec<SessionMessageMatch>> + Send + 'static {
-        let daemon = self.daemon.clone();
-        move || match daemon
-            .client()
-            .request(
-                Uuid::nil(),
-                Uuid::nil(),
-                Command::SearchSessionMessages { query, limit },
-            )
-            .map_err(to_io_error)?
-        {
-            ResponsePayload::SessionMessageMatches { matches } => Ok(matches),
-            _ => Err(io::Error::other(
-                "Waku daemon returned an invalid message-search response",
-            )),
-        }
-    }
-
-    pub fn provider_sessions(
-        &self,
-        provider: ProviderKind,
-        limit: usize,
-    ) -> impl FnOnce() -> io::Result<Vec<ProviderSessionSummary>> + Send + 'static {
-        let daemon = self.daemon.clone();
-        move || match daemon
-            .client()
-            .request(
-                Uuid::nil(),
-                Uuid::nil(),
-                Command::ListProviderSessions { provider, limit },
-            )
-            .map_err(to_io_error)?
-        {
-            ResponsePayload::ProviderSessions { sessions } => Ok(sessions),
-            _ => Err(io::Error::other(
-                "Waku daemon returned an invalid provider-session response",
-            )),
-        }
-    }
-
-    pub fn provider_session_history(
-        &self,
-        cursor: ProviderResumeCursor,
-        cwd: PathBuf,
-    ) -> impl FnOnce() -> io::Result<ProviderSessionHistory> + Send + 'static {
-        let daemon = self.daemon.clone();
-        move || match daemon
-            .client()
-            .request(
-                Uuid::nil(),
-                Uuid::nil(),
-                Command::LoadProviderSession { cursor, cwd },
-            )
-            .map_err(to_io_error)?
-        {
-            ResponsePayload::ProviderSessionHistory { history } => Ok(history),
-            _ => Err(io::Error::other(
-                "Waku daemon returned an invalid provider-session history response",
-            )),
-        }
-    }
-
-    pub fn load_or_fresh(&self, cwd: PathBuf) -> PersistedState {
-        let mut state = match self.load() {
-            Ok(state) => {
-                self.task_state_loaded.store(true, Ordering::Release);
-                state
-            }
-            Err(_) if cwd.parent().is_none() => PersistedState::empty(),
-            Err(_) => PersistedState::fresh(cwd),
-        };
-        if state.projects.is_empty()
-            && let Some(cwd) = self.remote_default_cwd.lock().clone()
-            && cwd.parent().is_some()
-        {
-            let project = Project::from_path(cwd);
-            let session = state.new_session(project.id, state.last_provider);
-            state.selected_project = Some(project.id);
-            state.selected_session = Some(session.id);
-            state.projects.push(project);
-            state.push_session(session);
-        }
-        state.ensure_runtime_session();
-        if let Some(selected) = state.selected_session
-            && let Some(session) = state
-                .sessions
-                .iter_mut()
-                .find(|session| session.id == selected)
-        {
-            let _ = self.hydrate(session);
-        }
-        state
-    }
-
+    /// The app files, or defaults where they are missing.
     pub fn load(&self) -> io::Result<PersistedState> {
-        let (projects, mut sessions, default_cwd) = match self
-            .daemon
-            .client()
-            .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
-            .map_err(to_io_error)?
-        {
-            ResponsePayload::TaskState {
-                projects,
-                sessions,
-                default_cwd,
-                projectless_root,
-            } => {
-                waku_protocol::projectless::set_workspace_root(projectless_root);
-                (projects, sessions, default_cwd)
-            }
-            _ => {
-                return Err(io::Error::other(
-                    "Waku daemon returned an invalid task-state response",
-                ));
-            }
-        };
-        restore_task_state_skeletons(&mut sessions);
-        *self.remote_default_cwd.lock() = Some(default_cwd);
         let mut state = PersistedState::empty();
-        state.projects = projects;
-        state.sessions = sessions;
         let app_settings_missing = !self.app_settings_path.is_file();
         if let Some(settings) = self.read_app_settings()? {
             state.apply_app_settings(settings);
@@ -1037,67 +641,17 @@ impl StateStore {
         Ok(state)
     }
 
-    /// Whether this store loaded the daemon's task state, the same guard
-    /// [`StateStore::save`] checks.
-    pub fn task_state_loaded(&self) -> bool {
-        self.task_state_loaded.load(Ordering::Acquire)
-    }
-
-    pub fn hydrate(&self, session: &mut AgentSession) -> io::Result<()> {
-        if session.detail_loaded {
-            return Ok(());
-        }
-        match hydrate_session(&self.daemon, session.id)? {
-            Some(stored) => {
-                *session = stored;
-                Ok(())
-            }
-            None => {
-                session.detail_loaded = true;
-                Ok(())
-            }
-        }
-    }
-
-    /// Persists the desktop's state without file I/O or serialization on the
-    /// calling (UI) thread.
-    ///
-    /// - The app files go to the background [`AppFileWriter`], which
-    ///   coalesces saves into one write per [`APP_FILE_WRITE_DEBOUNCE`] and
-    ///   skips files whose bytes did not change. A failed write surfaces from
-    ///   the next call.
-    /// - Dirty sessions are snapshotted for the daemon. Their transcripts are
-    ///   [`waku_protocol::shared::SharedVec`]s, so the snapshot shares message
-    ///   and block bodies instead of copying them, and the socket thread
-    ///   serializes the command.
-    pub fn save(&self, state: &mut PersistedState) -> io::Result<()> {
+    /// Persists the app files without file I/O or serialization on the
+    /// calling (UI) thread: they go to the background [`AppFileWriter`],
+    /// which coalesces saves into one write per [`APP_FILE_WRITE_DEBOUNCE`]
+    /// and skips files whose bytes did not change. A failed write surfaces
+    /// from the next call.
+    pub fn save(&self, state: &PersistedState) -> io::Result<()> {
         self.app_files.submit(AppFiles {
             settings: state.app_settings(),
             state: state.app_state(),
         });
-        let write_error = self.app_files.take_error();
-        if !self.task_state_loaded.load(Ordering::Acquire) {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "task state was not loaded; refusing to overwrite daemon data",
-            ));
-        }
-        let sessions = state.dirty_session_snapshots();
-        let live_session_ids = state.sessions.iter().map(|session| session.id).collect();
-        self.daemon
-            .client()
-            .notify(
-                Uuid::nil(),
-                Uuid::nil(),
-                Command::SaveTaskState {
-                    projects: state.projects.clone(),
-                    live_session_ids,
-                    sessions,
-                },
-            )
-            .map_err(to_io_error)?;
-        state.dirty_sessions.clear();
-        write_error.map_or(Ok(()), Err)
+        self.app_files.take_error().map_or(Ok(()), Err)
     }
 
     /// A blocking flush of the app files, for the background executor: it
@@ -1110,31 +664,9 @@ impl StateStore {
         self.app_files.flush_handle(durability)
     }
 
-    pub fn remove_session(&self, session_id: Uuid) -> io::Result<()> {
-        self.daemon
-            .client()
-            .notify(session_id, Uuid::nil(), Command::RemoveSession)
-            .map_err(to_io_error)
-    }
-
-    pub fn blob_sweep(&self) -> impl FnOnce() + Send + 'static {
-        let daemon = self.daemon.clone();
-        move || {
-            let _ = daemon
-                .client()
-                .request(Uuid::nil(), Uuid::nil(), Command::SweepBlobs);
-        }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     fn read_app_settings(&self) -> io::Result<Option<AppSettings>> {
-        let source =
-            read_app_settings_source(&self.app_settings_path, &self.legacy_settings_paths)?;
-        source
-            .map(|(bytes, _)| serde_json::from_slice(&bytes).map_err(to_io_error))
+        read_app_settings_source(&self.app_settings_path)?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(to_io_error))
             .transpose()
     }
 
@@ -1144,29 +676,6 @@ impl StateStore {
 
     fn write_app_state(&self, state: &AppState) -> io::Result<()> {
         write_json_atomically(&self.app_state_path, state)
-    }
-}
-
-/// Fetches one daemon-owned session. Remote image materialization is kept
-/// separate so presentation code can show the transcript before large blobs
-/// finish crossing the daemon boundary.
-pub fn hydrate_session(
-    daemon: &DaemonSupervisor,
-    session_id: Uuid,
-) -> io::Result<Option<AgentSession>> {
-    match daemon
-        .client()
-        .request(
-            Uuid::nil(),
-            Uuid::nil(),
-            Command::HydrateSession { session_id },
-        )
-        .map_err(to_io_error)?
-    {
-        ResponsePayload::Session { session } => Ok(session),
-        _ => Err(io::Error::other(
-            "Waku daemon returned an invalid session-hydration response",
-        )),
     }
 }
 
@@ -1436,24 +945,6 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
-fn restore_task_state_skeletons(sessions: &mut [AgentSession]) {
-    for session in sessions {
-        session.detail_loaded = false;
-    }
-}
-
-/// Reads one daemon-owned binary payload. Clients decide how to present the
-/// bytes; this transport layer deliberately creates no client-side files.
-pub fn read_remote_reference(
-    reference: &str,
-    daemon_path: Option<&Path>,
-    daemon: &DaemonSupervisor,
-) -> Option<Vec<u8>> {
-    // A local daemon's files are read straight from disk; a remote one sends
-    // them as binary frames (#22).
-    daemon.client().read_reference(reference, daemon_path).ok()
-}
-
 fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {
     let mut seen_bundle_ids = HashSet::new();
     grants.retain(|grant| {
@@ -1633,51 +1124,20 @@ mod tests {
     }
 
     #[test]
-    fn save_snapshots_share_transcripts_and_never_send_skeletons() {
-        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
-        let id = state.sessions[0].id;
-        state.sessions[0].begin_turn("a prompt");
-        state.mark_session_dirty(id);
-        let mut skeleton = AgentSession::new(state.projects[0].id, ProviderKind::Codex);
-        skeleton.release_transcript();
-        state.push_session(skeleton);
-
-        let snapshots = state.dirty_session_snapshots();
-
-        assert_eq!(snapshots.len(), 1, "the skeleton is not sent");
-        assert_eq!(snapshots[0].id, id);
-        assert!(
-            snapshots[0].messages.ptr_eq(&state.sessions[0].messages),
-            "a snapshot shares message bodies instead of copying them"
-        );
-    }
-
-    #[test]
     fn desktop_settings_paths_are_build_specific() {
         let app_settings_path = default_app_settings_path();
-        let legacy_settings_paths = default_legacy_settings_paths();
 
         #[cfg(debug_assertions)]
-        {
-            let state_path = StateStore::default_path();
-            assert_eq!(app_settings_path, state_path.with_file_name("app.json"));
-            assert_eq!(
-                legacy_settings_paths,
-                [state_path.with_file_name("settings.json")]
-            );
-        }
+        assert_eq!(
+            app_settings_path,
+            StateStore::default_dir().join("app.json")
+        );
 
         #[cfg(not(debug_assertions))]
-        {
-            assert_eq!(
-                app_settings_path,
-                configuration_directory().join("app.json")
-            );
-            assert_eq!(
-                legacy_settings_paths,
-                [configuration_directory().join("settings.json")]
-            );
-        }
+        assert_eq!(
+            app_settings_path,
+            configuration_directory().join("app.json")
+        );
     }
 
     #[test]
@@ -1687,47 +1147,5 @@ mod tests {
         assert_eq!(state.sidebar_grouping, SidebarGrouping::Updated);
         assert_eq!(state.sidebar_ordering, SidebarOrdering::Newest);
         assert_eq!(state.last_runtime_mode, RuntimeMode::FullAccess);
-    }
-
-    #[test]
-    fn new_tasks_inherit_the_remembered_access_mode() {
-        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
-        state.last_runtime_mode = RuntimeMode::Ask;
-
-        let session = state.new_session(state.projects[0].id, ProviderKind::OpenCode);
-
-        assert_eq!(session.runtime_mode, RuntimeMode::Ask);
-        assert_eq!(state.app_state().last_runtime_mode, RuntimeMode::Ask);
-    }
-
-    #[test]
-    fn daemon_task_state_becomes_list_only_after_crossing_the_client_boundary() {
-        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        session.detail_loaded = false;
-        assert!(
-            session.has_started(),
-            "a stored skeleton is visible history"
-        );
-
-        let encoded = serde_json::to_vec(&ResponsePayload::TaskState {
-            projects: Vec::new(),
-            sessions: vec![session],
-            default_cwd: PathBuf::from("/daemon/project"),
-            projectless_root: None,
-        })
-        .unwrap();
-        let ResponsePayload::TaskState { mut sessions, .. } =
-            serde_json::from_slice(&encoded).unwrap()
-        else {
-            panic!("task state response changed shape");
-        };
-
-        assert!(
-            !sessions[0].has_started(),
-            "serde cannot carry the process-local skeleton marker"
-        );
-        restore_task_state_skeletons(&mut sessions);
-        assert!(!sessions[0].detail_loaded);
-        assert!(sessions[0].has_started());
     }
 }

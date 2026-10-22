@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use crate::ts::TS;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +13,7 @@ pub const WINDOW_CHOICES: [UsageWindow; 5] = [
 
 pub const MONTHLY_WINDOW: UsageWindow = UsageWindow::Months(12);
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UsageWindow {
     TrailingDays(u32),
@@ -88,7 +87,7 @@ pub fn days_in_month(first_day: NaiveDate) -> u32 {
 
 use chrono::Datelike as _;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UsageProvider {
     Claude,
@@ -113,7 +112,7 @@ impl UsageProvider {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenTotals {
     pub uncached_input: u64,
@@ -137,7 +136,7 @@ impl TokenTotals {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PricingStatus {
     Fresh,
@@ -145,7 +144,7 @@ pub enum PricingStatus {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSlice {
     pub provider: UsageProvider,
@@ -155,7 +154,7 @@ pub struct ProviderSlice {
     pub token_share: f64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSlice {
     pub provider: UsageProvider,
@@ -165,14 +164,14 @@ pub struct ModelSlice {
     pub cost_share: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDay {
     pub cost_usd: f64,
     pub total_tokens: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaySlice {
     pub day: NaiveDate,
@@ -181,7 +180,7 @@ pub struct DaySlice {
     pub by_provider: [ProviderDay; 2],
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CostQuality {
     pub provider_reported_share: f64,
@@ -190,7 +189,7 @@ pub struct CostQuality {
     pub cache_savings_usd: f64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MonthSlice {
     pub first_day: NaiveDate,
@@ -202,7 +201,7 @@ pub struct MonthSlice {
     pub top_models: Vec<(String, f64)>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSlice {
     pub path: String,
@@ -215,7 +214,7 @@ pub struct ProjectSlice {
     pub top_models: Vec<(String, f64)>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageHistory {
     pub window: UsageWindow,
@@ -236,7 +235,6 @@ pub struct UsageHistory {
     pub scanned_files: usize,
     pub skipped_files: usize,
     pub errors: Vec<String>,
-    #[ts(type = "{ secs: number; nanos: number }")]
     pub scan_duration: Duration,
 }
 

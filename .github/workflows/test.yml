@@ -19,7 +19,9 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # A slow macOS or Windows runner needs over an hour for clippy, the
+    # replay suites and the bench daemon.
+    timeout-minutes: 90
 
     steps:
       - name: Check out repository
@@ -97,10 +99,8 @@ jobs:
           bun run --filter @waku/client check
           bun run --filter @waku/client test
 
-      - name: Web and mobile typecheck and tests
+      - name: Web typecheck and tests
         if: runner.os == 'Linux'
         run: |
           bun run --filter @waku/web typecheck
           bun run --filter @waku/web test
-          bun run --filter @waku/mobile typecheck
-          bun run --filter @waku/mobile test

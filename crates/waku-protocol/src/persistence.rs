@@ -1,15 +1,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::ts::TS;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::model::{AgentSession, MessageRole};
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ComposerDraftAttachment {
-    #[ts(type = "string")]
     pub path: PathBuf,
     pub mention: String,
     pub name: String,
@@ -19,7 +15,7 @@ pub struct ComposerDraftAttachment {
     pub blob_reference: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ComposerDraft {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub text: String,
@@ -33,7 +29,7 @@ impl ComposerDraft {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ComposerDrafts {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub new_sessions: HashMap<Uuid, ComposerDraft>,
@@ -51,21 +47,15 @@ pub enum ComposerDraftKey {
 ///
 /// Draft updates are keyed so multiple connected clients cannot overwrite
 /// unrelated drafts by sending stale whole-file snapshots.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
 pub enum ComposerDraftTarget {
-    NewSession {
-        #[ts(type = "string")]
-        project_id: Uuid,
-    },
-    Session {
-        #[ts(type = "string")]
-        session_id: Uuid,
-    },
+    NewSession { project_id: Uuid },
+    Session { session_id: Uuid },
 }
 
 impl From<ComposerDraftKey> for ComposerDraftTarget {
@@ -86,7 +76,7 @@ impl From<ComposerDraftTarget> for ComposerDraftKey {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ComposerDraftChange {
     pub target: ComposerDraftTarget,
     /// `None` removes the target. Empty drafts are normalized to removal too.
@@ -94,20 +84,18 @@ pub struct ComposerDraftChange {
 }
 
 impl ComposerDraftKey {
-    pub fn for_session(session: &AgentSession) -> Self {
-        if session.has_started() {
-            Self::Session(session.id)
+    /// The key of a task: its own id once it has started, else its
+    /// project's new-task draft.
+    pub fn for_task(started: bool, id: Uuid, project_id: Uuid) -> Self {
+        if started {
+            Self::Session(id)
         } else {
-            Self::NewSession(session.project_id)
+            Self::NewSession(project_id)
         }
     }
 }
 
 impl ComposerDrafts {
-    pub fn get_for(&self, session: &AgentSession) -> Option<&ComposerDraft> {
-        self.get(ComposerDraftKey::for_session(session))
-    }
-
     pub fn get(&self, key: ComposerDraftKey) -> Option<&ComposerDraft> {
         match key {
             ComposerDraftKey::NewSession(project_id) => self.new_sessions.get(&project_id),
@@ -153,11 +141,4 @@ impl ComposerDrafts {
         self.remove(source);
         self.set(destination, draft)
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-pub struct SessionMessageMatch {
-    pub session_id: Uuid,
-    pub source: MessageRole,
-    pub snippet: String,
 }

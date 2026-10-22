@@ -116,6 +116,49 @@ fn default_daemon_socket_path() -> PathBuf {
     home_directory().join("run").join("daemon.sock")
 }
 
+/// The daemon's local token (RFC 0003 §6.2, `run/local.token`, mode 0600):
+/// next to the socket on Unix, under `~/.waku-fork/run/` on Windows. A
+/// daemon running as a background service (#58) reads it (or creates it),
+/// and the desktop reads it to attach to that daemon instead of spawning
+/// its own.
+pub fn local_token_path() -> PathBuf {
+    #[cfg(unix)]
+    {
+        let socket = daemon_socket_path();
+        if let Some(directory) = socket.parent().filter(|path| !path.as_os_str().is_empty()) {
+            return directory.join("local.token");
+        }
+    }
+    home_directory().join("run").join("local.token")
+}
+
+/// Where the background service writes its logs (#58): `~/.waku-fork/logs`.
+pub fn log_directory() -> PathBuf {
+    home_directory().join("logs")
+}
+
+/// The background service's log file (stdout and stderr), per build like
+/// the socket (`waku-fork-daemon.log`, `waku-fork-dev-daemon.log`).
+pub fn daemon_log_path() -> PathBuf {
+    log_directory().join(format!("{RUNTIME_NAME_PREFIX}-daemon.log"))
+}
+
+/// The stable launcher the service definition runs (#58). It execs the
+/// daemon binary that installed the service, so updating the app in place
+/// never edits the service definition.
+pub fn service_launcher_path() -> PathBuf {
+    let extension = if cfg!(windows) { ".cmd" } else { "" };
+    home_directory()
+        .join("bin")
+        .join(format!("{RUNTIME_NAME_PREFIX}-daemon-service{extension}"))
+}
+
+/// The launchd label, systemd unit stem and Windows task name of the
+/// background service. Debug and release builds install separate services.
+pub fn service_label() -> String {
+    format!("{APP_ID}.daemon")
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

@@ -1,13 +1,7 @@
 use super::*;
+use waku_client::commands::{self, Selection};
 
-fn retain_runtime_after_cancel(provider: ProviderKind) -> bool {
-    // Codex's app-server owns the Computer Use process tree, and Amp offers no
-    // interrupt on its stream — stopping it means ending the process. Both
-    // resume their native thread on the next prompt.
-    !matches!(provider, ProviderKind::Codex | ProviderKind::Amp)
-}
-
-fn new_task_runtime_mode(current: Option<&AgentSession>, remembered: RuntimeMode) -> RuntimeMode {
+fn new_task_runtime_mode(current: Option<&ThreadView>, remembered: RuntimeMode) -> RuntimeMode {
     current
         .map(|session| session.runtime_mode)
         .unwrap_or(remembered)
@@ -28,10 +22,11 @@ impl Waku {
     }
 
     /// Bench harness hook, compiled only with `perf-counters`: when
-    /// `WAKU_PERF_VISIT_SESSIONS_MS` is set, select every started session
+    /// `WAKU_PERF_VISIT_SESSIONS_MS` is set, select every daemon thread
     /// once, in catalog order, one per interval, through the same path as a
     /// sidebar click. The memory scenarios use it to visit N long sessions
-    /// without UI input. Each visit bumps `totals.session_visits`.
+    /// without UI input. Each visit bumps `totals.session_visits`. It waits
+    /// for the shell stream to list threads before it can run out of them.
     #[cfg(feature = "perf-counters")]
     pub(super) fn start_perf_session_visits(&mut self, cx: &mut Context<Self>) {
         let Some(interval) = std::env::var("WAKU_PERF_VISIT_SESSIONS_MS")
@@ -46,13 +41,7 @@ impl Waku {
             loop {
                 cx.background_executor().timer(interval).await;
                 let next = waku.update(cx, |waku, cx| {
-                    let next = waku
-                        .state
-                        .sessions
-                        .iter()
-                        .filter(|session| session.has_started() && !visited.contains(&session.id))
-                        .map(|session| session.id)
-                        .next();
+                    let next = waku.threads.shell_ids().find(|id| !visited.contains(id));
                     if let Some(session_id) = next {
                         waku.select_session(session_id, cx);
                         crate::perf_counters::session_visit();
@@ -63,6 +52,8 @@ impl Waku {
                     Ok(Some(session_id)) => {
                         visited.insert(session_id);
                     }
+                    // The thread list has not arrived yet.
+                    Ok(None) if visited.is_empty() => {}
                     _ => break,
                 }
             }
@@ -76,38 +67,28 @@ impl Waku {
         transition: SessionActivationTransition,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .state
-            .sessions
-            .iter()
-            .any(|session| session.id == session_id)
-        {
+        let Some(view) = self.thread(session_id) else {
             return;
-        }
+        };
+        let needs_stream = !view.detail_loaded;
         self.reveal_sidebar_session(session_id);
-        let needs_hydration = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .is_some_and(|session| !session.detail_loaded);
-        if needs_hydration {
+        if needs_stream {
+            // Keep the current transcript visible until the store has the
+            // thread's first view, but acknowledge the click in the sidebar
+            // at once.
             self.pending_session_activation = Some(PendingSessionActivation {
                 session_id,
                 transition,
             });
-            // Keep the current transcript visible until the daemon returns the
-            // target session, but acknowledge the click immediately in the
-            // sidebar instead of making the UI appear unresponsive.
+            self.threads.store.open_thread(session_id);
             cx.notify();
-            self.ensure_session_loaded(session_id, cx);
             return;
         }
         self.pending_session_activation = None;
         self.finish_session_activation(session_id, transition, cx);
     }
 
-    fn finish_session_activation(
+    pub(super) fn finish_session_activation(
         &mut self,
         session_id: Uuid,
         transition: SessionActivationTransition,
@@ -137,90 +118,19 @@ impl Waku {
         self.activate_session(session_id, cx);
     }
 
-    /// Loads a session's transcript if startup only fetched its list columns.
-    ///
-    /// The SQLite query and daemon round trip both stay off the UI thread. The
-    /// current selection stays rendered until the requested session is whole.
-    pub(super) fn ensure_session_loaded(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
-        let needs_hydration = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .is_some_and(|session| !session.detail_loaded);
-        if !needs_hydration || !self.session_hydrations.insert(session_id) {
-            return;
-        }
-        let daemon = self.daemon.clone();
-        cx.spawn(async move |waku, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    match waku_client::persistence::hydrate_session(&daemon, session_id)? {
-                        Some(session) => Ok(session),
-                        None => {
-                            anyhow::bail!("the task no longer exists")
-                        }
-                    }
-                })
-                .await;
-            let _ = waku.update(cx, |waku, cx| {
-                waku.session_hydrations.remove(&session_id);
-                match result {
-                    Ok(session) => {
-                        let replaced = if let Some(existing) = waku
-                            .state
-                            .sessions
-                            .iter_mut()
-                            .find(|existing| existing.id == session_id)
-                        {
-                            *existing = session;
-                            true
-                        } else {
-                            false
-                        };
-                        let pending = waku
-                            .pending_session_activation
-                            .filter(|pending| pending.session_id == session_id);
-                        if pending.is_some() {
-                            waku.pending_session_activation = None;
-                        }
-                        if replaced && let Some(pending) = pending {
-                            waku.finish_session_activation(session_id, pending.transition, cx);
-                        } else if waku.state.selected_session == Some(session_id) {
-                            waku.reset_visible_state();
-                            waku.reset_transcript_rows(waku.transcript_row_count());
-                            waku.refresh_composer_sources(cx);
-                        }
-                    }
-                    Err(error) => {
-                        if waku
-                            .pending_session_activation
-                            .is_some_and(|pending| pending.session_id == session_id)
-                        {
-                            waku.pending_session_activation = None;
-                        }
-                        waku.show_toast(tr!("errors.open_session", error = error));
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     fn activate_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let session_changed = self.state.selected_session != Some(session_id);
         if session_changed {
             self.capture_and_save_current_composer_draft(cx);
             self.store_selected_right_panel_state();
-            if let Some(previous) = self.state.selected_session {
-                self.session_left_at.insert(previous, Instant::now());
-                self.schedule_dehydration_sweep(cx);
-            }
         }
         self.state.selected_session = Some(session_id);
         self.task_switcher.record_access(session_id);
+        if !self.threads.drafts.contains_key(&session_id) {
+            // Open (or touch) its stream: the store keeps the most recently
+            // opened threads subscribed and closes the rest.
+            self.threads.store.open_thread(session_id);
+        }
         if let Some((
             project_id,
             provider,
@@ -254,6 +164,10 @@ impl Waku {
         {
             self.session_navigation.remember_new_task(session_id);
         }
+        self.threads.user_input = self
+            .selected_session()
+            .and_then(|session| session.pending_user_input.as_ref())
+            .map(|input| PendingUserInput::new(input.request_id.clone(), input.questions.clone()));
         if session_changed {
             self.restore_selected_composer_draft(cx);
             self.sync_user_input_answer(cx);
@@ -270,127 +184,9 @@ impl Waku {
         }
         self.refresh_composer_sources(cx);
         self.reset_transcript_rows(self.transcript_row_count());
+        self.mark_visited(session_id);
         self.save();
-        if self
-            .selected_session()
-            .is_some_and(AgentSession::has_started)
-        {
-            self.start_runtime_attachment(session_id, cx);
-        }
         cx.notify();
-    }
-
-    /// Runs [`Self::dehydrate_idle_sessions`] once the session just left is
-    /// past [`memory::DEHYDRATE_GRACE`], unless a sweep is already due.
-    fn schedule_dehydration_sweep(&mut self, cx: &mut Context<Self>) {
-        if std::mem::replace(&mut self.dehydration_sweep_scheduled, true) {
-            return;
-        }
-        cx.spawn(async move |waku, cx| {
-            cx.background_executor()
-                .timer(memory::DEHYDRATE_GRACE + Duration::from_millis(100))
-                .await;
-            let _ = waku.update(cx, |waku, cx| {
-                waku.dehydration_sweep_scheduled = false;
-                if waku.dehydrate_idle_sessions() {
-                    waku.schedule_dehydration_sweep(cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Whether a session's transcript can be released now and reloaded later
-    /// through the hydration path without losing anything: it is loaded,
-    /// started, not selected, has no live or pending runtime, no running turn
-    /// or queued prompt, no change the daemon has not been sent, and nothing
-    /// in flight that writes back into its transcript.
-    pub(super) fn session_is_releasable(&self, session: &AgentSession) -> bool {
-        let id = session.id;
-        memory::transcript_is_releasable(session)
-            && self.state.selected_session != Some(id)
-            && !self.state.is_session_dirty(id)
-            && !self.runtimes.contains_key(&id)
-            && !self.runtime_attach_pending.contains(&id)
-            && !self.session_hydrations.contains(&id)
-            && self
-                .pending_session_activation
-                .is_none_or(|pending| pending.session_id != id)
-            && !self.submission_preparations.contains(&id)
-            && !self.pending_queue_drains.contains(&id)
-            && !self.session_has_live_background_work(id)
-            && !self
-                .pending_checkpoint_captures
-                .iter()
-                .any(|capture| capture.session_id == id)
-            && !self
-                .checkpoint_captures_in_flight
-                .iter()
-                .any(|(capture_session, _)| *capture_session == id)
-            && self
-                .message_edit
-                .as_ref()
-                .is_none_or(|edit| edit.session_id != id)
-    }
-
-    /// Releases the transcripts of idle sessions (see
-    /// [`memory::dehydration_candidates`]) together with their parsed
-    /// Markdown. Selecting one again reloads it through
-    /// [`Self::ensure_session_loaded`], exactly like a session that startup
-    /// left as a skeleton. Returns whether a releasable session is still
-    /// inside its grace period, so the caller can sweep again.
-    pub(super) fn dehydrate_idle_sessions(&mut self) -> bool {
-        let now = Instant::now();
-        let candidates = self
-            .state
-            .sessions
-            .iter()
-            .filter(|session| session.detail_loaded)
-            .map(|session| memory::DehydrationCandidate {
-                id: session.id,
-                left_at: self.session_left_at.get(&session.id).copied(),
-                releasable: self.session_is_releasable(session),
-            })
-            .collect::<Vec<_>>();
-        let released = memory::dehydration_candidates(&candidates, now);
-        let sweep_again = candidates.iter().any(|candidate| {
-            candidate.releasable
-                && !released.contains(&candidate.id)
-                && candidate.left_at.is_some_and(|left_at| {
-                    now.saturating_duration_since(left_at) < memory::DEHYDRATE_GRACE
-                })
-        });
-        for session_id in released {
-            let Some(session) = self
-                .state
-                .sessions
-                .iter_mut()
-                .find(|session| session.id == session_id)
-            else {
-                continue;
-            };
-            let message_ids = session
-                .messages
-                .iter()
-                .map(|message| message.id)
-                .collect::<HashSet<_>>();
-            session.release_transcript();
-            self.message_markdown
-                .borrow_mut()
-                .retain(|message_id, _| !message_ids.contains(message_id));
-            self.activity_markdown
-                .borrow_mut()
-                .retain(|(owner, _), _| *owner != session_id);
-        }
-        let hydrated = self
-            .state
-            .sessions
-            .iter()
-            .filter(|session| session.detail_loaded)
-            .map(|session| session.id)
-            .collect::<HashSet<_>>();
-        self.session_left_at.retain(|id, _| hydrated.contains(id));
-        sweep_again
     }
 
     /// Drops cached answers about the workspace on disk.
@@ -421,11 +217,11 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         if let Some(draft_id) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.project_id == project_id && !session.has_started())
-            .map(|session| session.id)
+            .threads
+            .drafts
+            .values()
+            .find(|draft| draft.project_id == project_id && !draft.has_started())
+            .map(|draft| draft.id)
         {
             self.select_session(draft_id, cx);
             return;
@@ -435,130 +231,76 @@ impl Waku {
         // a selected source task.
         let runtime_mode =
             new_task_runtime_mode(self.selected_session(), self.state.last_runtime_mode);
-        let mut session = self.state.new_session(project_id, provider);
-        session.runtime_mode = runtime_mode;
-        let id = session.id;
-        self.state.push_session(session);
+        let mut draft = ThreadView::draft(
+            Uuid::new_v4(),
+            project_id,
+            provider,
+            runtime_mode,
+            unix_time(),
+        );
+        if provider == self.state.last_provider {
+            draft.model.clone_from(&self.state.last_model);
+            draft
+                .reasoning_effort
+                .clone_from(&self.state.last_reasoning_effort);
+            draft.service_tier.clone_from(&self.state.last_service_tier);
+            draft
+                .context_window
+                .clone_from(&self.state.last_context_window);
+        }
+        let id = draft.id;
+        self.threads.drafts.insert(id, draft);
         self.select_session(id, cx);
     }
 
     pub(super) fn select_workspace(&mut self, workspace: SessionWorkspace, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session_mut() else {
-            return;
-        };
-        if session.has_started() || session.is_busy() || session.workspace == workspace {
-            return;
-        }
-        session.workspace = workspace;
-        self.save();
-        cx.notify();
-    }
-
-    pub(super) fn remove_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
-        if self.response_fork_preparations.contains_key(&session_id) {
-            self.show_toast(tr!("session.response_fork_in_progress"));
-            cx.notify();
-            return;
-        }
-        let Some(index) = self
+        // Only a task that has not been sent chooses where it runs.
+        let Some(draft) = self
             .state
-            .sessions
-            .iter()
-            .position(|session| session.id == session_id)
+            .selected_session
+            .and_then(|id| self.threads.drafts.get_mut(&id))
         else {
             return;
         };
-        let project_id = self.state.sessions[index].project_id;
-        let composer_draft_key =
-            crate::persistence::ComposerDraftKey::for_session(&self.state.sessions[index]);
-        let projectless = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-            .is_some_and(Project::is_projectless);
-        let project_path = self
-            .workspace_path_for_session(&self.state.sessions[index])
-            .map(std::path::Path::to_path_buf);
-        let was_selected = self.state.selected_session == Some(session_id);
-        self.submission_preparations.remove(&session_id);
-        self.goal_runtime_starts.remove(&session_id);
-        self.pending_goal_operations.remove(&session_id);
-        self.goal_observed_at.remove(&session_id);
-        self.reset_session_runtime(session_id);
-        self.background_work.remove(&session_id);
-        self.remove_right_panel_session_state(session_id);
+        if draft.has_started() || draft.workspace == workspace {
+            return;
+        }
+        draft.workspace = workspace;
+        cx.notify();
+    }
+
+    /// `thread.delete`. The row leaves the sidebar when the shell says so;
+    /// an unsent draft simply goes.
+    pub(super) fn remove_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let Some(view) = self.thread(session_id) else {
+            return;
+        };
+        let project_id = view.project_id;
+        let composer_draft_key = threads::draft_key(view);
         self.remove_composer_draft(composer_draft_key, cx);
-        self.state.sessions.remove(index);
-        if let Err(error) = self.store.remove_session(session_id) {
-            self.show_toast(tr!("errors.save_local_state", error = error));
-        }
-        if self
-            .pending_session_activation
-            .is_some_and(|pending| pending.session_id == session_id)
+        if self.threads.drafts.remove(&session_id).is_some()
+            && self.threads.shell.thread(session_id).is_none()
         {
-            self.pending_session_activation = None;
-        }
-        self.session_navigation.remove(session_id);
-        self.task_switcher.remove(session_id);
-        let project_still_used = self
-            .state
-            .sessions
-            .iter()
-            .any(|session| session.project_id == project_id);
-        if projectless && !project_still_used {
-            self.remove_composer_draft(
-                crate::persistence::ComposerDraftKey::NewSession(project_id),
-                cx,
-            );
-            self.state
-                .projects
-                .retain(|project| project.id != project_id);
-            if self.state.selected_project == Some(project_id) {
-                self.state.selected_project = None;
+            self.session_navigation.remove(session_id);
+            self.task_switcher.remove(session_id);
+            if self.state.selected_session == Some(session_id) {
+                self.select_neighbour(project_id, cx);
             }
-        }
-        if let Some(project_path) = project_path {
-            let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
-            cx.background_executor()
-                .spawn(async move {
-                    let _ = workspace.request(waku_client::WorkspaceOperation::DeleteSessionRefs {
-                        cwd: project_path,
-                        session_id,
-                    });
-                })
-                .detach();
-        }
-        self.invalidate_checkpoint_refs();
-
-        if was_selected {
-            self.state.selected_session = None;
-            let next_session = self
-                .state
-                .sessions
-                .iter()
-                .filter(|session| session.project_id == project_id)
-                .max_by_key(|session| session.updated_at)
-                .map(|session| session.id);
-            if let Some(session_id) = next_session {
-                self.select_session(session_id, cx);
-            } else if projectless {
-                self.create_projectless_session(cx);
-            } else {
-                self.create_session_for(project_id, self.state.last_provider, cx);
-            }
-        } else {
-            self.save();
             cx.notify();
+            return;
         }
+        self.dispatch(commands::delete(session_id), ThreadAction::Other);
+        cx.notify();
+    }
 
-        // Only now is the row gone, so the sweep can see which blobs are
-        // genuinely unreferenced. It reads the database and walks the blob
-        // directory, so it stays off the UI thread.
-        let sweep = self.store.blob_sweep();
-        cx.background_executor()
-            .spawn(async move { sweep() })
-            .detach();
+    /// `thread.archive`: the row leaves the active sidebar when the shell
+    /// moves it.
+    pub(super) fn archive_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if self.threads.drafts.contains_key(&session_id) {
+            return;
+        }
+        self.dispatch(commands::archive(session_id), ThreadAction::Other);
+        cx.notify();
     }
 
     pub(super) fn new_session_action(
@@ -576,7 +318,7 @@ impl Waku {
             Some((project_id, false)) => {
                 if let Some(session_id) = self
                     .session_navigation
-                    .remembered_new_task(&self.state.sessions, project_id)
+                    .remembered_new_task(self.threads.drafts.values(), project_id)
                 {
                     self.select_session(session_id, cx);
                 } else {
@@ -966,7 +708,9 @@ impl Waku {
 
     fn selected_escape_stop_target(&self) -> Option<EscapeStopTarget> {
         let session = self.selected_session()?;
-        (!self.submission_preparations.contains(&session.id) && session.status.is_busy())
+        session
+            .status
+            .is_busy()
             .then(|| EscapeStopTarget::for_session(session))
     }
 
@@ -1037,14 +781,6 @@ impl Waku {
         self.transcript_anchor_following.set(false);
     }
 
-    pub(super) fn reset_session_runtime(&mut self, session_id: Uuid) {
-        if let Some(runtime) = self.runtimes.remove(&session_id) {
-            runtime.driver.cancel();
-            runtime.driver.close();
-            self.mark_background_work_lost(session_id);
-        }
-    }
-
     fn remember_selected_model_traits(&mut self) {
         let Some((provider, model, reasoning_effort, service_tier, context_window)) =
             self.selected_session().and_then(|session| {
@@ -1074,48 +810,79 @@ impl Waku {
         model: String,
         cx: &mut Context<Self>,
     ) {
-        let Some((session_id, provider_changed)) = self
+        let Some(provider_changed) = self
             .selected_session()
             .filter(|session| {
                 session.can_choose_model(provider)
                     && (session.provider != provider
                         || session.model.as_deref() != Some(model.as_str()))
             })
-            .map(|session| (session.id, session.provider != provider))
+            .map(|session| session.provider != provider)
         else {
             return;
         };
-
         self.remember_selected_model_traits();
         let (reasoning_effort, service_tier, context_window) =
             self.state.model_traits_for(provider, &model);
-        if let Some(session) = self.selected_session_mut() {
-            session.provider = provider;
-            session.model = Some(model.clone());
-            if provider_changed {
-                session.agent_preset = None;
-            }
-            session.reasoning_effort.clone_from(&reasoning_effort);
-            session.service_tier.clone_from(&service_tier);
-            session.context_window.clone_from(&context_window);
-            self.state.last_provider = provider;
-            self.state.last_model = Some(model);
-            self.state.last_reasoning_effort = reasoning_effort;
-            self.state.last_service_tier = service_tier;
-            self.state.last_context_window = context_window;
-            self.model_picker_tab = ModelPickerTab::Provider(provider);
-            // A different provider is a different binary and protocol; only a
-            // model change within one provider can be applied in session.
-            if provider_changed {
-                self.reset_session_runtime(session_id);
-                // A different provider is also a different command registry.
-                self.refresh_composer_sources(cx);
-            } else {
-                self.apply_session_options(session_id, cx);
-            }
-            self.save();
-            cx.notify();
+        self.state.last_provider = provider;
+        self.state.last_model = Some(model.clone());
+        self.state.last_reasoning_effort = reasoning_effort.clone();
+        self.state.last_service_tier = service_tier.clone();
+        self.state.last_context_window = context_window.clone();
+        self.model_picker_tab = ModelPickerTab::Provider(provider);
+        self.update_selection(
+            move |selection| {
+                selection.provider = provider;
+                selection.model = Some(model);
+                if provider_changed {
+                    selection.agent_preset = None;
+                }
+                selection.reasoning_effort = reasoning_effort;
+                selection.service_tier = service_tier;
+                selection.context_window = context_window;
+            },
+            cx,
+        );
+        if provider_changed {
+            // A different provider is also a different command registry.
+            self.refresh_composer_sources(cx);
         }
+        self.save();
+        cx.notify();
+    }
+
+    /// Change the selected thread's provider, model or per-model options: a
+    /// draft edits itself; a thread dispatches
+    /// `thread.model_selection.set`, and the next run uses it.
+    fn update_selection(&mut self, change: impl FnOnce(&mut Selection), cx: &mut Context<Self>) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        if let Some(draft) = self.threads.drafts.get_mut(&session_id) {
+            let mut selection = Selection::of(draft);
+            change(&mut selection);
+            draft.provider = selection.provider;
+            draft.instance = waku_client::thread_view::instance_of(selection.provider);
+            draft.model = selection.model;
+            draft.reasoning_effort = selection.reasoning_effort;
+            draft.service_tier = selection.service_tier;
+            draft.context_window = selection.context_window;
+            draft.agent_preset = selection.agent_preset;
+            cx.notify();
+            return;
+        }
+        let Some(view) = self.thread(session_id) else {
+            return;
+        };
+        let mut selection = Selection::of(view);
+        change(&mut selection);
+        if selection == Selection::of(view) {
+            return;
+        }
+        self.dispatch(
+            commands::set_selection(session_id, &selection),
+            ThreadAction::Other,
+        );
     }
 
     /// Primary modifier + /: toggle the composer's model picker as if its chip were clicked.
@@ -1223,10 +990,14 @@ impl Waku {
         };
         let remembered_changed = self.state.last_runtime_mode != mode;
         if session_changed {
-            self.selected_session_mut()
-                .expect("selected session still exists")
-                .runtime_mode = mode;
-            self.apply_session_options(session_id, cx);
+            if let Some(draft) = self.threads.drafts.get_mut(&session_id) {
+                draft.runtime_mode = mode;
+            } else {
+                self.dispatch(
+                    commands::set_runtime_mode(session_id, mode),
+                    ThreadAction::Other,
+                );
+            }
         }
         if session_changed || remembered_changed {
             self.state.last_runtime_mode = mode;
@@ -1236,45 +1007,45 @@ impl Waku {
     }
 
     pub(super) fn set_reasoning_effort(&mut self, effort: String, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session_mut()
-            && session.reasoning_effort.as_deref() != Some(effort.as_str())
+        if self
+            .selected_session()
+            .is_none_or(|session| session.reasoning_effort.as_deref() == Some(effort.as_str()))
         {
-            let session_id = session.id;
-            session.reasoning_effort = Some(effort.clone());
-            self.state.last_reasoning_effort = Some(effort);
-            self.remember_selected_model_traits();
-            self.apply_session_options(session_id, cx);
-            self.save();
-            cx.notify();
+            return;
         }
+        self.state.last_reasoning_effort = Some(effort.clone());
+        self.update_selection(|selection| selection.reasoning_effort = Some(effort), cx);
+        self.remember_selected_model_traits();
+        self.save();
+        cx.notify();
     }
 
     pub(super) fn set_service_tier(&mut self, tier: String, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session_mut()
-            && session.service_tier.as_deref() != Some(tier.as_str())
+        if self
+            .selected_session()
+            .is_none_or(|session| session.service_tier.as_deref() == Some(tier.as_str()))
         {
-            let session_id = session.id;
-            session.service_tier = Some(tier.clone());
-            self.state.last_service_tier = Some(tier);
-            self.remember_selected_model_traits();
-            self.apply_session_options(session_id, cx);
-            self.save();
-            cx.notify();
+            return;
         }
+        self.state.last_service_tier = Some(tier.clone());
+        self.update_selection(|selection| selection.service_tier = Some(tier), cx);
+        self.remember_selected_model_traits();
+        self.save();
+        cx.notify();
     }
 
     pub(super) fn set_context_window(&mut self, window: String, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session_mut()
-            && session.context_window.as_deref() != Some(window.as_str())
+        if self
+            .selected_session()
+            .is_none_or(|session| session.context_window.as_deref() == Some(window.as_str()))
         {
-            let session_id = session.id;
-            session.context_window = Some(window.clone());
-            self.state.last_context_window = Some(window);
-            self.remember_selected_model_traits();
-            self.apply_session_options(session_id, cx);
-            self.save();
-            cx.notify();
+            return;
         }
+        self.state.last_context_window = Some(window.clone());
+        self.update_selection(|selection| selection.context_window = Some(window), cx);
+        self.remember_selected_model_traits();
+        self.save();
+        cx.notify();
     }
 
     pub(super) fn set_agent_preset(&mut self, agent_preset: String, cx: &mut Context<Self>) {
@@ -1286,129 +1057,38 @@ impl Waku {
                     .iter()
                     .any(|preset| preset.id == agent_preset)
             });
-        if !selectable {
+        if !selectable
+            || !self.selected_session().is_some_and(|session| {
+                session.provider == ProviderKind::DeepSeek
+                    && !session.has_started()
+                    && session.agent_preset.as_deref() != Some(agent_preset.as_str())
+            })
+        {
             return;
         }
-        if let Some(session) = self.selected_session_mut()
-            && session.provider == ProviderKind::DeepSeek
-            && !session.has_started()
-            && !session.is_busy()
-            && session.agent_preset.as_deref() != Some(agent_preset.as_str())
-        {
-            let session_id = session.id;
-            session.agent_preset = Some(agent_preset);
-            // A provider cursor makes a session started, so this is normally a
-            // no-op. It also closes the narrow race where a blank runtime was
-            // prepared but had not reported its native session yet.
-            self.reset_session_runtime(session_id);
-            self.save();
-            cx.notify();
-        }
+        self.update_selection(|selection| selection.agent_preset = Some(agent_preset), cx);
+        cx.notify();
     }
 
+    /// `run.interrupt` of the selected thread's active run. The daemon
+    /// settles the turn; the view reports it.
     pub(super) fn cancel_turn(&mut self, cx: &mut Context<Self>) {
         self.escape_stop_confirmation.clear();
-        let Some(session_id) = self.state.selected_session else {
+        let Some(command) = self.selected_session().and_then(commands::interrupt) else {
             return;
         };
-        // Worktree/checkpoint preparation has no safe interrupt contract. The
-        // composer deliberately shows a spinner rather than Stop until the
-        // provider runtime exists, and the keyboard action follows the same
-        // boundary.
-        if self.submission_preparations.contains(&session_id) {
-            return;
-        }
-        let retain_runtime = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .is_some_and(|session| retain_runtime_after_cancel(session.provider))
-            || self.session_has_live_detached_work(session_id);
-        // Goal operations queued behind a starting runtime would set the
-        // objective after this stop and begin pursuing it; the user asked to
-        // stop, so they leave with the turn.
-        self.pending_goal_operations.remove(&session_id);
-        let mut runtime = self.runtimes.remove(&session_id);
-        if let Some(runtime) = runtime.as_ref() {
-            runtime.driver.cancel();
-            if retain_runtime {
-                // A detached process keeps Codex's app-server resident, but
-                // Computer Use descendants still belong to the cancelled turn.
-                runtime.driver.cancel_computer_use();
+        if let Some(view) = self.selected_session() {
+            let provider = view.provider.id();
+            if let Some(turn) = view.turns.last() {
+                self.analytics.track(crate::analytics::Event::TurnFinished {
+                    provider,
+                    turn_number: turn.turn_count,
+                    outcome: crate::analytics::TurnOutcome::Cancelled,
+                    duration_seconds: unix_time().saturating_sub(turn.started_at),
+                });
             }
         }
-        // Do not leave already-received text in the smoothing queue: once the
-        // message is marked complete, a later delta would otherwise create a
-        // second assistant bubble. Show the received portion immediately.
-        // Buffered turn-completion events also must not start queued
-        // follow-ups: the user asked to stop, not to continue.
-        let mut keep_runtime = true;
-        if let Some(runtime) = runtime.as_mut() {
-            Self::collect_runtime_events(runtime);
-            while let Some(event) = runtime.pending_events.pop_front() {
-                keep_runtime &= self.handle_driver_event(session_id, runtime, event, false, cx);
-                if !keep_runtime {
-                    break;
-                }
-            }
-        }
-        self.pending_queue_drains.retain(|id| *id != session_id);
-        let has_active_turn = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .and_then(AgentSession::active_turn_id)
-            .is_some();
-        let previous_kinds = has_active_turn
-            .then(|| self.snapshot_selected_transcript_rows(session_id))
-            .flatten();
-        self.finish_streaming_assistant(session_id);
-        self.complete_turn_blocks(session_id);
-        self.settle_foreground_work(session_id, BackgroundWorkStatus::Stopped);
-        if let Some(runtime) = runtime.as_mut() {
-            runtime.stream_phase = None;
-            runtime.pending_permission = None;
-            runtime.pending_user_input = None;
-            runtime.pending_computer_approval = None;
-            runtime.computer_use_previews.clear();
-        }
-        if has_active_turn {
-            let needs_fallback = !self.turn_has_assistant_message(session_id);
-            if let Some(session) = self.state.session_mut(session_id) {
-                session.status = SessionStatus::Idle;
-                if needs_fallback {
-                    session.push_message(MessageRole::Assistant, tr!("session.stopped"));
-                }
-            }
-            self.finish_active_turn_with_analytics(
-                session_id,
-                TurnStatus::Interrupted,
-                crate::analytics::TurnOutcome::Cancelled,
-            );
-        }
-        if has_active_turn {
-            self.capture_latest_turn_checkpoint_for(session_id);
-            self.start_pending_checkpoint_captures(cx);
-        }
-        if let Some(previous_kinds) = previous_kinds.as_deref() {
-            self.splice_active_transcript_rows_after_visibility_change(previous_kinds);
-        }
-        // A provider runtime owns its Waku JavaScript REPL and Computer Use
-        // descendants. Normally Stop closes that process tree and the next
-        // prompt resumes the same provider thread with a fresh runtime. A
-        // detached process or subagent is the exception: its provider must
-        // remain resident so Waku can keep observing and stopping it.
-        if retain_runtime && keep_runtime {
-            if let Some(runtime) = runtime.take() {
-                self.runtimes.insert(session_id, runtime);
-            }
-        } else if let Some(runtime) = runtime {
-            runtime.driver.close();
-        }
-        self.remeasure_transcript_tail();
-        self.save();
+        self.dispatch(command, ThreadAction::Other);
         cx.notify();
     }
 
@@ -1418,53 +1098,42 @@ impl Waku {
         option_id: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(session_id) = self.state.selected_session else {
+        let Some(view) = self.selected_session() else {
             return;
         };
-        let provider = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .map(|session| session.provider.id());
-        let decision = if let Some(runtime) = self.runtimes.get_mut(&session_id) {
-            let decision = runtime
-                .pending_permission
-                .as_ref()
-                .and_then(|permission| {
-                    permission
-                        .options
-                        .iter()
-                        .find(|option| option.id == option_id)
-                })
-                .map_or(
-                    "other",
-                    |option| if option.allow { "allow" } else { "deny" },
-                );
-            runtime.driver.respond(request_id, option_id);
-            runtime.pending_permission = None;
-            Some(decision)
-        } else {
-            None
+        let thread_id = view.id;
+        let provider = view.provider.id();
+        let decision = view
+            .pending_permission
+            .as_ref()
+            .and_then(|permission| {
+                permission
+                    .options
+                    .iter()
+                    .find(|option| option.id == option_id)
+            })
+            .map_or(
+                "other",
+                |option| if option.allow { "allow" } else { "deny" },
+            );
+        let Some(command) = commands::respond_approval(thread_id, &request_id, &option_id) else {
+            return;
         };
-        if let (Some(provider), Some(decision)) = (provider, decision) {
-            self.analytics
-                .track(crate::analytics::Event::PermissionResponded {
-                    provider,
-                    kind: "provider",
-                    decision,
-                });
-        }
-        if let Some(session) = self.selected_session_mut() {
-            session.status = SessionStatus::Working;
-        }
+        self.dispatch(command, ThreadAction::Other);
+        self.analytics
+            .track(crate::analytics::Event::PermissionResponded {
+                provider,
+                kind: "provider",
+                decision,
+            });
         cx.notify();
     }
 
     pub(super) fn sync_user_input_answer(&mut self, cx: &mut Context<Self>) {
         let answer = self
-            .selected_runtime()
-            .and_then(|runtime| runtime.pending_user_input.as_ref())
+            .threads
+            .user_input
+            .as_ref()
             .and_then(|pending| {
                 pending
                     .current_question()
@@ -1482,14 +1151,7 @@ impl Waku {
         answer: impl AsRef<str>,
         cx: &mut Context<Self>,
     ) {
-        let Some(session_id) = self.state.selected_session else {
-            return;
-        };
-        let Some(pending) = self
-            .runtimes
-            .get_mut(&session_id)
-            .and_then(|runtime| runtime.pending_user_input.as_mut())
-        else {
+        let Some(pending) = self.threads.user_input.as_mut() else {
             return;
         };
         let Some(question_id) = pending
@@ -1521,14 +1183,7 @@ impl Waku {
     }
 
     pub(super) fn select_user_input_option(&mut self, label: String, cx: &mut Context<Self>) {
-        let Some(session_id) = self.state.selected_session else {
-            return;
-        };
-        let Some(pending) = self
-            .runtimes
-            .get_mut(&session_id)
-            .and_then(|runtime| runtime.pending_user_input.as_mut())
-        else {
+        let Some(pending) = self.threads.user_input.as_mut() else {
             return;
         };
         let Some((question_id, multi_select)) = pending
@@ -1558,14 +1213,7 @@ impl Waku {
     }
 
     pub(super) fn previous_user_input(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.state.selected_session else {
-            return;
-        };
-        let Some(pending) = self
-            .runtimes
-            .get_mut(&session_id)
-            .and_then(|runtime| runtime.pending_user_input.as_mut())
-        else {
+        let Some(pending) = self.threads.user_input.as_mut() else {
             return;
         };
         if pending.question_index == 0 {
@@ -1577,15 +1225,8 @@ impl Waku {
     }
 
     pub(super) fn advance_user_input(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.state.selected_session else {
-            return;
-        };
         let should_submit = {
-            let Some(pending) = self
-                .runtimes
-                .get_mut(&session_id)
-                .and_then(|runtime| runtime.pending_user_input.as_mut())
-            else {
+            let Some(pending) = self.threads.user_input.as_mut() else {
                 return;
             };
             let Some(question) = pending.current_question() else {
@@ -1611,18 +1252,17 @@ impl Waku {
         };
 
         if should_submit {
-            let Some(runtime) = self.runtimes.get_mut(&session_id) else {
+            let Some(thread_id) = self.state.selected_session else {
                 return;
             };
-            let Some(pending) = runtime.pending_user_input.take() else {
+            let Some(pending) = self.threads.user_input.take() else {
                 return;
             };
             let answers = pending.answers();
-            runtime
-                .driver
-                .respond_user_input(pending.request_id, answers);
-            if let Some(session) = self.state.session_mut(session_id) {
-                session.status = SessionStatus::Working;
+            if let Some(command) =
+                commands::respond_user_input(thread_id, &pending.request_id, &answers)
+            {
+                self.dispatch(command, ThreadAction::Other);
             }
             self.user_input_answer
                 .update(cx, |input, cx| input.clear(cx));
@@ -1632,114 +1272,11 @@ impl Waku {
         cx.notify();
     }
 
-    pub(super) fn respond_computer_permission(
-        &mut self,
-        decision: &'static str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session_id) = self.state.selected_session else {
-            return;
-        };
-        let provider = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .map_or("unknown", |session| session.provider.id());
-        let Some(mut runtime) = self.runtimes.remove(&session_id) else {
-            return;
-        };
-        let Some(pending) = runtime.pending_computer_approval.take() else {
-            self.runtimes.insert(session_id, runtime);
-            return;
-        };
-
-        if decision == "deny" {
-            runtime.driver.reject_computer_tool(
-                pending.request,
-                "The user denied control of this app.".into(),
-            );
-        } else {
-            let key = pending.target.grant_key();
-            runtime.computer_session_grants.insert(key);
-            if decision == "always" && pending.target.persistable() {
-                let grant = crate::computer_use::ComputerAppGrant {
-                    bundle_id: pending.target.bundle_id.clone(),
-                    app_name: pending.target.app_name.clone(),
-                };
-                if !self
-                    .state
-                    .computer_use_allowed_apps
-                    .iter()
-                    .any(|existing| existing.key() == grant.key())
-                {
-                    self.state.computer_use_allowed_apps.push(grant);
-                    self.save();
-                }
-            }
-            runtime.driver.run_computer_tool(pending.request);
-        }
-        if let Some(session) = self.state.session_mut(session_id) {
-            session.status = SessionStatus::Working;
-        }
-        self.analytics
-            .track(crate::analytics::Event::PermissionResponded {
-                provider,
-                kind: "computer_use",
-                decision: match decision {
-                    "deny" => "deny",
-                    "always" => "allow_always",
-                    "task" => "allow_task",
-                    _ => "other",
-                },
-            });
-        self.runtimes.insert(session_id, runtime);
-        cx.notify();
-    }
-
-    pub(super) fn bring_computer_use_to_front(&mut self, window_id: u64, cx: &mut Context<Self>) {
-        if let Some(runtime) = self
-            .state
-            .selected_session
-            .and_then(|session_id| self.runtimes.get_mut(&session_id))
-            && let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
-                preview
-                    .target
-                    .as_ref()
-                    .is_some_and(|target| target.window_id == window_id)
-            })
-        {
-            let preview = runtime.computer_use_previews.remove(index);
-            runtime.computer_use_previews.push(preview);
-        }
-        cx.notify();
-    }
-
-    pub(super) fn dismiss_computer_use(&mut self, window_id: u64, cx: &mut Context<Self>) {
-        if let Some(runtime) = self
-            .state
-            .selected_session
-            .and_then(|session_id| self.runtimes.get_mut(&session_id))
-            && let Some(preview) = runtime.computer_use_previews.iter_mut().find(|preview| {
-                preview
-                    .target
-                    .as_ref()
-                    .is_some_and(|target| target.window_id == window_id)
-            })
-        {
-            // Keep the hidden entry until the turn ends so the next
-            // screenshot cannot reopen a preview the user just closed.
-            preview.visible = false;
-            preview.decode_task = None;
-            preview.frames = Default::default();
-        }
-        cx.notify();
-    }
-
     pub(super) fn add_project(&mut self, cx: &mut Context<Self>) {
         if self.daemon.is_remote() {
-            self.show_toast(tr!("errors.remote_project_picker"));
-            cx.notify();
+            // The local folder dialog would show this machine's disk; browse
+            // the daemon host's instead (#61).
+            self.open_remote_folder_picker(cx);
             return;
         }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
@@ -1752,71 +1289,60 @@ impl Waku {
             if let Ok(Ok(Some(paths))) = receiver.await
                 && let Some(path) = paths.into_iter().next()
             {
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(existing) = this.state.projects.iter().find(|p| p.path == path) {
-                        this.select_project(existing.id, cx);
-                        return;
-                    }
-                    let project = Project::from_path(path);
-                    let project_id = project.id;
-                    this.state.projects.push(project);
-                    this.analytics.track(crate::analytics::Event::ProjectAdded);
-                    this.create_session_for(project_id, this.state.last_provider, cx);
-                });
+                let _ = this.update(cx, |this, cx| this.add_project_at(path, cx));
             }
         })
         .detach();
     }
 
+    /// Select the project at `path` (a daemon-host path), adding it with
+    /// `project.create` and starting a task in it when it is new.
+    pub(super) fn add_project_at(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(existing) = self.projects().iter().find(|p| p.path == path) {
+            self.select_project(existing.id, cx);
+            return;
+        }
+        let project = Project::from_path(path);
+        let project_id = project.id;
+        self.dispatch(
+            commands::create_project(project_id, project.path, project.name),
+            ThreadAction::Other,
+        );
+        self.analytics.track(crate::analytics::Event::ProjectAdded);
+        self.state.selected_project = Some(project_id);
+        self.create_session_for(project_id, self.state.last_provider, cx);
+    }
+
     pub(super) fn create_projectless_session(&mut self, cx: &mut Context<Self>) {
         if let Some(draft_id) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| {
-                !session.has_started()
-                    && self.state.projects.iter().any(|project| {
-                        project.id == session.project_id
+            .threads
+            .drafts
+            .values()
+            .find(|draft| {
+                !draft.has_started()
+                    && self.projects().iter().any(|project| {
+                        project.id == draft.project_id
                             && project.is_projectless()
                             && !crate::projectless::is_legacy_root_path(&project.path)
                     })
             })
-            .map(|session| session.id)
+            .map(|draft| draft.id)
         {
             self.select_session(draft_id, cx);
             return;
         }
 
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
-        cx.spawn(async move |waku, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    match workspace.request(
-                        waku_client::WorkspaceOperation::CreateProjectlessWorkspace {
-                            prompt: None,
-                        },
-                    )? {
-                        waku_client::WorkspaceResult::ProjectlessWorkspace { cwd } => Ok(cwd),
-                        _ => anyhow::bail!("the daemon returned an invalid projectless response"),
-                    }
-                })
-                .await;
-            let _ = waku.update(cx, |waku, cx| match result {
-                Ok(cwd) => {
-                    let mut project = Project::from_path(cwd);
-                    project.name = Project::PROJECTLESS_NAME.to_owned();
-                    let project_id = project.id;
-                    waku.state.projects.push(project);
-                    waku.create_session_for(project_id, waku.state.last_provider, cx);
-                }
-                Err(error) => {
-                    waku.show_toast(tr!("errors.create_projectless_task", error = error));
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        // Every projectless task gets a folder of its own: the daemon makes
+        // it under the projectless root and records the project
+        // (`project.create_scratch`). The project row arrives with the
+        // shell, like `add_project_at`'s.
+        let project_id = Uuid::new_v4();
+        self.dispatch(
+            commands::create_scratch_project(project_id, None),
+            ThreadAction::Other,
+        );
+        self.state.selected_project = Some(project_id);
+        self.create_session_for(project_id, self.state.last_provider, cx);
     }
 }
 
@@ -1824,9 +1350,19 @@ impl Waku {
 mod tests {
     use super::*;
 
+    fn draft(project_id: Uuid, provider: ProviderKind) -> ThreadView {
+        ThreadView::draft(
+            Uuid::new_v4(),
+            project_id,
+            provider,
+            RuntimeMode::FullAccess,
+            0,
+        )
+    }
+
     #[test]
     fn new_task_carries_the_current_tasks_access_mode() {
-        let mut current = AgentSession::new(Uuid::new_v4(), ProviderKind::OpenCode);
+        let mut current = draft(Uuid::new_v4(), ProviderKind::OpenCode);
         current.runtime_mode = RuntimeMode::Ask;
 
         assert_eq!(
@@ -1842,30 +1378,30 @@ mod tests {
     #[test]
     fn new_task_navigation_reuses_a_draft_from_the_current_project() {
         let project_id = Uuid::new_v4();
-        let draft = AgentSession::new(project_id, ProviderKind::Codex);
-        let mut started = AgentSession::new(project_id, ProviderKind::Claude);
-        started.begin_turn("Existing task");
+        let draft = draft(project_id, ProviderKind::Codex);
+        let mut started = self::draft(project_id, ProviderKind::Claude);
+        started.last_reply_at = Some(1);
         let mut navigation = SessionNavigation::default();
 
         navigation.remember_new_task(draft.id);
         navigation.visit(Some(draft.id), started.id);
 
         assert_eq!(
-            navigation.remembered_new_task(&[draft.clone(), started], project_id),
+            navigation.remembered_new_task([&draft, &started], project_id),
             Some(draft.id)
         );
     }
 
     #[test]
     fn new_task_navigation_does_not_reopen_a_draft_from_another_project() {
-        let draft = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let draft = draft(Uuid::new_v4(), ProviderKind::Codex);
         let current_project_id = Uuid::new_v4();
         let mut navigation = SessionNavigation::default();
 
         navigation.remember_new_task(draft.id);
 
         assert_eq!(
-            navigation.remembered_new_task(&[draft], current_project_id),
+            navigation.remembered_new_task([&draft], current_project_id),
             None
         );
     }
@@ -1873,29 +1409,14 @@ mod tests {
     #[test]
     fn new_task_navigation_does_not_reopen_a_started_or_removed_draft() {
         let project_id = Uuid::new_v4();
-        let mut draft = AgentSession::new(project_id, ProviderKind::Codex);
+        let mut draft = draft(project_id, ProviderKind::Codex);
         let mut navigation = SessionNavigation::default();
         navigation.remember_new_task(draft.id);
 
-        draft.begin_turn("Start it");
-        assert_eq!(
-            navigation.remembered_new_task(&[draft.clone()], project_id),
-            None
-        );
+        draft.last_reply_at = Some(1);
+        assert_eq!(navigation.remembered_new_task([&draft], project_id), None);
 
         navigation.remove(draft.id);
         assert_eq!(navigation.new_task, None);
-    }
-
-    #[test]
-    fn stopping_releases_the_runtimes_that_cannot_be_interrupted_in_place() {
-        // Codex owns a Computer Use process tree; Amp has no stream interrupt.
-        assert!(!retain_runtime_after_cancel(ProviderKind::Codex));
-        assert!(!retain_runtime_after_cancel(ProviderKind::Amp));
-        for provider in ProviderKind::ALL {
-            if !matches!(provider, ProviderKind::Codex | ProviderKind::Amp) {
-                assert!(retain_runtime_after_cancel(provider));
-            }
-        }
     }
 }

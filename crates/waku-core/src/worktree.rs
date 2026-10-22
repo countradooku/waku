@@ -1,14 +1,17 @@
 //! Daemon-owned isolated Git worktrees for tasks.
 //!
 //! A draft records only the user's choice. The first submission creates the
-//! worktree beneath `~/.waku/worktrees`, then every workspace consumer uses
+//! worktree beneath the managed folder (`~/.waku-fork/worktrees` unless the
+//! user moved it in Settings → Storage), then every workspace consumer uses
 //! the returned project-relative path for the lifetime of the task.
+//! [`crate::worktree_cleanup`] removes them again according to the user's
+//! rules.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use anyhow::{Context as _, anyhow, bail};
+use anyhow::{Context as _, bail};
 use uuid::Uuid;
 
 const DEFAULT_SLUG: &str = "new-worktree";
@@ -24,10 +27,7 @@ pub fn create(
     prompt: &str,
     base_branch: Option<&str>,
 ) -> anyhow::Result<CreatedWorktree> {
-    let root = dirs::home_dir()
-        .ok_or_else(|| anyhow!("could not locate the home directory for worktrees"))?
-        .join(crate::identity::HOME_DIRECTORY_NAME)
-        .join("worktrees");
+    let root = crate::worktree_cleanup::default_worktrees_directory()?;
     create_in(
         project_path,
         &root,
@@ -38,7 +38,9 @@ pub fn create(
     )
 }
 
-fn create_in(
+/// Create a task worktree beneath `worktree_root`, at
+/// `<worktree_root>/<project id>/<slug>` on a new `waku/<slug>` branch.
+pub fn create_in(
     project_path: &Path,
     worktree_root: &Path,
     project_id: Uuid,
@@ -159,6 +161,176 @@ fn create_in(
         path: path.join(project_relative),
         branch,
     })
+}
+
+/// The worktree name the orchestrator gives a thread's worktree: a slug of
+/// `hint` plus the first eight hex digits of the thread id, so a retried
+/// preparation computes the same name.
+pub fn thread_worktree_name(hint: &str, thread_id: Uuid) -> String {
+    format!(
+        "{}-{}",
+        worktree_slug(hint),
+        &thread_id.simple().to_string()[..8]
+    )
+}
+
+/// Creates `<worktree_root>/<project id>/<name>` on `branch`, or returns it
+/// when it already exists (idempotent, for the orchestrator's
+/// `workspace.prepare` effect, RFC 0001).
+///
+/// An existing directory must be a worktree of the project's repository with
+/// `branch` checked out, else this fails rather than reuse foreign files. A
+/// `branch` that exists without its directory (a removed worktree) is checked
+/// out again. `start_from_origin` bases a new branch on
+/// `origin/<base>` after a best-effort fetch.
+pub fn ensure_named_in(
+    project_path: &Path,
+    worktree_root: &Path,
+    project_id: Uuid,
+    name: &str,
+    branch: &str,
+    requested_base: Option<&str>,
+    start_from_origin: bool,
+) -> anyhow::Result<CreatedWorktree> {
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+        bail!("invalid worktree name `{name}`");
+    }
+    let valid_branch = crate::command_env::plain_command("git")
+        .args(["check-ref-format", "--branch", branch])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if branch.starts_with('-') || !valid_branch {
+        bail!("invalid branch name `{branch}`");
+    }
+    let project_path = fs::canonicalize(project_path)
+        .with_context(|| format!("could not open project {}", project_path.display()))?;
+    let repository = git_stdout(&project_path, &["rev-parse", "--show-toplevel"])
+        .context("new worktrees require a Git repository")?;
+    let repository = fs::canonicalize(PathBuf::from(repository.trim()))
+        .context("could not resolve the Git repository root")?;
+    let project_relative = project_path
+        .strip_prefix(&repository)
+        .context("the project is outside its Git repository root")?
+        .to_owned();
+    let path = worktree_root.join(project_id.to_string()).join(name);
+
+    if path.exists() {
+        let toplevel = git_stdout(&path, &["rev-parse", "--show-toplevel"])
+            .with_context(|| format!("{} is not a Git worktree", path.display()))?;
+        let common = git_stdout(
+            &path,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        let expected_common = git_stdout(
+            &repository,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        let same = |left: &str, right: &Path| {
+            fs::canonicalize(left)
+                .is_ok_and(|left| fs::canonicalize(right).is_ok_and(|right| left == right))
+        };
+        if !same(&toplevel, &path) || !same(&common, Path::new(&expected_common)) {
+            bail!(
+                "{} exists but is not a worktree of {}",
+                path.display(),
+                repository.display()
+            );
+        }
+        let current = git_optional_stdout(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+        if current.as_deref() != Some(branch) {
+            bail!(
+                "{} has `{}` checked out, not `{branch}`",
+                path.display(),
+                current.unwrap_or_else(|| "a detached HEAD".to_owned())
+            );
+        }
+        return Ok(CreatedWorktree {
+            path: path.join(&project_relative),
+            branch: branch.to_owned(),
+        });
+    }
+
+    let parent = path.parent().context("worktree path has no parent")?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "could not create the worktree directory {}",
+            parent.display()
+        )
+    })?;
+    let mut command = crate::command_env::plain_command("git");
+    command.args(["worktree", "add"]);
+    if local_branch_exists(&repository, branch)? {
+        // A worktree removed earlier: check its branch out again.
+        command.arg(&path).arg(branch);
+    } else {
+        let base_ref = requested_base
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+            .map(str::to_owned)
+            .map(Ok)
+            .unwrap_or_else(|| default_base_ref(&repository))?;
+        let base_ref = if start_from_origin {
+            origin_base(&repository, &base_ref).unwrap_or(base_ref)
+        } else {
+            base_ref
+        };
+        let base_commit = git_stdout(
+            &repository,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{base_ref}^{{commit}}"),
+            ],
+        )
+        .with_context(|| format!("base branch `{base_ref}` is unavailable"))?;
+        command.arg("-b").arg(branch).arg(&path).arg(&base_commit);
+    }
+    let output = command
+        .current_dir(&repository)
+        .output()
+        .context("failed to execute git worktree add")?;
+    if !output.status.success() {
+        bail!("{}", command_error(&output));
+    }
+    let project_path = path.join(&project_relative);
+    if !project_path.is_dir() {
+        bail!(
+            "Git created the worktree, but its project directory is missing: {}",
+            project_path.display()
+        );
+    }
+    Ok(CreatedWorktree {
+        path: project_path,
+        branch: branch.to_owned(),
+    })
+}
+
+/// `origin/<base>` after a best-effort fetch of it, if it resolves.
+fn origin_base(repository: &Path, base: &str) -> Option<String> {
+    let branch = base.strip_prefix("origin/").unwrap_or(base);
+    if branch.starts_with('-') {
+        return None;
+    }
+    let mut fetch = crate::command_env::plain_command("git");
+    fetch
+        .args(["fetch", "--quiet", "--no-tags", "origin", branch])
+        .current_dir(repository)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let _ = crate::git_commit::run_capture(&mut fetch, std::time::Duration::from_secs(30));
+    let remote = format!("origin/{branch}");
+    git_stdout(
+        repository,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{remote}^{{commit}}"),
+        ],
+    )
+    .ok()
+    .map(|_| remote)
 }
 
 /// Prefer the local branch named by `origin/HEAD`, so a worktree starts from

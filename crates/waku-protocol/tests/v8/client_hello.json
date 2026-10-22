@@ -1,0 +1,1 @@
+{"type":"hello","protocol":{"major":8,"minor":0},"client":{"kind":"desktop","appVersion":"0.1.20","os":"macos","deviceLabel":"Studio","instanceId":"11112222-3333-4444-5555-666677778888"},"credential":{"type":"local","token":"local-token"},"compression":[],"features":["compactTurnItems"],"maxMessageBytes":4194304}

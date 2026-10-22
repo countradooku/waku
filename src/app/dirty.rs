@@ -3,7 +3,8 @@
 //! A root `cx.notify()` fans out to every [`super::WakuPane`] through their
 //! root observers, so one stream commit used to rebuild the sidebar, the
 //! transcript and the right panel together. Producers that know what they
-//! changed — the event pump, the time-label wake — record it in a
+//! changed — the event pump (from each store update's `ThreadChange`), the
+//! time-label wake — record it in a
 //! [`DirtySet`] instead, and [`Waku::notify_dirty`] notifies exactly those
 //! islands. Everything else keeps the conservative root notify.
 //!
@@ -92,96 +93,6 @@ pub(super) enum DirtyRoute {
     FanOut,
 }
 
-/// What one provider event can change on screen, before knowing whether its
-/// session is the selected one.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum DriverEventImpact {
-    /// Bookkeeping nothing draws (the replay cursor) or output that has its
-    /// own repaint cadence (background log deltas, batched at 10 Hz).
-    Nothing,
-    /// Turn content: text and reasoning. Only the transcript draws it; the
-    /// sidebar row may still change, which the caller checks by fingerprint.
-    Transcript,
-    /// Tool activity and background work: drawn by the transcript and by
-    /// right-panel surfaces (background work, terminal-backed commands).
-    TranscriptAndRightPanel,
-    /// Everything else — status, permissions, errors, turn boundaries,
-    /// usage, titles. Rare, so it keeps the whole-window notify.
-    All,
-}
-
-pub(super) fn driver_event_impact(event: &DriverEvent) -> DriverEventImpact {
-    match event {
-        DriverEvent::RuntimeEventCursorAdvanced(_)
-        | DriverEvent::BackgroundWork(BackgroundWorkEvent::OutputDelta { .. }) => {
-            DriverEventImpact::Nothing
-        }
-        DriverEvent::TextDelta(_) | DriverEvent::ReasoningDelta(_) => DriverEventImpact::Transcript,
-        DriverEvent::Activity { .. }
-        | DriverEvent::RichActivity(_)
-        | DriverEvent::BackgroundWork(_) => DriverEventImpact::TranscriptAndRightPanel,
-        _ => DriverEventImpact::All,
-    }
-}
-
-/// The regions one drained session dirtied. `sidebar_changed` is whether the
-/// session's sidebar fingerprint moved across the drain.
-pub(super) fn session_drain_dirty(
-    impact: Option<DriverEventImpact>,
-    selected: bool,
-    sidebar_changed: bool,
-) -> DirtySet {
-    let mut dirty = match impact {
-        None | Some(DriverEventImpact::Nothing) => DirtySet::NONE,
-        Some(DriverEventImpact::All) => DirtySet::ALL,
-        Some(DriverEventImpact::Transcript) if selected => DirtySet {
-            root: true,
-            transcript: true,
-            ..DirtySet::NONE
-        },
-        Some(DriverEventImpact::TranscriptAndRightPanel) if selected => DirtySet {
-            root: true,
-            transcript: true,
-            right_panel: true,
-            ..DirtySet::NONE
-        },
-        // A background session's content is drawn nowhere but its sidebar
-        // row, and only through the fingerprinted fields.
-        Some(DriverEventImpact::Transcript | DriverEventImpact::TranscriptAndRightPanel) => {
-            DirtySet::NONE
-        }
-    };
-    dirty.sidebar |= sidebar_changed;
-    dirty
-}
-
-/// [`sidebar_session_fingerprint`] of one session, `None` once it is gone.
-pub(super) fn session_sidebar_fingerprint(sessions: &[AgentSession], id: Uuid) -> Option<u64> {
-    sessions
-        .iter()
-        .find(|session| session.id == id)
-        .map(sidebar_session_fingerprint)
-}
-
-/// The widest impact of two events drained together.
-pub(super) fn widest_impact(
-    current: Option<DriverEventImpact>,
-    next: DriverEventImpact,
-) -> Option<DriverEventImpact> {
-    fn rank(impact: DriverEventImpact) -> u8 {
-        match impact {
-            DriverEventImpact::Nothing => 0,
-            DriverEventImpact::Transcript => 1,
-            DriverEventImpact::TranscriptAndRightPanel => 2,
-            DriverEventImpact::All => 3,
-        }
-    }
-    Some(match current {
-        Some(current) if rank(current) >= rank(next) => current,
-        _ => next,
-    })
-}
-
 /// A zero-size child of the root view whose only job is to be notified.
 ///
 /// gpui marks a notified view and its ancestors dirty, and the root renders
@@ -232,159 +143,24 @@ impl Waku {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::RuntimeEventCursor;
-
-    fn text() -> DriverEvent {
-        DriverEvent::TextDelta("hello".into())
-    }
 
     #[test]
-    fn streaming_text_dirties_only_the_transcript_of_the_selected_session() {
-        let impact = widest_impact(None, driver_event_impact(&text()));
+    fn a_stream_commit_of_the_selected_thread_notifies_the_transcript_island_alone() {
+        let change = waku_client::store::ThreadChange {
+            text: true,
+            ..Default::default()
+        };
         assert_eq!(
-            session_drain_dirty(impact, true, false),
-            DirtySet {
-                root: true,
-                transcript: true,
-                ..DirtySet::NONE
-            }
-        );
-        assert_eq!(
-            session_drain_dirty(impact, true, false).route(),
+            super::super::threads::thread_update_dirty(change, true).route(),
             DirtyRoute::Panes {
                 sidebar: false,
                 transcript: true,
                 right_panel: false,
             }
         );
-    }
-
-    #[test]
-    fn a_background_session_streams_without_a_frame_unless_its_row_changed() {
-        let impact = widest_impact(None, driver_event_impact(&text()));
-        assert!(session_drain_dirty(impact, false, false).is_empty());
         assert_eq!(
-            session_drain_dirty(impact, false, true).route(),
-            DirtyRoute::Panes {
-                sidebar: true,
-                transcript: false,
-                right_panel: false,
-            }
-        );
-    }
-
-    #[test]
-    fn a_sidebar_visible_change_adds_the_sidebar_and_nothing_else() {
-        let impact = widest_impact(None, driver_event_impact(&text()));
-        assert_eq!(
-            session_drain_dirty(impact, true, true),
-            DirtySet {
-                root: true,
-                sidebar: true,
-                transcript: true,
-                right_panel: false,
-            }
-        );
-    }
-
-    #[test]
-    fn activities_also_dirty_the_right_panel() {
-        let activity = DriverEvent::Activity {
-            id: None,
-            kind: crate::model::ActivityKind::Command,
-            title: "ls".into(),
-            detail: None,
-            complete: false,
-        };
-        let impact = widest_impact(
-            widest_impact(None, driver_event_impact(&text())),
-            driver_event_impact(&activity),
-        );
-        assert_eq!(impact, Some(DriverEventImpact::TranscriptAndRightPanel));
-        let dirty = session_drain_dirty(impact, true, false);
-        assert!(dirty.transcript && dirty.right_panel && !dirty.sidebar);
-    }
-
-    #[test]
-    fn turn_boundaries_and_errors_keep_the_whole_window_notify() {
-        for event in [
-            DriverEvent::TurnStarted,
-            DriverEvent::TurnFinished {
-                success: true,
-                summary: None,
-            },
-            DriverEvent::Error("boom".into()),
-            DriverEvent::ProcessExited,
-            DriverEvent::AutoTitleUpdated(Some("Title".into())),
-        ] {
-            let impact = widest_impact(
-                widest_impact(None, driver_event_impact(&text())),
-                driver_event_impact(&event),
-            );
-            assert_eq!(impact, Some(DriverEventImpact::All), "{event:?}");
-            for selected in [true, false] {
-                assert_eq!(
-                    session_drain_dirty(impact, selected, false).route(),
-                    DirtyRoute::FanOut
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn bookkeeping_events_cause_no_frame() {
-        let impact = widest_impact(
-            None,
-            driver_event_impact(&DriverEvent::RuntimeEventCursorAdvanced(
-                RuntimeEventCursor {
-                    runtime_id: Uuid::nil(),
-                    epoch: Uuid::nil(),
-                    sequence: 1,
-                },
-            )),
-        );
-        assert!(session_drain_dirty(impact, true, false).is_empty());
-        assert!(session_drain_dirty(None, true, false).is_empty());
-    }
-
-    #[test]
-    fn streamed_text_leaves_the_sidebar_fingerprint_alone() {
-        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        session.title = "Fix the bug".into();
-        let id = session.id;
-        let mut sessions = vec![session];
-        append_text_delta_to_session(&mut sessions, id, false, "Hello".into());
-        let before = session_sidebar_fingerprint(&sessions, id);
-        assert!(before.is_some());
-
-        append_text_delta_to_session(&mut sessions, id, true, " world".into());
-        sessions[0].updated_at += 5;
-        assert_eq!(session_sidebar_fingerprint(&sessions, id), before);
-
-        sessions[0].status = SessionStatus::Working;
-        let working = session_sidebar_fingerprint(&sessions, id);
-        assert_ne!(working, before, "status shows as the row's spinner");
-
-        sessions[0].set_auto_title(Some("Renamed".into()));
-        sessions[0].title = AgentSession::DEFAULT_TITLE.into();
-        assert_ne!(session_sidebar_fingerprint(&sessions, id), working);
-
-        assert_eq!(session_sidebar_fingerprint(&sessions, Uuid::new_v4()), None);
-    }
-
-    #[test]
-    fn widest_impact_never_narrows() {
-        let all = widest_impact(None, DriverEventImpact::All);
-        assert_eq!(
-            widest_impact(all, DriverEventImpact::Transcript),
-            Some(DriverEventImpact::All)
-        );
-        assert_eq!(
-            widest_impact(
-                Some(DriverEventImpact::Nothing),
-                DriverEventImpact::Transcript
-            ),
-            Some(DriverEventImpact::Transcript)
+            super::super::threads::thread_update_dirty(change, false).route(),
+            DirtyRoute::Nothing
         );
     }
 

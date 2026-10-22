@@ -1,0 +1,30 @@
+{"type":"transcript_start","provider":"fake","protocol":"fake.jsonl","version":"1.0.0","scenario":"thread_rollback","metadata":{"recordedBy":"waku-replay-record","minCliVersion":"1.0.0","synthetic":false}}
+{"type":"expect_outbound","label":"process_start","frame":{"type":"process_start","program":"fake-agent","args":["--jsonl"],"env":{}}}
+{"type":"expect_outbound","label":"initialize","frame":{"id":1,"method":"initialize","params":{"client":"waku","cwd":"<workspace>"}}}
+{"type":"emit_inbound","frame":{"id":1,"result":{"agent":"fake-agent","version":"1.0.0"}}}
+{"type":"expect_outbound","label":"thread/start","frame":{"id":2,"method":"thread/start","params":{"cwd":"<workspace>"}}}
+{"type":"emit_inbound","frame":{"id":2,"result":{"threadId":"t-1"}}}
+{"type":"expect_outbound","label":"turn/start","frame":{"id":3,"method":"turn/start","params":{"threadId":"t-1","text":"one"}}}
+{"type":"emit_inbound","frame":{"id":3,"result":{"turnId":"u-2"}}}
+{"type":"emit_inbound","label":"turn/started","frame":{"method":"turn/started","params":{"threadId":"t-1","turnId":"u-2"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-2","itemId":"i-3","kind":"text","delta":"Echo"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-2","itemId":"i-3","kind":"text","delta":": one"}}}
+{"type":"emit_inbound","label":"item/completed","frame":{"method":"item/completed","params":{"turnId":"u-2","itemId":"i-3","kind":"text","text":"Echo: one"}}}
+{"type":"emit_inbound","label":"turn/completed","frame":{"method":"turn/completed","params":{"turnId":"u-2","status":"completed"}}}
+{"type":"expect_outbound","label":"turn/start","frame":{"id":4,"method":"turn/start","params":{"threadId":"t-1","text":"two"}}}
+{"type":"emit_inbound","frame":{"id":4,"result":{"turnId":"u-4"}}}
+{"type":"emit_inbound","label":"turn/started","frame":{"method":"turn/started","params":{"threadId":"t-1","turnId":"u-4"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-4","itemId":"i-5","kind":"text","delta":"Echo"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-4","itemId":"i-5","kind":"text","delta":": two"}}}
+{"type":"emit_inbound","label":"item/completed","frame":{"method":"item/completed","params":{"turnId":"u-4","itemId":"i-5","kind":"text","text":"Echo: two"}}}
+{"type":"emit_inbound","label":"turn/completed","frame":{"method":"turn/completed","params":{"turnId":"u-4","status":"completed"}}}
+{"type":"expect_outbound","label":"thread/rollback","frame":{"id":5,"method":"thread/rollback","params":{"threadId":"t-1","numTurns":1}}}
+{"type":"emit_inbound","frame":{"id":5,"result":{"threadId":"t-1"}}}
+{"type":"expect_outbound","label":"turn/start","frame":{"id":6,"method":"turn/start","params":{"threadId":"t-1","text":"three"}}}
+{"type":"emit_inbound","frame":{"id":6,"result":{"turnId":"u-6"}}}
+{"type":"emit_inbound","label":"turn/started","frame":{"method":"turn/started","params":{"threadId":"t-1","turnId":"u-6"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-6","itemId":"i-7","kind":"text","delta":"Echo:"}}}
+{"type":"emit_inbound","label":"item/delta","frame":{"method":"item/delta","params":{"turnId":"u-6","itemId":"i-7","kind":"text","delta":" three"}}}
+{"type":"emit_inbound","label":"item/completed","frame":{"method":"item/completed","params":{"turnId":"u-6","itemId":"i-7","kind":"text","text":"Echo: three"}}}
+{"type":"emit_inbound","label":"turn/completed","frame":{"method":"turn/completed","params":{"turnId":"u-6","status":"completed"}}}
+{"type":"runtime_exit","status":"success"}

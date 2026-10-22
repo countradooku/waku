@@ -16,10 +16,12 @@
 #      Markdown streaming, highlighting, review-diff parsing, the terminal
 #      snapshot, wire encode/decode and the daemon's task-state saves;
 #    - every built-in timeline replayed by `waku-bench-daemon --autoplay` to
-#      `replay-client`, the desktop's attach-and-decode path without a window:
-#      server, journal, socket writer, client socket thread and decoder;
-#    - `rpc-latency` against the real `waku-daemon`: handshake, settings,
-#      hydration, project file listing and message search.
+#      `replay-client`, the desktop's launch-and-stream path without a
+#      window: orchestrator, provider session manager and driver (fed by the
+#      fake provider CLI), v8 server and streams, and the client's projection
+#      store, reducers and render views;
+#    - `rpc-latency` against the real `waku-daemon`: v8 handshake,
+#      settings, thread snapshot, the `@` file index and thread search.
 #    With PGO_GUI=1 it also runs `scripts/bench/harness.py` against the
 #    instrumented app (built with `perf-counters`, which the harness needs)
 #    for the start, idle and streaming scenarios. That opens windows: run it
@@ -119,7 +121,7 @@ find_clang() {
 # Waits for `NAME=value` on a daemon's stdout file and prints the value.
 read_line() {
   local file=$1 name=$2 attempt
-  for attempt in $(seq 1 200); do
+  for attempt in $(seq 1 1200); do
     if grep -q "^$name=" "$file" 2>/dev/null; then
       sed -n "s/^$name=//p" "$file" | head -n 1
       return
@@ -154,7 +156,8 @@ instrumented_build() {
     cargo build --release --locked --target "$host" \
       -p waku --bin waku ${features[@]+"${features[@]}"} \
       -p waku-daemon --bin waku-daemon \
-      -p waku-bench-daemon --bin waku-bench-daemon --bin rpc-latency --bin replay-client
+      -p waku-bench-daemon --bin waku-bench-daemon --bin rpc-latency --bin replay-client \
+      --bin fake-codex --bin fake-claude
   # The benches use the release profile too, so their functions hash the
   # same as the binaries the profile is applied to.
   RUSTFLAGS="${RUSTFLAGS:-} $generate_flags" \
@@ -183,16 +186,16 @@ train() {
   local timeline out pid
   for timeline in prose burst reasoning-fast code-wall tool-storm images; do
     out="$work/bench-daemon-$timeline.out"
-    # Not `--exit-after`: the daemon would exit as soon as the replay is
-    # queued, before its socket writer has delivered it. Stop it once the
-    # client has seen `turnFinished`; SIGTERM shuts it down gracefully.
+    # Not `--exit-after`: the daemon would exit as soon as the run ends,
+    # possibly before the client has drawn its last view. Stop it once the
+    # client has seen the turn settle; SIGTERM shuts it down gracefully.
     "$bins/waku-bench-daemon" --timeline "$timeline" --rate max --autoplay=100 \
       --history-sessions 20 --history-turns 50 \
       --state-dir "$work/bench-state-$timeline" >"$out" 2>"$work/bench-daemon-$timeline.err" &
     pid=$!
     WAKU_DAEMON_ADDRESS="$(read_line "$out" WAKU_DAEMON_ADDRESS)" \
       WAKU_DAEMON_TOKEN="$(read_line "$out" WAKU_DAEMON_TOKEN)" \
-      "$bins/replay-client" --session "$(read_line "$out" WAKU_BENCH_SESSION_ID)" \
+      "$bins/replay-client" --thread "$(read_line "$out" WAKU_BENCH_THREAD_ID)" \
       --timeout 120 >>"$work/replay.jsonl"
     kill -TERM "$pid"
     wait "$pid" || true
@@ -227,7 +230,7 @@ train() {
 # `waku-daemon` prints one JSON ready line holding its bound address.
 read_address() {
   local file=$1 attempt
-  for attempt in $(seq 1 200); do
+  for attempt in $(seq 1 1200); do
     if [[ -s $file ]]; then
       python3 -I -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["address"])' "$file"
       return

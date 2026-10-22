@@ -1,622 +1,344 @@
-import type {
-  AgentSession,
-  AgentInvocation,
-  BranchSnapshot,
-  Checkpoint,
-  CommitSnapshot,
-  ComposerDraftChange,
-  ComposerDrafts,
-  DaemonSettings,
-  FileEntry,
-  MessageAttachment,
-  PlanUsage,
-  Project,
-  ProviderKind,
-  ProviderProbe,
-  ProviderResumeCursor,
-  ProviderSessionHistory,
-  ProviderSessionSummary,
-  ReviewDiffData,
-  ReviewDiffSource,
-  ResponsePayload,
-  RuntimeMode,
-  SessionMessageMatch,
-  SlashCommand,
-  SkillsCatalog,
-  UsageHistory,
-  UsageWindow,
-  WakuClient,
-  WorkingTreeEntry,
-  WorkspaceOperation,
-  WorkspaceResult,
-} from '@waku/client'
+// Catalog reads and writes over protocol v8 (RFC 0003 §5.2): files, vcs,
+// review, providers, usage, skills, settings, storage and search. Thread and
+// project changes go through `orchestration.dispatch` (task-actions.ts).
 
-export type TaskState = Extract<ResponsePayload, { type: 'taskState' }>
-export type DaemonDirectory = Extract<WorkspaceResult, { type: 'directory' }>
+import type { DaemonConnection } from '@waku/client/v8'
+import type * as T from '@waku/client/v8'
+
+/** What `review.diff` compares in a working tree. */
+export type WorkingTreeDiffSource = 'uncommitted' | 'unstaged' | 'staged' | 'committed' | 'branch'
+
+/**
+ * What the review panel compares: a working-tree source, one run's changes
+ * (`threads.turnDiff`) or the whole thread's (`threads.fullDiff`).
+ */
+export type DiffSource = WorkingTreeDiffSource | { type: 'turn'; runId: string } | { type: 'thread' }
+
+/** A stable string for a diff source, for cache keys and menu ids. */
+export function diffSourceKey(source: DiffSource): string {
+  if (typeof source === 'string') return source
+  return source.type === 'turn' ? `turn:${source.runId}` : 'thread'
+}
+
+export function sameDiffSource(left: DiffSource, right: DiffSource): boolean {
+  return diffSourceKey(left) === diffSourceKey(right)
+}
 
 export const daemonKeys = {
-  taskState: (address: string) => ['daemon', address, 'task-state'] as const,
-  composerDrafts: (address: string) => ['daemon', address, 'composer-drafts'] as const,
-  session: (address: string, sessionId: string) =>
-    ['daemon', address, 'session', sessionId] as const,
-  settings: (address: string) => ['daemon', address, 'settings'] as const,
+  info: (address: string) => ['daemon', address, 'info'] as const,
   providers: (address: string) => ['daemon', address, 'providers'] as const,
-  provider: (address: string, provider: ProviderKind, binaryOverride: string | null = null) =>
-    [...daemonKeys.providers(address), 'catalog', provider, binaryOverride] as const,
-  providerDetection: (address: string, provider: ProviderKind) =>
-    [...daemonKeys.providers(address), 'detection', provider] as const,
-  planUsage: (address: string, provider: ProviderKind) =>
-    ['daemon', address, 'plan-usage', provider] as const,
+  provider: (address: string, instanceId: string, discoverModels = true) =>
+    [...daemonKeys.providers(address), 'probe', instanceId, discoverModels] as const,
+  providerModels: (address: string, instanceId: string) =>
+    [...daemonKeys.providers(address), 'models', instanceId] as const,
+  planUsage: (address: string, instanceId: string) =>
+    ['daemon', address, 'plan-usage', instanceId] as const,
   skills: (address: string) => ['daemon', address, 'skills'] as const,
-  usage: (address: string, window: UsageWindow) =>
+  usage: (address: string, window: T.UsageWindow) =>
     ['daemon', address, 'usage', JSON.stringify(window)] as const,
-  workspace: (address: string, cwd: string) =>
-    ['daemon', address, 'workspace', cwd] as const,
-  sessionTurnRefsRoot: (address: string) =>
-    ['daemon', address, 'session-turn-refs'] as const,
-  sessionTurnRefs: (address: string, cwd: string, sessionId: string) =>
-    [...daemonKeys.sessionTurnRefsRoot(address), cwd, sessionId] as const,
+  workspace: (address: string, root: string) =>
+    ['daemon', address, 'workspace', root] as const,
   composerSources: (address: string) => ['daemon', address, 'composer-sources'] as const,
-  composerFiles: (address: string, cwd: string) =>
-    [...daemonKeys.composerSources(address), 'files', cwd] as const,
-  slashCommands: (
-    address: string,
-    provider: ProviderKind,
-    cwd: string,
-    binaryOverride: string | null,
-  ) => [...daemonKeys.composerSources(address), 'commands', provider, cwd, binaryOverride] as const,
-  workspaceTree: (address: string, cwd: string, expanded: string[]) =>
-    ['daemon', address, 'workspace-tree', cwd, ...[...expanded].sort()] as const,
+  composerFiles: (address: string, root: string) =>
+    [...daemonKeys.composerSources(address), 'files', root] as const,
+  slashCommands: (address: string, instanceId: string, root: string) =>
+    [...daemonKeys.composerSources(address), 'commands', instanceId, root] as const,
+  workspaceTree: (address: string, root: string, expanded: string[]) =>
+    ['daemon', address, 'workspace-tree', root, ...[...expanded].sort()] as const,
   directory: (address: string, path: string | null) =>
     ['daemon', address, 'directory', path] as const,
-  workspaceFile: (address: string, cwd: string, path: string) =>
-    ['daemon', address, 'workspace-file', cwd, path] as const,
-  workspaceDiff: (address: string, cwd: string, source: ReviewDiffSource = 'uncommitted') =>
-    ['daemon', address, 'workspace-diff', cwd, JSON.stringify(source)] as const,
+  workspaceFile: (address: string, root: string, path: string) =>
+    ['daemon', address, 'workspace-file', root, path] as const,
+  workspaceDiff: (address: string, root: string, source: DiffSource = 'uncommitted') =>
+    ['daemon', address, 'workspace-diff', root, diffSourceKey(source)] as const,
+  storage: (address: string) => ['daemon', address, 'storage'] as const,
 }
 
-export async function loadTaskState(client: WakuClient): Promise<TaskState> {
-  return expectResponse(await client.request({ type: 'loadTaskState' }), 'taskState')
-}
-
-export async function loadComposerDrafts(client: WakuClient): Promise<ComposerDrafts> {
-  const response = expectResponse(
-    await client.request({ type: 'loadComposerDrafts' }),
-    'composerDrafts',
-  )
-  return response.drafts
-}
-
-export async function applyComposerDraftChanges(
-  client: WakuClient,
-  changes: ComposerDraftChange[],
-): Promise<void> {
-  if (!changes.length) return
-  expectResponse(await client.request({ type: 'applyComposerDraftChanges', changes }), 'ack')
-}
-
-export async function hydrateSession(
-  client: WakuClient,
-  sessionId: string,
-): Promise<AgentSession | null> {
-  const response = expectResponse(
-    await client.request({ type: 'hydrateSession', sessionId }),
-    'session',
-  )
-  return response.session
-}
-
-export async function attachSession(
-  client: WakuClient,
-  sessionId: string,
-): Promise<{ runtimeId: string; supportsSteer: boolean } | null> {
-  const response = expectResponse(
-    await client.request({ type: 'attachSession' }, sessionId),
-    'sessionRuntime',
-  )
-  return response.runtimeId
-    ? { runtimeId: response.runtimeId, supportsSteer: response.supportsSteer }
-    : null
-}
-
-export async function searchSessionMessages(
-  client: WakuClient,
-  query: string,
-  limit = 40,
-): Promise<SessionMessageMatch[]> {
-  const response = expectResponse(
-    await client.request({ type: 'searchSessionMessages', query, limit }),
-    'sessionMessageMatches',
-  )
-  return response.matches
-}
-
-export async function listProviderSessions(
-  client: WakuClient,
-  provider: ProviderKind,
-  limit = 250,
-): Promise<ProviderSessionSummary[]> {
-  const response = expectResponse(
-    await client.request({ type: 'listProviderSessions', provider, limit }),
-    'providerSessions',
-  )
-  return response.sessions
-}
-
-export async function loadProviderSessionHistory(
-  client: WakuClient,
-  summary: ProviderSessionSummary,
-): Promise<ProviderSessionHistory> {
-  const response = expectResponse(
-    await client.request({
-      type: 'loadProviderSession',
-      cursor: summary.cursor,
-      cwd: summary.cwd,
-    }),
-    'providerSessionHistory',
-  )
-  return response.history
-}
-
-export async function loadDaemonSettings(
-  client: WakuClient,
-): Promise<DaemonSettings> {
-  const response = expectResponse(await client.request({ type: 'getSettings' }), 'settings')
-  return {
-    ...response.settings,
-    provider_binary_overrides: response.settings.provider_binary_overrides ?? {},
+/** A stable cache key for a root. */
+export function rootKey(root: T.RootRef): string {
+  switch (root.type) {
+    case 'project':
+      return `project:${root.projectId}`
+    case 'thread':
+      return `thread:${root.threadId}`
+    case 'path':
+      return `path:${root.path}`
+    default:
+      return 'unknown'
   }
 }
 
-export async function updateDaemonSettings(
-  client: WakuClient,
-  settings: DaemonSettings,
-): Promise<void> {
-  expectResponse(await client.request({ type: 'updateSettings', settings }), 'ack')
+export function threadRoot(threadId: string): T.RootRef {
+  return { type: 'thread', threadId }
+}
+
+export function projectRoot(projectId: string): T.RootRef {
+  return { type: 'project', projectId }
+}
+
+export function loadDaemonInfo(connection: DaemonConnection): Promise<T.DaemonInfo> {
+  return connection.call('daemon.info', {})
+}
+
+export async function searchThreads(
+  connection: DaemonConnection,
+  query: string,
+  limit = 40,
+): Promise<T.ThreadSearchHit[]> {
+  return connection.call('threads.search', { query, limit, includeArchived: false })
+}
+
+export function listProviderSessions(
+  connection: DaemonConnection,
+  instanceId: string,
+  limit = 250,
+): Promise<T.ProviderSessionSummary[]> {
+  return connection.call('providerSessions.list', { instanceId, limit })
+}
+
+export interface ProviderCatalog {
+  installed: boolean
+  path?: string
+  version?: string
+  models: T.ProviderModel[]
+  agentPresets: T.AgentPreset[]
 }
 
 export async function probeProvider(
-  client: WakuClient,
-  provider: ProviderKind,
-  settings: DaemonSettings,
+  connection: DaemonConnection,
+  instanceId: string,
   options: { discoverModels?: boolean; probeVersion?: boolean } = {},
-): Promise<ProviderProbe & { version: string | null }> {
+): Promise<ProviderCatalog> {
   const { discoverModels = true, probeVersion = true } = options
-  const response = expectResponse(
-    await client.request({
-      type: 'probeProvider',
-      provider,
-      binaryOverride: settings.provider_binary_overrides?.[provider] ?? null,
-      discoverModels,
-      probeVersion,
-    }),
-    'providerProbe',
-  )
-  return { ...response.probe, version: response.version }
+  const result = await connection.call('providers.probe', { instanceId, discoverModels, probeVersion })
+  return {
+    installed: result.probe.installed,
+    path: result.probe.path,
+    version: result.version,
+    models: result.probe.models ?? [],
+    agentPresets: result.probe.agentPresets ?? [],
+  }
 }
 
-export async function loadSkills(
-  client: WakuClient,
-  projects: Project[],
-): Promise<SkillsCatalog> {
-  const response = expectResponse(
-    await client.request({
-      type: 'loadSkills',
-      projects: projects.map((project) => [project.name, project.path]),
-    }),
-    'skillsCatalog',
-  )
-  return response.catalog
+export function fetchPlanUsage(
+  connection: DaemonConnection,
+  instanceId: string,
+): Promise<T.PlanUsage | null> {
+  return connection.call('providers.planUsage', { instanceId })
+}
+
+export function updateDaemonSettings(
+  connection: DaemonConnection,
+  patch: T.SettingsPatch,
+): Promise<T.SettingsSnapshot> {
+  return connection.call('settings.update', { patch })
+}
+
+export function loadSkills(connection: DaemonConnection, projectIds: string[]): Promise<T.SkillsCatalog> {
+  return connection.call('skills.list', { projectIds })
 }
 
 export async function setSkillsEnabled(
-  client: WakuClient,
+  connection: DaemonConnection,
   dirs: string[],
   enabled: boolean,
 ): Promise<void> {
-  expectResponse(await client.request({ type: 'setSkillsEnabled', dirs, enabled }), 'ack')
+  await connection.call('skills.setEnabled', { dirs, enabled })
 }
 
-export async function trashSkills(client: WakuClient, dirs: string[]): Promise<void> {
-  expectResponse(await client.request({ type: 'trashSkills', dirs }), 'ack')
+export async function trashSkills(connection: DaemonConnection, dirs: string[]): Promise<void> {
+  await connection.call('skills.trash', { dirs })
 }
 
-export async function loadUsageHistory(
-  client: WakuClient,
-  window: UsageWindow,
-  projects: Project[],
-): Promise<UsageHistory> {
-  const response = expectResponse(
-    await client.request({
-      type: 'loadUsageHistory',
-      window,
-      projectRoots: projects.map((project) => project.path),
-    }),
-    'usageHistory',
-  )
-  return response.history
+export function loadUsageHistory(
+  connection: DaemonConnection,
+  window: T.UsageWindow,
+  projectIds: string[],
+): Promise<T.UsageHistory> {
+  return connection.call('usage.history', { window, projectIds })
 }
 
-export async function fetchPlanUsage(
-  client: WakuClient,
-  provider: ProviderKind,
-  settings: DaemonSettings,
-  version: string | null,
-): Promise<PlanUsage | null> {
-  const response = expectResponse(
-    await client.request({
-      type: 'fetchPlanUsage',
-      provider,
-      binaryOverride: settings.provider_binary_overrides?.[provider] ?? null,
-      cliVersion: version,
-    }),
-    'planUsage',
-  )
-  return response.usage
+export function worktreeCleanupStatus(connection: DaemonConnection): Promise<T.WorktreeCleanupStatus> {
+  return connection.call('storage.worktreeCleanupStatus', {})
 }
 
-export async function persistSession(
-  client: WakuClient,
-  session: AgentSession,
-  project?: Project,
-): Promise<AgentSession> {
-  // The daemon merges these keyed records in place. Sending only the changed
-  // session keeps streaming checkpoints to one small RPC and cannot reorder
-  // projects or overwrite another client's catalog.
-  const response = expectResponse(
-    await client.request({
-      type: 'saveTaskState',
-      projects: project ? [project] : [],
-      liveSessionIds: [session.id],
-      sessions: [session],
-    }),
-    'taskStateSaved',
-  )
-  return response.sessions.find((item) => item.id === session.id) ?? session
+export function runWorktreeCleanup(connection: DaemonConnection): Promise<T.WorktreeCleanupReport> {
+  return connection.call('storage.runWorktreeCleanup', {})
 }
 
-export async function removeSession(
-  client: WakuClient,
-  sessionId: string,
-): Promise<TaskState> {
-  expectResponse(
-    await client.request({ type: 'removeSession' }, sessionId),
-    'ack',
-  )
-  return loadTaskState(client)
+export function listWorkspaceTree(
+  connection: DaemonConnection,
+  root: T.RootRef,
+  expanded: string[],
+): Promise<T.TreeEntry[]> {
+  return connection.call('files.tree', { root, expanded })
 }
 
-export async function listWorkspaceTree(
-  client: WakuClient,
-  root: string,
-  expandedPaths: string[],
-): Promise<WorkingTreeEntry[]> {
-  const result = await workspaceRequest(client, {
-    type: 'listTree',
-    root,
-    expanded_paths: expandedPaths,
-  })
-  if (result.type !== 'workingTree') throw new Error('The daemon returned an unexpected file tree')
-  return result.entries
-}
-
-export async function browseDaemonDirectory(
-  client: WakuClient,
+export function browseDaemonDirectory(
+  connection: DaemonConnection,
   path: string | null,
-): Promise<DaemonDirectory> {
-  const result = await workspaceRequest(client, {
-    type: 'browseDirectory',
-    path,
-  })
-  if (result.type !== 'directory') {
-    throw new Error('The daemon returned an unexpected directory response')
-  }
-  return result
+): Promise<T.Directory> {
+  return connection.call('fs.browse', path ? { path } : {})
 }
 
+export interface TextFile {
+  text: string
+  revision: string
+}
+
+/** A text file, downloaded from the blob store when it is too large to send inline. */
 export async function readWorkspaceTextFile(
-  client: WakuClient,
-  root: string,
-  relativePath: string,
-): Promise<string> {
-  const result = await workspaceRequest(client, {
-    type: 'readTextFile',
-    root,
-    relative_path: relativePath,
-  })
-  if (result.type !== 'textFile') throw new Error('The daemon returned an unexpected file response')
-  return result.content
+  connection: DaemonConnection,
+  root: T.RootRef,
+  path: string,
+): Promise<TextFile> {
+  const content = await connection.call('files.read', { root, path })
+  if (content.binary) throw new Error('This file is binary')
+  if (content.text !== undefined) return { text: content.text, revision: content.revision }
+  if (content.blob) {
+    const { bytes } = await connection.downloadBlob(content.blob)
+    return { text: new TextDecoder().decode(bytes), revision: content.revision }
+  }
+  return { text: '', revision: content.revision }
 }
 
 export async function writeWorkspaceTextFile(
-  client: WakuClient,
-  root: string,
-  relativePath: string,
+  connection: DaemonConnection,
+  root: T.RootRef,
+  path: string,
   content: string,
-): Promise<void> {
-  const result = await workspaceRequest(client, {
-    type: 'writeTextFile',
-    root,
-    relative_path: relativePath,
-    content,
-  })
-  if (result.type !== 'ack') throw new Error('The daemon returned an unexpected file response')
+  baseRevision?: string,
+): Promise<string> {
+  const params: Omit<T.FilesWriteParams, 'opId'> = { root, path, content }
+  if (baseRevision !== undefined) params.baseRevision = baseRevision
+  const result = await connection.call('files.write', params)
+  return result.revision
 }
 
-export async function inspectWorkspaceBranches(
-  client: WakuClient,
-  cwd: string,
-): Promise<BranchSnapshot | null> {
-  const result = await workspaceRequest(client, { type: 'inspectBranches', cwd })
-  if (result.type !== 'branches') throw new Error('The daemon returned an unexpected Git response')
-  return result.snapshot
+export function listComposerFiles(
+  connection: DaemonConnection,
+  root: T.RootRef,
+  limit = 10_000,
+): Promise<T.FileEntry[]> {
+  return connection.call('files.searchEntries', { root, limit })
 }
 
-export async function listSessionTurnRefs(
-  client: WakuClient,
-  cwd: string,
-  sessionId: string,
-): Promise<number[]> {
-  const result = await workspaceRequest(client, {
-    type: 'sessionTurnRefs',
-    cwd,
-    session_id: sessionId,
-  })
-  if (result.type !== 'turnRefs') {
-    throw new Error('The daemon returned an unexpected checkpoint response')
-  }
-  return result.turn_counts
+export function discoverComposerCommands(
+  connection: DaemonConnection,
+  instanceId: string,
+  root: T.RootRef,
+  threadId?: string,
+): Promise<T.SlashCommand[]> {
+  const params: T.ComposerSlashCommandsParams = { instanceId, root }
+  if (threadId) params.threadId = threadId
+  return connection.call('composer.slashCommands', params)
 }
 
-export async function captureTurnStart(
-  client: WakuClient,
-  cwd: string,
-  sessionId: string,
-  turnCount: number,
-): Promise<void> {
-  const result = await workspaceRequest(client, {
-    type: 'captureTurnStart',
-    cwd,
-    session_id: sessionId,
-    turn_count: turnCount,
-  })
-  if (result.type !== 'ack') {
-    throw new Error('The daemon returned an unexpected checkpoint response')
-  }
+export function inspectWorkspaceBranches(
+  connection: DaemonConnection,
+  root: T.RootRef,
+): Promise<T.BranchSnapshot | null> {
+  return connection.call('vcs.refs', { root })
 }
 
-export async function captureTurnCheckpoint(
-  client: WakuClient,
-  cwd: string,
-  sessionId: string,
-  turnCount: number,
-): Promise<Checkpoint> {
-  const result = await workspaceRequest(client, {
-    type: 'captureTurn',
-    cwd,
-    session_id: sessionId,
-    turn_count: turnCount,
-  })
-  if (result.type !== 'checkpoint') {
-    throw new Error('The daemon returned an unexpected checkpoint response')
-  }
-  return result.checkpoint
-}
-
-export async function listComposerFiles(
-  client: WakuClient,
-  root: string,
-  cap = 50_000,
-): Promise<FileEntry[]> {
-  const result = await workspaceRequest(client, { type: 'listProjectFiles', root, cap })
-  if (result.type !== 'projectFiles') {
-    throw new Error('The daemon returned an unexpected project-file response')
-  }
-  return result.entries
-}
-
-export async function discoverComposerCommands(
-  client: WakuClient,
-  provider: ProviderKind,
-  projectRoot: string,
-  binaryOverride: string | null,
-): Promise<SlashCommand[]> {
-  const result = await workspaceRequest(client, {
-    type: 'discoverSlashCommands',
-    provider,
-    project_root: projectRoot,
-    binary_override: binaryOverride,
-  })
-  if (result.type !== 'slashCommands') {
-    throw new Error('The daemon returned an unexpected slash-command response')
-  }
-  return result.commands
-}
-
-export async function checkoutWorkspaceBranch(
-  client: WakuClient,
-  cwd: string,
-  branch: string,
+export function checkoutWorkspaceBranch(
+  connection: DaemonConnection,
+  root: T.RootRef,
+  name: string,
   create = false,
-): Promise<BranchSnapshot> {
-  const result = await workspaceRequest(client, {
-    type: 'checkoutBranch',
-    cwd,
-    branch,
-    create,
-  })
-  if (result.type !== 'branchChanged') throw new Error('The daemon returned an unexpected branch response')
-  return result.snapshot
+): Promise<T.BranchSnapshot> {
+  return connection.call('vcs.switchRef', { root, name, create })
 }
 
+export function inspectGitStatus(connection: DaemonConnection, root: T.RootRef): Promise<T.GitStatus> {
+  return connection.call('vcs.status', { root })
+}
+
+export function stageGitFiles(
+  connection: DaemonConnection,
+  root: T.RootRef,
+  paths: string[],
+  stage: boolean,
+): Promise<T.GitStatus> {
+  return connection.call('vcs.stage', { root, paths, stage })
+}
+
+export function pullGitBranch(connection: DaemonConnection, root: T.RootRef): Promise<T.PullResult> {
+  return connection.call('vcs.pull', { root })
+}
+
+export function listGitWorktrees(connection: DaemonConnection, root: T.RootRef): Promise<T.GitWorktree[]> {
+  return connection.call('vcs.worktrees', { root })
+}
+
+export interface WorkspaceDiff {
+  patch: string
+  numstat: string
+  files: T.FileDiffSummary[]
+  completeContext: boolean
+}
+
+/**
+ * `review.diff` for a working-tree source, `threads.turnDiff` or
+ * `threads.fullDiff` for a thread's turns (the root must be the thread), with
+ * a patch over the inline limit downloaded from the blob store.
+ */
 export async function collectWorkspaceDiff(
-  client: WakuClient,
-  cwd: string,
-  source: ReviewDiffSource = 'uncommitted',
+  connection: DaemonConnection,
+  root: T.RootRef,
+  source: DiffSource = 'uncommitted',
   ignoreWhitespace = false,
-): Promise<ReviewDiffData> {
-  const result = await workspaceRequest(client, {
-    type: 'collectReviewDiff',
-    cwd,
-    source,
-    ignore_whitespace: ignoreWhitespace,
-  })
-  if (result.type !== 'reviewDiff') throw new Error('The daemon returned an unexpected diff response')
-  return result.data
+): Promise<WorkspaceDiff> {
+  let diff: T.ReviewDiff
+  if (typeof source === 'string') {
+    diff = await connection.call('review.diff', { root, source: { type: source }, ignoreWhitespace })
+  } else {
+    if (root.type !== 'thread') throw new Error('Only a task has turns to review')
+    diff = source.type === 'turn'
+      ? await connection.call('threads.turnDiff', { threadId: root.threadId, runId: source.runId, ignoreWhitespace })
+      : await connection.call('threads.fullDiff', { threadId: root.threadId, ignoreWhitespace })
+  }
+  let patch = ''
+  if (diff.patch.type === 'inline') patch = diff.patch.value
+  else if (diff.patch.type === 'blob') {
+    const { bytes } = await connection.downloadBlob(diff.patch.reference)
+    patch = new TextDecoder().decode(bytes)
+  }
+  return { patch, numstat: diff.numstat, files: diff.files, completeContext: diff.completeContext }
 }
 
-export async function inspectWorkspaceCommit(
-  client: WakuClient,
-  cwd: string,
-): Promise<CommitSnapshot> {
-  const result = await workspaceRequest(client, { type: 'inspectCommit', cwd })
-  if (result.type !== 'commitSnapshot') {
-    throw new Error('The daemon returned an unexpected commit response')
-  }
-  return result.snapshot
+export function inspectWorkspaceCommit(
+  connection: DaemonConnection,
+  root: T.RootRef,
+): Promise<T.CommitSnapshot> {
+  return connection.call('vcs.commitPreview', { root })
 }
 
 export async function generateWorkspaceCommitMessage(
-  client: WakuClient,
-  cwd: string,
+  connection: DaemonConnection,
+  root: T.RootRef,
   includeUnstaged: boolean,
-  invocation: AgentInvocation,
+  selection: T.ModelSelection,
 ): Promise<string> {
-  const result = await workspaceRequest(client, {
-    type: 'generateCommitMessage',
-    cwd,
-    include_unstaged: includeUnstaged,
-    invocation,
-  })
-  if (result.type !== 'commitMessage') {
-    throw new Error('The daemon returned an unexpected commit-message response')
-  }
+  const result = await connection.call('vcs.generateCommitMessage', { root, includeUnstaged, selection })
   return result.message
 }
 
-export async function commitWorkspace(
-  client: WakuClient,
-  cwd: string,
+export function commitWorkspace(
+  connection: DaemonConnection,
+  root: T.RootRef,
   message: string,
   includeUnstaged: boolean,
   push: boolean,
-): Promise<void> {
-  const result = await workspaceRequest(client, {
-    type: 'commit',
-    cwd,
-    message,
-    include_unstaged: includeUnstaged,
-    push,
-  })
-  if (result.type !== 'ack') throw new Error('The daemon returned an unexpected commit response')
+): Promise<T.CommitResult> {
+  return connection.call('vcs.commit', { root, message, includeUnstaged, push })
 }
 
-export async function pushWorkspace(client: WakuClient, cwd: string): Promise<void> {
-  const result = await workspaceRequest(client, { type: 'push', cwd })
-  if (result.type !== 'ack') throw new Error('The daemon returned an unexpected push response')
+export async function pushWorkspace(connection: DaemonConnection, root: T.RootRef): Promise<void> {
+  await connection.call('vcs.push', { root })
 }
 
-async function workspaceRequest(
-  client: WakuClient,
-  operation: WorkspaceOperation,
-): Promise<WorkspaceResult> {
-  const response = expectResponse(
-    await client.request({ type: 'workspace', operation }),
-    'workspace',
-  )
-  return response.result
-}
-
-export async function createProjectlessWorkspace(
-  client: WakuClient,
-): Promise<string> {
-  const response = expectResponse(
-    await client.request({
-      type: 'workspace',
-      operation: { type: 'createProjectlessWorkspace', prompt: null },
-    }),
-    'workspace',
-  )
-  if (response.result.type !== 'projectlessWorkspace') {
-    throw new Error('The daemon returned an unexpected workspace result')
-  }
-  return response.result.cwd
-}
-
-export async function materializeWorktree(
-  client: WakuClient,
-  session: AgentSession,
-  project: Project,
-  prompt: string,
-): Promise<AgentSession> {
-  if (session.workspace?.kind !== 'newWorktree') return session
-  const response = expectResponse(
-    await client.request({
-      type: 'workspace',
-      operation: {
-        type: 'createWorktree',
-        project_path: project.path,
-        project_id: project.id,
-        session_id: session.id,
-        prompt,
-        base_branch: session.workspace.baseBranch ?? null,
-      },
-    }),
-    'workspace',
-  )
-  if (response.result.type !== 'worktreeCreated') {
-    throw new Error('The daemon returned an unexpected worktree result')
-  }
-  return {
-    ...session,
-    workspace: {
-      kind: 'worktree',
-      path: response.result.worktree.path,
-      branch: response.result.worktree.branch,
-    },
-  }
-}
-
-export function createProject(path: string): Project {
-  const input = path.trim()
-  if (!input.startsWith('/') && !/^[a-z]:[\\/]/i.test(input)) {
-    throw new Error('Enter an absolute path on the daemon host')
-  }
-  const normalized = input === '/' ? input : input.replace(/[\\/]+$/, '')
-  const name = normalized.split(/[\\/]/).filter(Boolean).at(-1) ?? 'Project'
-  return {
-    id: crypto.randomUUID(),
-    name,
-    path: normalized,
-    created_at: unixTime(),
-  }
-}
-
-export async function persistProject(
-  client: WakuClient,
-  candidate: Project,
-): Promise<{ project: Project; taskState: TaskState }> {
-  const current = await loadTaskState(client)
-  const existing = current.projects.find((project) => project.path === candidate.path)
-  if (existing) return { project: existing, taskState: current }
-
-  const projects = [...current.projects, candidate]
-  expectResponse(
-    await client.request({
-      type: 'saveTaskState',
-      projects,
-      liveSessionIds: current.sessions.map((session) => session.id),
-      sessions: [],
-    }),
-    'taskStateSaved',
-  )
-  return {
-    project: candidate,
-    taskState: { ...current, projects },
-  }
-}
-
-export function selectableProjects(projects: Project[], selected?: Project): Project[] {
+export function selectableProjects(projects: T.Project[], selected?: T.Project): T.Project[] {
   const choices = selected
     ? [selected, ...projects.filter((project) => project.id !== selected.id)]
     : projects
@@ -630,160 +352,25 @@ export function selectableProjects(projects: Project[], selected?: Project): Pro
   })
 }
 
-export function createSession(
-  projectId: string,
-  provider: ProviderKind,
-  isolated: boolean,
-): AgentSession {
-  const now = unixTime()
-  return {
-    id: crypto.randomUUID(),
-    title: 'New task',
-    auto_title: null,
-    project_id: projectId,
-    workspace: isolated ? { kind: 'newWorktree' } : { kind: 'local' },
-    provider,
-    model: null,
-    runtime_mode: 'fullAccess',
-    reasoning_effort: null,
-    service_tier: null,
-    context_window: null,
-    agent_preset: null,
-    status: 'idle',
-    created_at: now,
-    updated_at: now,
-    last_reply_at: null,
-    provider_cursor: null,
-    available_commands: [],
-    context_usage: null,
-    provider_session_id: null,
-    messages: [],
-    transcript_blocks: [],
-    turns: [],
-    queued_messages: [],
+/** Where the task's files live: its worktree, else its project. */
+export function taskCwd(
+  task: { worktreePath?: string } | null | undefined,
+  project: T.Project | null | undefined,
+): string | undefined {
+  return task?.worktreePath ?? project?.path
+}
+
+/** The project name an absolute path would get. */
+export function projectNameFromPath(path: string): string {
+  const input = path.trim()
+  const normalized = input === '/' ? input : input.replace(/[\\/]+$/, '')
+  return normalized.split(/[\\/]/).filter(Boolean).at(-1) ?? 'Project'
+}
+
+export function normalizeProjectPath(path: string): string {
+  const input = path.trim()
+  if (!input.startsWith('/') && !/^[a-z]:[\\/]/i.test(input)) {
+    throw new Error('Enter an absolute path on the daemon host')
   }
-}
-
-export function createResumedSession(
-  projectId: string,
-  summary: ProviderSessionSummary,
-  history: ProviderSessionHistory,
-  runtimeMode: RuntimeMode = 'fullAccess',
-): AgentSession {
-  const now = unixTime()
-  const createdAt = summary.created_at || now
-  const updatedAt = Math.max(summary.updated_at, createdAt)
-  const hasHistory = history.messages.length > 0 || history.turns.length > 0
-  return {
-    ...createSession(projectId, summary.cursor.provider, false),
-    auto_title: summary.title,
-    runtime_mode: runtimeMode,
-    provider_cursor: summary.cursor,
-    created_at: createdAt,
-    updated_at: updatedAt,
-    last_reply_at: hasHistory ? updatedAt : null,
-    messages: history.messages,
-    turns: history.turns,
-  }
-}
-
-export function providerSessionNativeId(cursor: ProviderResumeCursor): string {
-  return cursor.provider === 'amp' || cursor.provider === 'codex'
-    ? cursor.threadId
-    : cursor.sessionId
-}
-
-export function sameProviderSession(
-  left: ProviderResumeCursor,
-  right: ProviderResumeCursor,
-): boolean {
-  return left.provider === right.provider
-    && providerSessionNativeId(left) === providerSessionNativeId(right)
-}
-
-export function beginTurn(
-  session: AgentSession,
-  prompt: string,
-  attachments: MessageAttachment[] = [],
-): AgentSession {
-  const now = unixTime()
-  const turnId = crypto.randomUUID()
-  const visiblePrompt = prompt.trim()
-  const mentions = attachments.map((attachment) => `@${attachment.mention}`).join(' ')
-  const providerPrompt = [visiblePrompt, mentions].filter(Boolean).join(' ')
-  const autoTitle =
-    session.messages.length === 0 && session.title === 'New task' && !session.auto_title
-      ? promptTitle(visiblePrompt || attachments[0]?.name || '')
-      : session.auto_title
-  return {
-    ...session,
-    auto_title: autoTitle,
-    status: 'connecting',
-    updated_at: now,
-    last_reply_at: now,
-    messages: [
-      ...session.messages,
-      {
-        id: crypto.randomUUID(),
-        turn_id: turnId,
-        role: 'user',
-        content: providerPrompt,
-        display_content: attachments.length ? visiblePrompt : null,
-        attachments,
-        created_at: now,
-        streaming: false,
-      },
-    ],
-    turns: [
-      ...session.turns,
-      {
-        id: turnId,
-        turn_count: session.turns.length + 1,
-        status: 'running',
-        provider_turn_started: false,
-        provider_resume_at: null,
-        started_at: now,
-        completed_at: null,
-        checkpoint: null,
-      },
-    ],
-  }
-}
-
-export function displayTitle(session: AgentSession): string {
-  if (session.title !== 'New task' && session.title.trim()) return session.title
-  return session.auto_title?.trim() || 'New Task'
-}
-
-export function sessionCwd(session: AgentSession, project: Project): string {
-  return session.workspace?.kind === 'worktree' ? session.workspace.path : project.path
-}
-
-export function unixTime() {
-  return Math.floor(Date.now() / 1_000)
-}
-
-function promptTitle(prompt: string): string | null {
-  let title = prompt.trim().split(/\s+/).slice(0, 7).join(' ')
-  if (!title) return null
-  if ([...title].length > 54) title = `${[...title].slice(0, 53).join('')}…`
-  return title
-}
-
-function upsertProject(projects: Project[], project?: Project): Project[] {
-  if (!project) return projects
-  const found = projects.some((item) => item.id === project.id)
-  return found
-    ? projects.map((item) => (item.id === project.id ? project : item))
-    : [...projects, project]
-}
-
-function expectResponse<T extends ResponsePayload['type']>(
-  response: ResponsePayload,
-  type: T,
-): Extract<ResponsePayload, { type: T }> {
-  if (response.type !== type) {
-    throw new Error(`Expected ${type}, received ${response.type}`)
-  }
-  return response as Extract<ResponsePayload, { type: T }>
+  return input === '/' ? input : input.replace(/[\\/]+$/, '')
 }

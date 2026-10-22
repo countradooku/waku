@@ -22,10 +22,16 @@ const MAX_RENDERED_DIFF_LINES: usize = 50_000;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Source {
-    LastTurn {
-        session_id: Uuid,
-        turn_id: Uuid,
+    /// One run of a thread (`threads.turnDiff`); `turn_count` is its
+    /// ordinal, for the label.
+    Turn {
+        thread_id: Uuid,
+        run_id: Uuid,
         turn_count: usize,
+    },
+    /// Every live run of a thread together (`threads.fullDiff`).
+    AllTurns {
+        thread_id: Uuid,
     },
     #[default]
     Uncommitted,
@@ -330,23 +336,49 @@ pub fn from_file_changes(changes: &[crate::model::ActivityFileChange]) -> Snapsh
     parse(Source::default(), &numstat, &patch, false)
 }
 
-pub fn wire_source(source: Source) -> waku_client::workspace::ReviewDiffSource {
-    match source {
-        Source::LastTurn {
-            session_id,
-            turn_id,
-            turn_count,
-        } => waku_client::workspace::ReviewDiffSource::LastTurn {
-            session_id,
-            turn_id,
-            turn_count,
-        },
-        Source::Uncommitted => waku_client::workspace::ReviewDiffSource::Uncommitted,
-        Source::Unstaged => waku_client::workspace::ReviewDiffSource::Unstaged,
-        Source::Staged => waku_client::workspace::ReviewDiffSource::Staged,
-        Source::Committed => waku_client::workspace::ReviewDiffSource::Committed,
-        Source::Branch => waku_client::workspace::ReviewDiffSource::Branch,
-    }
+/// The `review.diff` source for a desktop source; `None` for a turn or the
+/// whole thread, which compare checkpoints, not the working tree.
+pub fn v8_source(source: Source) -> Option<waku_client::v8::ReviewDiffSource> {
+    use waku_client::v8::ReviewDiffSource as Wire;
+    Some(match source {
+        Source::Turn { .. } | Source::AllTurns { .. } => return None,
+        Source::Uncommitted => Wire::Uncommitted,
+        Source::Unstaged => Wire::Unstaged,
+        Source::Staged => Wire::Staged,
+        Source::Committed => Wire::Committed,
+        Source::Branch => Wire::Branch,
+    })
+}
+
+/// Collect and parse the diff `source` names in `root`. Blocks: run it on
+/// the background executor.
+///
+/// Working-tree sources are `review.diff`; a turn is `threads.turnDiff`
+/// (its turn-start checkpoint to the one it ended with) and the whole
+/// thread `threads.fullDiff`.
+pub fn collect(
+    daemon_v8: &waku_client::surfaces::DaemonV8,
+    root: &Path,
+    source: Source,
+    ignore_whitespace: bool,
+) -> anyhow::Result<Snapshot> {
+    use waku_client::surfaces::vcs;
+    let diff = match source {
+        Source::Turn {
+            thread_id, run_id, ..
+        } => vcs::turn_diff(daemon_v8, thread_id, run_id, ignore_whitespace)?,
+        Source::AllTurns { thread_id } => vcs::full_diff(daemon_v8, thread_id, ignore_whitespace)?,
+        _ => {
+            let wire = v8_source(source).expect("a working-tree source");
+            vcs::review_diff(daemon_v8, root, wire, ignore_whitespace)?
+        }
+    };
+    Ok(parse_collected(
+        source,
+        &diff.numstat,
+        &diff.patch,
+        diff.complete_context,
+    ))
 }
 
 fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> Snapshot {
@@ -811,6 +843,30 @@ pub fn tokenize(language: Option<Lang>, content: &str, carry: Carry) -> (Vec<Tok
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn working_tree_sources_go_to_review_diff_and_turns_do_not() {
+        use waku_client::v8::ReviewDiffSource as Wire;
+        assert_eq!(v8_source(Source::Uncommitted), Some(Wire::Uncommitted));
+        assert_eq!(v8_source(Source::Unstaged), Some(Wire::Unstaged));
+        assert_eq!(v8_source(Source::Staged), Some(Wire::Staged));
+        assert_eq!(v8_source(Source::Committed), Some(Wire::Committed));
+        assert_eq!(v8_source(Source::Branch), Some(Wire::Branch));
+        assert_eq!(
+            v8_source(Source::Turn {
+                thread_id: Uuid::nil(),
+                run_id: Uuid::nil(),
+                turn_count: 1,
+            }),
+            None
+        );
+        assert_eq!(
+            v8_source(Source::AllTurns {
+                thread_id: Uuid::nil()
+            }),
+            None
+        );
+    }
 
     #[test]
     fn parses_file_headers_gaps_line_numbers_and_syntax() {

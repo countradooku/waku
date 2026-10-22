@@ -18,6 +18,15 @@ pub use waku_protocol::workspace::{
 };
 
 pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult> {
+    execute_in(operation, None)
+}
+
+/// Like [`execute`], creating new worktrees beneath `worktree_root` (the
+/// configured managed folder) instead of the default one.
+pub fn execute_in(
+    operation: WorkspaceOperation,
+    worktree_root: Option<&Path>,
+) -> anyhow::Result<WorkspaceResult> {
     let repository_lock = match &operation {
         WorkspaceOperation::StageFiles { cwd, .. }
         | WorkspaceOperation::Pull { cwd }
@@ -63,12 +72,6 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
                 filesystem_root,
             }
         }
-        WorkspaceOperation::ReadTextFile {
-            root,
-            relative_path,
-        } => WorkspaceResult::TextFile {
-            content: fs::read_to_string(resolve_workspace_path(&root, &relative_path)?)?,
-        },
         WorkspaceOperation::WriteTextFile {
             root,
             relative_path,
@@ -91,16 +94,6 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
                 binary_override.as_deref(),
             ),
         },
-        WorkspaceOperation::CreateProjectlessWorkspace { prompt } => {
-            WorkspaceResult::ProjectlessWorkspace {
-                cwd: crate::projectless::create_workspace(prompt.as_deref())?.cwd,
-            }
-        }
-        WorkspaceOperation::MigrateProjectlessWorkspace { path } => {
-            WorkspaceResult::ProjectlessWorkspace {
-                cwd: crate::projectless::migrate_workspace(&path)?.cwd,
-            }
-        }
         WorkspaceOperation::InspectBranches { cwd } => WorkspaceResult::Branches {
             snapshot: crate::git_branch::inspect(&cwd)?,
         },
@@ -122,13 +115,23 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
             prompt,
             base_branch,
         } => WorkspaceResult::WorktreeCreated {
-            worktree: crate::worktree::create(
-                &project_path,
-                project_id,
-                session_id,
-                &prompt,
-                base_branch.as_deref(),
-            )?,
+            worktree: match worktree_root {
+                Some(root) => crate::worktree::create_in(
+                    &project_path,
+                    root,
+                    project_id,
+                    session_id,
+                    &prompt,
+                    base_branch.as_deref(),
+                )?,
+                None => crate::worktree::create(
+                    &project_path,
+                    project_id,
+                    session_id,
+                    &prompt,
+                    base_branch.as_deref(),
+                )?,
+            },
         },
         WorkspaceOperation::InspectCommit { cwd } => WorkspaceResult::CommitSnapshot {
             snapshot: crate::git_commit::inspect(&cwd)?,
@@ -168,75 +171,6 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
         }
         WorkspaceOperation::Push { cwd } => {
             crate::git_commit::push(&cwd)?;
-            WorkspaceResult::Ack
-        }
-        WorkspaceOperation::CaptureTurnStart {
-            cwd,
-            session_id,
-            turn_count,
-        } => {
-            crate::checkpoint::capture_turn_start(&cwd, session_id, turn_count)?;
-            WorkspaceResult::Ack
-        }
-        WorkspaceOperation::CaptureTurn {
-            cwd,
-            session_id,
-            turn_count,
-        } => WorkspaceResult::Checkpoint {
-            checkpoint: crate::checkpoint::capture_turn(&cwd, session_id, turn_count)?,
-        },
-        WorkspaceOperation::CaptureRef { cwd, git_ref } => {
-            crate::checkpoint::capture_ref(&cwd, &git_ref)?;
-            WorkspaceResult::Ack
-        }
-        WorkspaceOperation::RestoreRef { cwd, git_ref } => {
-            crate::checkpoint::restore_ref(&cwd, &git_ref)?;
-            WorkspaceResult::Ack
-        }
-        WorkspaceOperation::HasRef { cwd, git_ref } => WorkspaceResult::Bool {
-            value: crate::checkpoint::has_ref(&cwd, &git_ref),
-        },
-        WorkspaceOperation::SessionTurnRefs { cwd, session_id } => {
-            let mut turn_counts = crate::checkpoint::session_turn_refs(&cwd, session_id)
-                .into_iter()
-                .collect::<Vec<_>>();
-            turn_counts.sort_unstable();
-            WorkspaceResult::TurnRefs { turn_counts }
-        }
-        WorkspaceOperation::DeleteRef { cwd, git_ref } => {
-            crate::checkpoint::delete_ref(&cwd, &git_ref)?;
-            WorkspaceResult::Ack
-        }
-        WorkspaceOperation::DeleteTurnRefsAfter {
-            cwd,
-            session_id,
-            retained_turn_count,
-            previous_turn_count,
-        } => {
-            crate::checkpoint::delete_turn_refs_after(
-                &cwd,
-                session_id,
-                retained_turn_count,
-                previous_turn_count,
-            )?;
-            WorkspaceResult::Ack
-        }
-        WorkspaceOperation::DeleteSessionRefs { cwd, session_id } => {
-            crate::checkpoint::delete_all_session_refs(&cwd, session_id)?;
-            WorkspaceResult::Ack
-        }
-        WorkspaceOperation::CopySessionRefs {
-            cwd,
-            source_session_id,
-            target_session_id,
-            through_turn_count,
-        } => {
-            crate::checkpoint::copy_session_refs(
-                &cwd,
-                source_session_id,
-                target_session_id,
-                through_turn_count,
-            )?;
             WorkspaceResult::Ack
         }
         WorkspaceOperation::CollectReviewDiff {
@@ -363,30 +297,49 @@ fn collect_review_diff(
     })
 }
 
+/// A checkpoint-to-checkpoint diff (`threads.turnDiff`, `threads.fullDiff`):
+/// `numstat`, and the patch with full context when it is small enough (as
+/// `review.diff` collects it). Both refs must resolve in `cwd`.
+pub struct RefDiff {
+    pub numstat: String,
+    pub patch: String,
+    pub complete_context: bool,
+}
+
+pub fn collect_ref_diff(
+    cwd: &Path,
+    from: &str,
+    to: &str,
+    ignore_whitespace: bool,
+) -> anyhow::Result<RefDiff> {
+    ensure_repository(cwd)?;
+    let resolved = |git_ref: &str| {
+        resolve(cwd, git_ref).ok_or_else(|| anyhow!("checkpoint `{git_ref}` is unavailable"))
+    };
+    let range = DiffRange {
+        from: resolved(from)?,
+        to: resolved(to)?,
+    };
+    let numstat = diff_output(cwd, &range, &["--numstat"], ignore_whitespace)?;
+    let hydrated = diff_output(cwd, &range, &["--unified=2147483647"], ignore_whitespace)?;
+    let (patch, complete_context) = if hydrated.len() <= MAX_HYDRATED_PATCH_BYTES {
+        (hydrated, true)
+    } else {
+        (
+            diff_output(cwd, &range, &["--unified=3"], ignore_whitespace)?,
+            false,
+        )
+    };
+    Ok(RefDiff {
+        numstat,
+        patch,
+        complete_context,
+    })
+}
+
 fn resolve_diff_range(cwd: &Path, source: ReviewDiffSource) -> anyhow::Result<DiffRange> {
     let head = resolve(cwd, "HEAD").unwrap_or_else(|| EMPTY_TREE.to_owned());
     Ok(match source {
-        ReviewDiffSource::LastTurn {
-            session_id,
-            turn_count,
-            ..
-        } => {
-            if turn_count == 0 {
-                bail!("the first checkpoint is a baseline, not a completed turn");
-            }
-            let diff_base_ref = crate::checkpoint::turn_diff_base_ref(session_id, turn_count);
-            let start_ref = crate::checkpoint::turn_start_ref(session_id, turn_count);
-            let legacy_ref = crate::checkpoint::checkpoint_ref(session_id, turn_count - 1);
-            let to_ref = crate::checkpoint::checkpoint_ref(session_id, turn_count);
-            DiffRange {
-                from: resolve(cwd, &diff_base_ref)
-                    .or_else(|| resolve(cwd, &start_ref))
-                    .or_else(|| resolve(cwd, &legacy_ref))
-                    .ok_or_else(|| anyhow!("the turn's starting checkpoint is unavailable"))?,
-                to: resolve(cwd, &to_ref)
-                    .ok_or_else(|| anyhow!("the turn's ending checkpoint is unavailable"))?,
-            }
-        }
         ReviewDiffSource::Uncommitted => DiffRange {
             from: head,
             to: crate::checkpoint::capture_worktree_commit(cwd)?,
@@ -655,34 +608,6 @@ mod tests {
     }
 
     #[test]
-    fn file_reader_keeps_the_complete_disk_content() {
-        let root = std::env::temp_dir().join(format!("waku-editor-file-{}", Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let content = "line\n".repeat(10_000);
-        fs::write(root.join("large.txt"), &content).unwrap();
-
-        let WorkspaceResult::TextFile { content: restored } =
-            execute(WorkspaceOperation::ReadTextFile {
-                root: root.clone(),
-                relative_path: PathBuf::from("large.txt"),
-            })
-            .unwrap()
-        else {
-            panic!("unexpected workspace response")
-        };
-        assert_eq!(restored, content);
-        assert!(
-            execute(WorkspaceOperation::ReadTextFile {
-                root: root.clone(),
-                relative_path: PathBuf::from("missing.txt"),
-            })
-            .is_err()
-        );
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn source_modes_compare_consistent_git_snapshots() {
         let root = repository();
         git_ok(&root, &["switch", "-c", "feature"]);
@@ -773,93 +698,5 @@ mod tests {
             "fn  baseline() { }\nfn added() {}\n"
         );
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn last_turn_uses_captured_checkpoints_not_the_live_worktree() {
-        let root = repository();
-        let session_id = Uuid::new_v4();
-        crate::checkpoint::capture_turn(&root, session_id, 0).unwrap();
-        fs::write(
-            root.join("src/lib.rs"),
-            "fn baseline() {}\nfn from_turn() {}\n",
-        )
-        .unwrap();
-        crate::checkpoint::capture_turn(&root, session_id, 1).unwrap();
-        fs::write(
-            root.join("src/lib.rs"),
-            "fn baseline() {}\nfn from_turn() {}\nfn after_turn() {}\n",
-        )
-        .unwrap();
-
-        let data = collect(
-            &root,
-            ReviewDiffSource::LastTurn {
-                session_id,
-                turn_id: Uuid::new_v4(),
-                turn_count: 1,
-            },
-        );
-        assert_eq!(numstat_summary(&data.numstat), (1, 1, 0));
-        assert!(data.patch.contains("from_turn"));
-        assert!(!data.patch.contains("after_turn"));
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn last_turn_review_uses_the_branch_aware_diff_base() {
-        let root = repository();
-        git_ok(&root, &["switch", "-c", "feature"]);
-        fs::write(root.join("feature-only.rs"), "fn feature() {}\n").unwrap();
-        git_ok(&root, &["add", "feature-only.rs"]);
-        git_ok(
-            &root,
-            &[
-                "-c",
-                "user.name=Waku Tests",
-                "-c",
-                "user.email=waku@example.com",
-                "commit",
-                "-m",
-                "feature baseline",
-            ],
-        );
-        git_ok(&root, &["switch", "main"]);
-        fs::write(root.join("main-only.rs"), "fn main_only() {}\n").unwrap();
-        git_ok(&root, &["add", "main-only.rs"]);
-        git_ok(
-            &root,
-            &[
-                "-c",
-                "user.name=Waku Tests",
-                "-c",
-                "user.email=waku@example.com",
-                "commit",
-                "-m",
-                "main baseline",
-            ],
-        );
-
-        let session_id = Uuid::new_v4();
-        crate::checkpoint::capture_turn_start(&root, session_id, 1).unwrap();
-        git_ok(&root, &["switch", "feature"]);
-        fs::write(
-            root.join("src/lib.rs"),
-            "fn baseline() {}\nfn from_turn() {}\n",
-        )
-        .unwrap();
-        crate::checkpoint::capture_turn(&root, session_id, 1).unwrap();
-
-        let data = collect(
-            &root,
-            ReviewDiffSource::LastTurn {
-                session_id,
-                turn_id: Uuid::new_v4(),
-                turn_count: 1,
-            },
-        );
-        assert_eq!(numstat_summary(&data.numstat), (1, 1, 0));
-        assert!(data.numstat.ends_with("\tsrc/lib.rs\n"));
-        fs::remove_dir_all(root).ok();
     }
 }

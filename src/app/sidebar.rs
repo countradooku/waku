@@ -222,7 +222,7 @@ const SIDEBAR_PROJECT_REVEAL_BATCH: usize = 30;
 /// The session row's trailing time: how long the live turn has been working,
 /// or how long ago the agent last replied. A session that has never replied
 /// shows nothing.
-pub(super) fn session_time_label(session: &AgentSession, now: u64) -> Option<String> {
+pub(super) fn session_time_label(session: &ThreadView, now: u64) -> Option<String> {
     if session.status == SessionStatus::Background {
         return Some(tr!("sidebar.status_background"));
     }
@@ -245,39 +245,11 @@ pub(super) fn session_time_label(session: &AgentSession, now: u64) -> Option<Str
 /// Recency for sidebar ordering and date groups. A submitted turn promotes the
 /// task immediately, while metadata edits such as a rename do not; a task with
 /// no turns stays anchored to when it was created.
-fn sidebar_session_timestamp(session: &AgentSession) -> u64 {
+fn sidebar_session_timestamp(session: &ThreadView) -> u64 {
     session.last_reply_at.unwrap_or(session.created_at)
 }
 
-/// Everything one sidebar row (and the row order) reads from its session, at
-/// the granularity the row draws it. The event pump compares this across a
-/// drain to decide whether streaming touched the sidebar at all: text and
-/// reasoning deltas move `updated_at` and the transcript but none of these.
-///
-/// Time-derived labels ("Working for 12s", "5m") are not in here; they move
-/// with the clock, not with events, and the time-label wake repaints them.
-pub(super) fn sidebar_session_fingerprint(session: &AgentSession) -> u64 {
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    session.id.hash(&mut hasher);
-    session.project_id.hash(&mut hasher);
-    session.has_started().hash(&mut hasher);
-    (session.status as u8).hash(&mut hasher);
-    session.display_title().hash(&mut hasher);
-    sidebar_session_timestamp(session).hash(&mut hasher);
-    session.last_reply_at.hash(&mut hasher);
-    persisted_sidebar_branch_label(&session.workspace).hash(&mut hasher);
-    matches!(&session.workspace, SessionWorkspace::Local).hash(&mut hasher);
-    session
-        .turns
-        .last()
-        .map(|turn| (turn.status as u8, turn.started_at))
-        .hash(&mut hasher);
-    hasher.finish()
-}
-
-fn sort_sidebar_sessions(sessions: &mut Vec<&AgentSession>, ordering: SidebarOrdering) {
+fn sort_sidebar_sessions(sessions: &mut Vec<&ThreadView>, ordering: SidebarOrdering) {
     match ordering {
         SidebarOrdering::Newest => {
             sessions.sort_by_key(|session| std::cmp::Reverse(sidebar_session_timestamp(session)))
@@ -289,7 +261,7 @@ fn sort_sidebar_sessions(sessions: &mut Vec<&AgentSession>, ordering: SidebarOrd
 }
 
 fn project_sidebar_groups(
-    sessions: &[&AgentSession],
+    sessions: &[&ThreadView],
     projectless_project_ids: &HashSet<Uuid>,
 ) -> Vec<(SidebarGroup, Vec<Uuid>)> {
     let mut groups: Vec<(SidebarGroup, Vec<Uuid>)> = Vec::new();
@@ -991,13 +963,13 @@ impl Waku {
         }
 
         let mut fingerprint = 0xb4a7_c4e5_51de_ba11;
-        for session in &self.state.sessions {
+        for session in self.threads.listed() {
             if session.has_started() && matches!(&session.workspace, SessionWorkspace::Local) {
                 fingerprint = mix_uuid(fingerprint, session.id);
                 fingerprint = mix_uuid(fingerprint, session.project_id);
             }
         }
-        for project in &self.state.projects {
+        for project in self.projects() {
             fingerprint = mix_uuid(fingerprint, project.id);
         }
         if self.sidebar_branch_scan_fingerprint.get() == Some(fingerprint) {
@@ -1008,9 +980,8 @@ impl Waku {
         self.sidebar_branch_scan_generation.set(generation);
 
         let local_project_ids = self
-            .state
-            .sessions
-            .iter()
+            .threads
+            .listed()
             .filter(|session| {
                 session.has_started() && matches!(&session.workspace, SessionWorkspace::Local)
             })
@@ -1018,8 +989,7 @@ impl Waku {
             .collect::<HashSet<_>>();
         let projectless_root = crate::projectless::workspace_root();
         let paths = self
-            .state
-            .projects
+            .projects()
             .iter()
             .filter(|project| local_project_ids.contains(&project.id))
             .filter(|project| !sidebar_project_is_projectless(project, projectless_root.as_deref()))
@@ -1030,19 +1000,15 @@ impl Waku {
             return;
         }
 
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let labels = cx
                 .background_executor()
                 .spawn(async move {
                     let mut labels = HashMap::new();
                     for path in paths {
-                        let branch = match workspace.request(
-                            waku_client::WorkspaceOperation::InspectBranches { cwd: path.clone() },
-                        ) {
-                            Ok(waku_client::WorkspaceResult::Branches {
-                                snapshot: Some(snapshot),
-                            }) => snapshot.display_branch().map(str::to_owned),
+                        let branch = match waku_client::surfaces::vcs::refs(&daemon_v8, &path) {
+                            Ok(Some(snapshot)) => snapshot.display_branch().map(str::to_owned),
                             _ => None,
                         };
                         if let Some(branch) = branch {
@@ -1212,7 +1178,7 @@ impl Waku {
                 SidebarOrdering::Oldest => 2,
             },
         );
-        for session in &self.state.sessions {
+        for session in self.threads.listed() {
             if !session.has_started() {
                 continue;
             }
@@ -1230,7 +1196,7 @@ impl Waku {
             }
         }
         if self.state.sidebar_grouping == SidebarGrouping::Project {
-            for project in &self.state.projects {
+            for project in self.projects() {
                 fingerprint = mix_uuid(fingerprint, project.id);
             }
             // A map has no stable iteration order; combine order-independently.
@@ -1267,9 +1233,8 @@ impl Waku {
     /// the current grouping and ordering preferences.
     fn sidebar_rows(&self, today: NaiveDate, now: u64) -> Vec<SidebarRow> {
         let mut sorted_sessions = self
-            .state
-            .sessions
-            .iter()
+            .threads
+            .listed()
             .filter(|session| session.has_started())
             .collect::<Vec<_>>();
         sort_sidebar_sessions(&mut sorted_sessions, self.state.sidebar_ordering);
@@ -1306,8 +1271,7 @@ impl Waku {
                     .collect::<HashMap<_, _>>();
                 let projectless_root = crate::projectless::workspace_root();
                 let projectless_project_ids = self
-                    .state
-                    .projects
+                    .projects()
                     .iter()
                     .filter(|project| {
                         sidebar_project_is_projectless(project, projectless_root.as_deref())
@@ -1347,12 +1311,11 @@ impl Waku {
                     self.state
                         .selected_project
                         .and_then(|project_id| {
-                            self.state
-                                .projects
+                            self.projects()
                                 .iter()
                                 .find(|project| project.id == project_id)
                         })
-                        .or_else(|| self.state.projects.first())
+                        .or_else(|| self.projects().first())
                         .map(|project| {
                             if sidebar_project_is_projectless(project, projectless_root.as_deref())
                             {
@@ -1452,8 +1415,7 @@ impl Waku {
         let label = match group {
             SidebarGroup::Updated(group) => group.label(),
             SidebarGroup::Project(project_id) => self
-                .state
-                .projects
+                .projects()
                 .iter()
                 .find(|project| project.id == project_id)
                 .map(Project::display_name)
@@ -1764,9 +1726,8 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         let Some(title) = self
-            .state
-            .sessions
-            .iter()
+            .threads
+            .listed()
             .find(|session| session.id == session_id)
             .map(localized_session_title)
         else {
@@ -1795,18 +1756,17 @@ impl Waku {
             .to_owned();
         let should_update = !title.is_empty()
             && self
-                .state
-                .sessions
-                .iter()
+                .threads
+                .listed()
                 .find(|session| session.id == session_id)
                 .is_some_and(|session| session.title != title);
-        if should_update
-            && self
-                .state
-                .session_mut(session_id)
-                .is_some_and(|session| session.set_title(&title))
-        {
-            self.save();
+        if should_update {
+            if let Some(draft) = self.threads.drafts.get_mut(&session_id) {
+                draft.title = title;
+                draft.title_source = waku_protocol::orchestration::TitleSource::User;
+            } else if let Some(command) = waku_client::commands::rename(session_id, &title) {
+                self.dispatch(command, ThreadAction::Other);
+            }
         }
         cx.notify();
     }
@@ -1823,9 +1783,8 @@ impl Waku {
     fn render_sidebar_session_item(&self, session_id: Uuid, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
         let Some(session) = self
-            .state
-            .sessions
-            .iter()
+            .threads
+            .listed()
             .find(|session| session.id == session_id)
         else {
             return div().into_any_element();
@@ -1841,8 +1800,7 @@ impl Waku {
             SessionStatus::Connecting | SessionStatus::Working
         );
         let project = self
-            .state
-            .projects
+            .projects()
             .iter()
             .find(|project| project.id == session.project_id);
         let grouped_by_project = self.state.sidebar_grouping == SidebarGrouping::Project;
@@ -2047,12 +2005,17 @@ impl Waku {
                 &menu,
                 move |_| {
                     let rename_waku = waku.clone();
+                    let archive_waku = waku.clone();
                     let remove_waku = waku.clone();
                     vec![
                         MenuItem::new(tr!("common.rename"), move |window, cx| {
                             let _ = rename_waku.update(cx, |waku, cx| {
                                 waku.begin_session_rename(session_id, window, cx);
                             });
+                        }),
+                        MenuItem::new(tr!("session.archive"), move |_, cx| {
+                            let _ = archive_waku
+                                .update(cx, |waku, cx| waku.archive_session(session_id, cx));
                         }),
                         MenuItem::Separator,
                         MenuItem::new(tr!("common.remove"), move |_, cx| {
@@ -2388,7 +2351,7 @@ impl Waku {
     pub(crate) fn startup_snapshot(&self) -> Option<crate::startup::snapshot::SidebarSnapshot> {
         use crate::startup::snapshot::{MAX_ROWS, ShellSettings, SidebarSnapshot, SnapshotRow};
 
-        if !self.store.task_state_loaded() {
+        if !self.threads.shell.synchronized {
             return None;
         }
         let rows = self.sidebar_rows_cached(Local::now().date_naive(), unix_time());
@@ -2405,8 +2368,7 @@ impl Waku {
                     label: match group {
                         SidebarGroup::Updated(group) => group.label(),
                         SidebarGroup::Project(project_id) => self
-                            .state
-                            .projects
+                            .projects()
                             .iter()
                             .find(|project| project.id == project_id)
                             .map(Project::display_name)
@@ -2415,9 +2377,8 @@ impl Waku {
                     },
                 }),
                 SidebarRow::Session(session_id) => self
-                    .state
-                    .sessions
-                    .iter()
+                    .threads
+                    .listed()
                     .find(|session| session.id == session_id)
                     .map(|session| SnapshotRow::Session {
                         title: localized_session_title(session),
@@ -2440,9 +2401,9 @@ impl Waku {
     }
 }
 
-fn localized_session_title(session: &AgentSession) -> String {
+fn localized_session_title(session: &ThreadView) -> String {
     let title = session.display_title();
-    if title == AgentSession::DEFAULT_TITLE {
+    if title == waku_client::thread_view::DEFAULT_TITLE {
         tr!("session.new_task")
     } else {
         title.to_owned()
@@ -2583,12 +2544,14 @@ mod tests {
     #[test]
     fn sidebar_recency_uses_last_reply_with_creation_fallback() {
         let project_id = Uuid::new_v4();
-        let mut renamed_old_session = AgentSession::new(project_id, ProviderKind::Codex);
+        let mut renamed_old_session =
+            super::test_support::test_session(project_id, ProviderKind::Codex);
         renamed_old_session.created_at = 10;
         renamed_old_session.last_reply_at = Some(20);
         renamed_old_session.updated_at = 1_000;
 
-        let mut newer_unanswered_session = AgentSession::new(project_id, ProviderKind::Codex);
+        let mut newer_unanswered_session =
+            super::test_support::test_session(project_id, ProviderKind::Codex);
         newer_unanswered_session.created_at = 30;
         newer_unanswered_session.last_reply_at = None;
         newer_unanswered_session.updated_at = 30;
@@ -2608,9 +2571,9 @@ mod tests {
     fn project_grouping_preserves_global_group_and_session_order() {
         let first_project = Uuid::from_u128(1);
         let second_project = Uuid::from_u128(2);
-        let first = AgentSession::new(first_project, ProviderKind::Codex);
-        let second = AgentSession::new(second_project, ProviderKind::Codex);
-        let third = AgentSession::new(first_project, ProviderKind::Codex);
+        let first = super::test_support::test_session(first_project, ProviderKind::Codex);
+        let second = super::test_support::test_session(second_project, ProviderKind::Codex);
+        let third = super::test_support::test_session(first_project, ProviderKind::Codex);
 
         let groups = project_sidebar_groups(&[&second, &first, &third], &HashSet::new());
 
@@ -2631,9 +2594,11 @@ mod tests {
         let ordinary_project = Uuid::from_u128(1);
         let first_projectless_project = Uuid::from_u128(2);
         let second_projectless_project = Uuid::from_u128(3);
-        let first_projectless = AgentSession::new(first_projectless_project, ProviderKind::Codex);
-        let ordinary = AgentSession::new(ordinary_project, ProviderKind::Codex);
-        let second_projectless = AgentSession::new(second_projectless_project, ProviderKind::Codex);
+        let first_projectless =
+            super::test_support::test_session(first_projectless_project, ProviderKind::Codex);
+        let ordinary = super::test_support::test_session(ordinary_project, ProviderKind::Codex);
+        let second_projectless =
+            super::test_support::test_session(second_projectless_project, ProviderKind::Codex);
 
         let groups = project_sidebar_groups(
             &[&first_projectless, &ordinary, &second_projectless],

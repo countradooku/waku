@@ -14,11 +14,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::DaemonClient;
-use waku_protocol::{
-    APP_EXECUTABLE_ENV, Command, DAEMON_TOKEN_ENV, DaemonReady, DaemonSettings, PROTOCOL_VERSION,
-    ResponsePayload,
-};
+use crate::V8Client;
+use waku_protocol::v8::PROTOCOL_MAJOR;
+use waku_protocol::{APP_EXECUTABLE_ENV, DAEMON_TOKEN_ENV, DaemonReady};
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// How often a development supervisor (`watch_for_rebuilds`, which only
@@ -31,8 +29,6 @@ const REBUILD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// unreachable, never while it is healthy.
 const MIN_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(2);
-/// Settings writes that fail are retried after this.
-const SETTINGS_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 pub const DEFAULT_EXPOSED_DAEMON_PORT: u16 = 34_123;
 
 /// Desktop-owned launch configuration for the daemon it supervises.
@@ -48,6 +44,11 @@ pub struct DaemonExposureSettings {
     pub port: u16,
     pub allowed_origins: Vec<String>,
     pub token: String,
+    /// Keep the daemon the desktop starts running after the desktop quits
+    /// (#58): it is spawned without `--parent-pid`, detached, logging to the
+    /// service log, with its token in the local token file, and the next
+    /// launch attaches to it.
+    pub keep_running: bool,
 }
 
 impl Default for DaemonExposureSettings {
@@ -57,6 +58,7 @@ impl Default for DaemonExposureSettings {
             port: DEFAULT_EXPOSED_DAEMON_PORT,
             allowed_origins: vec!["http://localhost:3001".into()],
             token: Self::new_token(),
+            keep_running: false,
         }
     }
 }
@@ -136,8 +138,93 @@ pub fn parse_allowed_origins(text: &str) -> anyhow::Result<Vec<String>> {
 }
 
 pub struct DaemonProcess {
-    client: DaemonClient,
+    client: V8Client,
     child: Child,
+    /// Where the desktop reaches this daemon, and its token: what a second,
+    /// protocol v8 connection needs.
+    address: String,
+    token: String,
+    /// Stopped with the desktop. A `keep_running` daemon is not.
+    owned: bool,
+    stopped: bool,
+}
+
+/// What a launching desktop does with the daemon (#58).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Launch {
+    /// A daemon already answers on the local socket (the background
+    /// service, or one an earlier desktop left running): use it.
+    Attach,
+    /// Spawn a child that follows the desktop (`--parent-pid`).
+    SpawnOwned,
+    /// Spawn a detached child that outlives the desktop.
+    SpawnDetached,
+}
+
+/// Attach when something answers; otherwise spawn, detached with
+/// `keep_running`.
+fn launch_decision(running_daemon_answers: bool, keep_running: bool) -> Launch {
+    match (running_daemon_answers, keep_running) {
+        (true, _) => Launch::Attach,
+        (false, true) => Launch::SpawnDetached,
+        (false, false) => Launch::SpawnOwned,
+    }
+}
+
+/// A daemon that answered on the local socket with the local token.
+struct RunningDaemon {
+    client: V8Client,
+    address: String,
+    token: String,
+}
+
+/// Looks for a running daemon (#58): the local socket must exist (on Unix;
+/// a named pipe is only found by connecting) and the handshake must succeed
+/// with the token in `token_path`. A desktop-owned daemon writes no token
+/// file, so it is never attached to.
+fn probe_running_daemon(socket: &Path, token_path: &Path) -> Option<RunningDaemon> {
+    if cfg!(unix) && !socket.exists() {
+        return None;
+    }
+    let token = std::fs::read_to_string(token_path).ok()?.trim().to_owned();
+    if token.is_empty() {
+        return None;
+    }
+    let address = crate::local_endpoint_address(&socket.to_string_lossy());
+    let client = V8Client::connect(&address, token.clone()).ok()?;
+    Some(RunningDaemon {
+        client,
+        address,
+        token,
+    })
+}
+
+/// Writes the local token file (0600 in a 0700 directory), so a detached
+/// daemon can be attached to by the next launch.
+fn write_local_token(path: &Path, token: &str) -> anyhow::Result<()> {
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory)
+            .with_context(|| format!("could not create {}", directory.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    let temporary = path.with_extension("tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .with_context(|| format!("could not write {}", temporary.display()))?;
+    std::io::Write::write_all(&mut file, token.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path).with_context(|| format!("could not write {}", path.display()))
 }
 
 impl DaemonProcess {
@@ -167,9 +254,34 @@ impl DaemonProcess {
         // TCP is opened only for exposure to other devices and browsers.
         command
             .arg("--socket")
-            .arg(waku_protocol::identity::daemon_socket_path())
-            .arg("--parent-pid")
-            .arg(std::process::id().to_string());
+            .arg(waku_protocol::identity::daemon_socket_path());
+        let mut stderr = Stdio::inherit();
+        if settings.keep_running {
+            // Outlives the desktop (#58): no parent to follow, its own
+            // process group (a terminal's Ctrl-C to the app does not reach
+            // it), output in the service log, the token where the next
+            // launch finds it.
+            write_local_token(&waku_protocol::identity::local_token_path(), &token)?;
+            let log = waku_protocol::identity::daemon_log_path();
+            if let Some(directory) = log.parent() {
+                std::fs::create_dir_all(directory)?;
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .with_context(|| format!("could not open {}", log.display()))?;
+            stderr = Stdio::from(file);
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt as _;
+                command.process_group(0);
+            }
+        } else {
+            command
+                .arg("--parent-pid")
+                .arg(std::process::id().to_string());
+        }
         if let Some(bind) = settings.bind_address() {
             command.arg("--bind").arg(bind).arg("--allow-non-loopback");
         }
@@ -181,7 +293,7 @@ impl DaemonProcess {
             .env(APP_EXECUTABLE_ENV, app_executable)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(stderr)
             .spawn()
             .with_context(|| format!("could not launch {}", executable.display()))?;
         let stdout = child
@@ -218,13 +330,12 @@ impl DaemonProcess {
                 bail!("timed out waiting for Waku daemon: {error}");
             }
         };
-        if ready.protocol_version != PROTOCOL_VERSION {
+        if ready.protocol_version != u32::from(PROTOCOL_MAJOR) {
             let _ = child.kill();
             let _ = child.wait();
             bail!(
-                "daemon protocol {} does not match desktop protocol {}",
+                "daemon protocol {} does not match desktop protocol {PROTOCOL_MAJOR}",
                 ready.protocol_version,
-                PROTOCOL_VERSION
             );
         }
         let client_address = match ready.socket.as_deref() {
@@ -239,7 +350,7 @@ impl DaemonProcess {
                 return Err(error);
             }
         };
-        let client = match DaemonClient::connect(&client_address, token) {
+        let client = match V8Client::connect(&client_address, token.clone()) {
             Ok(client) => client,
             Err(error) => {
                 let _ = child.kill();
@@ -247,11 +358,14 @@ impl DaemonProcess {
                 return Err(error);
             }
         };
-        Ok(Self { client, child })
-    }
-
-    pub fn client(&self) -> DaemonClient {
-        self.client.clone()
+        Ok(Self {
+            client,
+            child,
+            address: client_address,
+            token,
+            owned: !settings.keep_running,
+            stopped: false,
+        })
     }
 
     fn has_exited(&mut self) -> bool {
@@ -294,7 +408,16 @@ impl DaemonProcess {
     fn notify_on_exit(&self, _wake: Sender<()>) {}
 
     fn stop(&mut self) {
-        self.client.shutdown();
+        if std::mem::replace(&mut self.stopped, true) {
+            return;
+        }
+        // A desktop-owned daemon accepts `daemon.shutdown`; the reply is not
+        // awaited, the child's exit is.
+        let _ = self.client.start::<crate::v8::method::DaemonShutdown>(
+            crate::v8::DaemonShutdownParams {
+                reason: "the desktop stopped its daemon".into(),
+            },
+        );
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         while Instant::now() < deadline {
             match self.child.try_wait() {
@@ -309,8 +432,12 @@ impl DaemonProcess {
 }
 
 impl Drop for DaemonProcess {
+    /// A `keep_running` daemon outlives the desktop: dropping it only lets
+    /// go of the connection.
     fn drop(&mut self) {
-        self.stop();
+        if self.owned {
+            self.stop();
+        }
     }
 }
 
@@ -352,10 +479,6 @@ struct SupervisorInner {
     target: Mutex<DaemonTarget>,
     exposure: Mutex<Option<DaemonExposureSettings>>,
     restart: Mutex<()>,
-    settings: Mutex<DaemonSettings>,
-    persisted_settings: Mutex<Option<DaemonSettings>>,
-    settings_updates: Sender<DaemonSettings>,
-    client_updates: Mutex<Vec<Sender<DaemonClient>>>,
     running: AtomicBool,
     /// Wakes the monitor thread: the child exited, the connection closed,
     /// a restart needs retrying, or the supervisor is gone.
@@ -371,7 +494,7 @@ impl Drop for SupervisorInner {
 
 impl SupervisorInner {
     /// Wake the monitor when `client`'s connection closes.
-    fn watch_client(&self, client: &DaemonClient) {
+    fn watch_client(&self, client: &V8Client) {
         let wake = self.wake.clone();
         client.on_disconnect(move || {
             let _ = wake.send(());
@@ -385,22 +508,35 @@ impl SupervisorInner {
     }
 }
 
+/// The current daemon and the connection the supervisor watches it by.
 enum DaemonTarget {
     Local(DaemonProcess),
-    Restarting(DaemonClient),
+    /// A managed daemon between two processes.
+    Restarting,
     Remote {
-        client: DaemonClient,
+        client: V8Client,
+        address: String,
+        token: String,
+    },
+    /// A daemon that was already running on the local socket (#58): the
+    /// background service, or one an earlier desktop left running. The
+    /// desktop never stops it; when it goes away and cannot be reached
+    /// again, the desktop spawns its own.
+    Service {
+        client: V8Client,
         address: String,
         token: String,
     },
 }
 
 impl DaemonTarget {
-    fn client(&self) -> DaemonClient {
+    fn endpoint(&self) -> Option<(String, String)> {
         match self {
-            Self::Local(process) => process.client(),
-            Self::Restarting(client) => client.clone(),
-            Self::Remote { client, .. } => client.clone(),
+            Self::Local(process) => Some((process.address.clone(), process.token.clone())),
+            Self::Restarting => None,
+            Self::Remote { address, token, .. } | Self::Service { address, token, .. } => {
+                Some((address.clone(), token.clone()))
+            }
         }
     }
 }
@@ -427,17 +563,31 @@ impl DaemonSupervisor {
         exposure: DaemonExposureSettings,
     ) -> anyhow::Result<Self> {
         let exposure = exposure.validate()?;
-        let process = DaemonProcess::spawn_configured(executable, exposure.clone())?;
-        let settings = read_settings(&process.client())?;
+        let running = probe_running_daemon(
+            &waku_protocol::identity::daemon_socket_path(),
+            &waku_protocol::identity::local_token_path(),
+        );
+        let target = match (
+            launch_decision(running.is_some(), exposure.keep_running),
+            running,
+        ) {
+            (Launch::Attach, Some(running)) => DaemonTarget::Service {
+                client: running.client,
+                address: running.address,
+                token: running.token,
+            },
+            _ => DaemonTarget::Local(DaemonProcess::spawn_configured(
+                executable,
+                exposure.clone(),
+            )?),
+        };
         let initial_stamp = ExecutableStamp::read(executable)?;
-        let (supervisor, wake) = Self::from_target(
-            DaemonTarget::Local(process),
-            Some(executable.to_owned()),
-            Some(exposure),
-            settings,
-        )?;
-        if let DaemonTarget::Local(process) = &*supervisor.inner.target.lock() {
-            supervisor.inner.watch_process(process);
+        let (supervisor, wake) =
+            Self::from_target(target, Some(executable.to_owned()), Some(exposure))?;
+        match &*supervisor.inner.target.lock() {
+            DaemonTarget::Local(process) => supervisor.inner.watch_process(process),
+            DaemonTarget::Service { client, .. } => supervisor.inner.watch_client(client),
+            _ => {}
         }
         let weak_inner = Arc::downgrade(&supervisor.inner);
         std::thread::Builder::new()
@@ -452,8 +602,7 @@ impl DaemonSupervisor {
     /// Connect to a daemon managed on another host (or by an external local
     /// service manager). Dropping the desktop never shuts this daemon down.
     pub fn connect(address: &str, token: String) -> anyhow::Result<Self> {
-        let client = DaemonClient::connect(address, token.clone())?;
-        let settings = read_settings(&client)?;
+        let client = V8Client::connect(address, token.clone())?;
         let (supervisor, wake) = Self::from_target(
             DaemonTarget::Remote {
                 client: client.clone(),
@@ -462,7 +611,6 @@ impl DaemonSupervisor {
             },
             None,
             None,
-            settings,
         )?;
         supervisor.inner.watch_client(&client);
         let weak_inner = Arc::downgrade(&supervisor.inner);
@@ -477,55 +625,33 @@ impl DaemonSupervisor {
         target: DaemonTarget,
         executable: Option<PathBuf>,
         exposure: Option<DaemonExposureSettings>,
-        settings: DaemonSettings,
     ) -> anyhow::Result<(Self, Receiver<()>)> {
-        let (settings_updates, settings_update_rx) = unbounded();
         let (wake, wake_rx) = unbounded();
         let inner = Arc::new(SupervisorInner {
             executable,
             target: Mutex::new(target),
             exposure: Mutex::new(exposure),
             restart: Mutex::new(()),
-            settings: Mutex::new(settings),
-            // The desktop sends one normalized snapshot after it has migrated
-            // the legacy combined settings document into app.json.
-            persisted_settings: Mutex::new(None),
-            settings_updates,
-            client_updates: Mutex::new(Vec::new()),
             running: AtomicBool::new(true),
             wake,
         });
-        let weak_inner = Arc::downgrade(&inner);
-        std::thread::Builder::new()
-            .name("waku-daemon-settings".into())
-            .spawn(move || persist_settings(weak_inner, settings_update_rx))
-            .context("could not start Waku daemon settings writer")?;
         Ok((Self { inner }, wake_rx))
-    }
-
-    pub fn client(&self) -> DaemonClient {
-        self.inner.target.lock().client()
-    }
-
-    /// Subscribe to the active daemon connection. The current client is sent
-    /// immediately, followed by each replacement after a managed restart.
-    pub fn subscribe_clients(&self) -> Receiver<DaemonClient> {
-        let (updates, receiver) = unbounded();
-        // Holding the target lock through registration makes the initial send
-        // atomic with respect to replacement: a subscriber sees either the old
-        // client followed by the new one, or the new client directly.
-        let target = self.inner.target.lock();
-        self.inner.client_updates.lock().push(updates.clone());
-        let _ = updates.send(target.client());
-        receiver
     }
 
     pub fn is_remote(&self) -> bool {
         self.inner.executable.is_none()
     }
 
-    pub fn settings(&self) -> DaemonSettings {
-        self.inner.settings.lock().clone()
+    /// Where the current daemon listens and its token, for the desktop's own
+    /// connections; `None` while a restart is in progress.
+    pub fn endpoint(&self) -> Option<(String, String)> {
+        self.inner.target.lock().endpoint()
+    }
+
+    /// The desktop attached to a daemon that was already running (#58)
+    /// instead of spawning one.
+    pub fn is_attached_service(&self) -> bool {
+        matches!(&*self.inner.target.lock(), DaemonTarget::Service { .. })
     }
 
     /// Restart only the desktop-managed daemon with a new listener policy.
@@ -548,14 +674,10 @@ impl DaemonSupervisor {
         match replace_local_daemon(&self.inner, &executable, &exposure) {
             Ok(()) => {
                 *self.inner.exposure.lock() = Some(exposure);
-                queue_settings_refresh(&self.inner);
                 Ok(())
             }
             Err(error) => match replace_local_daemon(&self.inner, &executable, &previous) {
-                Ok(()) => {
-                    queue_settings_refresh(&self.inner);
-                    Err(error)
-                }
+                Ok(()) => Err(error),
                 Err(restore_error) => {
                     // The target is left `Restarting`; the monitor retries
                     // with the previous settings from here.
@@ -566,18 +688,6 @@ impl DaemonSupervisor {
                 }
             },
         }
-    }
-
-    /// Queue a daemon settings update without blocking the desktop UI thread.
-    pub fn update_settings(&self, settings: DaemonSettings) -> anyhow::Result<()> {
-        *self.inner.settings.lock() = settings.clone();
-        if self.inner.persisted_settings.lock().as_ref() == Some(&settings) {
-            return Ok(());
-        }
-        self.inner
-            .settings_updates
-            .send(settings)
-            .map_err(|_| anyhow::anyhow!("Waku daemon settings writer is closed"))
     }
 }
 
@@ -659,8 +769,8 @@ fn local_state(
 ) -> Option<LocalState> {
     let (process_exited, connection_closed) = match &mut *inner.target.lock() {
         DaemonTarget::Local(process) => (process.has_exited(), process.client.is_disconnected()),
-        DaemonTarget::Restarting(_) => (true, true),
-        DaemonTarget::Remote { .. } => return None,
+        DaemonTarget::Restarting => (true, true),
+        DaemonTarget::Remote { .. } | DaemonTarget::Service { .. } => return None,
     };
     let observed_stamp = watch_for_rebuilds
         .then(|| ExecutableStamp::read(executable).ok())
@@ -678,6 +788,9 @@ fn check_daemon(
     active_stamp: &mut Option<ExecutableStamp>,
     watch_for_rebuilds: bool,
 ) -> Check {
+    if let Some(check) = check_service(inner) {
+        return check;
+    }
     let remote_reconnect = {
         let target = inner.target.lock();
         match &*target {
@@ -685,16 +798,11 @@ fn check_daemon(
                 client,
                 address,
                 token,
-            } if client.is_disconnected() => Some((
-                client.clone(),
-                address.clone(),
-                token.clone(),
-                client.last_sequences(),
-            )),
+            } if client.is_disconnected() => Some((client.clone(), address.clone(), token.clone())),
             _ => None,
         }
     };
-    if let Some((disconnected, address, token, resume_from)) = remote_reconnect {
+    if let Some((disconnected, address, token)) = remote_reconnect {
         let _restart = inner.restart.lock();
         let still_current = matches!(
             &*inner.target.lock(),
@@ -704,21 +812,15 @@ fn check_daemon(
         if !still_current {
             return Check::Settled;
         }
-        let Ok(replacement) =
-            DaemonClient::connect_with_resume(&address, token.clone(), resume_from)
-        else {
+        let Ok(replacement) = V8Client::connect(&address, token.clone()) else {
             return Check::Retry;
         };
         inner.watch_client(&replacement);
         *inner.target.lock() = DaemonTarget::Remote {
-            client: replacement.clone(),
+            client: replacement,
             address,
             token,
         };
-        inner
-            .client_updates
-            .lock()
-            .retain(|subscriber| subscriber.send(replacement.clone()).is_ok());
         return Check::Settled;
     }
     let Some(executable) = inner.executable.as_deref() else {
@@ -751,11 +853,53 @@ fn check_daemon(
         eprintln!("could not restart rebuilt Waku daemon: {error:#}");
         return Check::Retry;
     }
-    queue_settings_refresh(inner);
     if let Some(observed_stamp) = state.observed_stamp {
         *active_stamp = Some(observed_stamp);
     }
     Check::Settled
+}
+
+/// An attached service that dropped its connection (#58): reconnect (a
+/// service manager restarts a crashed daemon), else spawn the desktop's own
+/// daemon. `None` when the target is not a disconnected service.
+fn check_service(inner: &SupervisorInner) -> Option<Check> {
+    let (disconnected, address, token) = match &*inner.target.lock() {
+        DaemonTarget::Service {
+            client,
+            address,
+            token,
+        } if client.is_disconnected() => (client.clone(), address.clone(), token.clone()),
+        _ => return None,
+    };
+    let _restart = inner.restart.lock();
+    let still_current = matches!(
+        &*inner.target.lock(),
+        DaemonTarget::Service { client, .. } if client.same_connection(&disconnected)
+    );
+    if !still_current {
+        return Some(Check::Settled);
+    }
+    if let Ok(replacement) = V8Client::connect(&address, token.clone()) {
+        inner.watch_client(&replacement);
+        *inner.target.lock() = DaemonTarget::Service {
+            client: replacement,
+            address,
+            token,
+        };
+        return Some(Check::Settled);
+    }
+    let (Some(executable), Some(exposure)) =
+        (inner.executable.as_deref(), inner.exposure.lock().clone())
+    else {
+        return Some(Check::Retry);
+    };
+    match replace_local_daemon(inner, executable, &exposure) {
+        Ok(()) => Some(Check::Settled),
+        Err(error) => {
+            eprintln!("could not start a Waku daemon after the service went away: {error:#}");
+            Some(Check::Retry)
+        }
+    }
 }
 
 fn replace_local_daemon(
@@ -769,11 +913,10 @@ fn replace_local_daemon(
             DaemonTarget::Remote { .. } => {
                 bail!("the connected daemon is managed outside Waku Desktop")
             }
-            DaemonTarget::Restarting(_) => None,
-            DaemonTarget::Local(process) => {
-                let disconnected = process.client();
-                let previous =
-                    std::mem::replace(&mut *target, DaemonTarget::Restarting(disconnected));
+            // The service is gone; the desktop's own daemon replaces it.
+            DaemonTarget::Restarting | DaemonTarget::Service { .. } => None,
+            DaemonTarget::Local(_) => {
+                let previous = std::mem::replace(&mut *target, DaemonTarget::Restarting);
                 match previous {
                     DaemonTarget::Local(process) => Some(process),
                     _ => unreachable!("local daemon target changed while locked"),
@@ -783,74 +926,15 @@ fn replace_local_daemon(
     };
     // Dropping can wait briefly for graceful shutdown, but the target lock is
     // already released so UI actions never block behind process teardown.
-    drop(previous);
+    // A replaced `keep_running` daemon is stopped too: its successor needs
+    // the socket.
+    if let Some(mut previous) = previous {
+        previous.stop();
+    }
     let replacement = DaemonProcess::spawn_configured(executable, exposure.clone())?;
     inner.watch_process(&replacement);
-    let client = replacement.client();
     *inner.target.lock() = DaemonTarget::Local(replacement);
-    inner
-        .client_updates
-        .lock()
-        .retain(|subscriber| subscriber.send(client.clone()).is_ok());
     Ok(())
-}
-
-fn queue_settings_refresh(inner: &SupervisorInner) {
-    let settings = inner.settings.lock().clone();
-    *inner.persisted_settings.lock() = None;
-    let _ = inner.settings_updates.send(settings);
-}
-
-fn read_settings(client: &DaemonClient) -> anyhow::Result<DaemonSettings> {
-    match client.request(Uuid::nil(), Uuid::nil(), Command::GetSettings)? {
-        ResponsePayload::Settings { settings } => Ok(settings),
-        _ => bail!("Waku daemon returned an invalid settings response"),
-    }
-}
-
-fn persist_settings(
-    weak_inner: std::sync::Weak<SupervisorInner>,
-    updates: Receiver<DaemonSettings>,
-) {
-    while let Ok(mut settings) = updates.recv() {
-        while let Ok(newer) = updates.try_recv() {
-            settings = newer;
-        }
-        loop {
-            let Some(inner) = weak_inner.upgrade() else {
-                return;
-            };
-            if !inner.running.load(Ordering::Acquire) {
-                return;
-            }
-            let desired = inner.settings.lock().clone();
-            if desired != settings {
-                settings = desired;
-            }
-            let client = inner.target.lock().client();
-            let result = client.request(
-                Uuid::nil(),
-                Uuid::nil(),
-                Command::UpdateSettings {
-                    settings: settings.clone(),
-                },
-            );
-            match result {
-                Ok(ResponsePayload::Ack) => {
-                    *inner.persisted_settings.lock() = Some(settings);
-                    break;
-                }
-                Ok(_) => {
-                    eprintln!("Waku daemon returned an invalid settings update response");
-                }
-                Err(error) => {
-                    eprintln!("could not persist Waku daemon settings: {error:#}");
-                }
-            }
-            drop(inner);
-            std::thread::sleep(SETTINGS_RETRY_INTERVAL);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -868,6 +952,53 @@ mod tests {
         );
         assert!(parse_allowed_origins("https://app.waku.test/path").is_err());
         assert!(parse_allowed_origins("ws://app.waku.test").is_err());
+    }
+
+    #[test]
+    fn the_desktop_attaches_to_a_running_daemon_and_spawns_only_without_one() {
+        assert_eq!(launch_decision(true, false), Launch::Attach);
+        assert_eq!(launch_decision(true, true), Launch::Attach);
+        assert_eq!(launch_decision(false, false), Launch::SpawnOwned);
+        assert_eq!(launch_decision(false, true), Launch::SpawnDetached);
+    }
+
+    #[test]
+    fn exposure_settings_keep_the_daemon_owned_by_default() {
+        assert!(!DaemonExposureSettings::default().keep_running);
+        let decoded: DaemonExposureSettings =
+            serde_json::from_str(r#"{"enabled":false,"port":34123,"token":"t"}"#).unwrap();
+        assert!(!decoded.keep_running);
+        let decoded: DaemonExposureSettings =
+            serde_json::from_str(r#"{"keep_running":true}"#).unwrap();
+        assert!(decoded.keep_running);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_socket_no_token_or_no_answer_means_nothing_to_attach_to() {
+        // Short: the socket path must fit `sun_path`.
+        let root = std::path::PathBuf::from("/tmp").join(format!(
+            "wk58-{}",
+            &Uuid::new_v4().simple().to_string()[..8]
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("daemon.sock");
+        let token = root.join("run/local.token");
+        assert!(probe_running_daemon(&socket, &token).is_none(), "no socket");
+        // A socket left behind by a dead daemon.
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        assert!(probe_running_daemon(&socket, &token).is_none(), "no token");
+        write_local_token(&token, "secret").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&token).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(
+            probe_running_daemon(&socket, &token).is_none(),
+            "nothing answers"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -60,9 +60,17 @@ fn retire_images(images: Vec<Arc<gpui::Image>>, cx: &mut App) {
     });
 }
 
+/// An attachment's menu. `can_reveal` is false while the daemon is remote:
+/// the file is on its host, so the item stays visible but disabled and says
+/// why (#61).
 pub(super) fn attachment_menu_items(path: PathBuf, can_reveal: bool) -> Vec<MenuItem> {
+    let label = if can_reveal {
+        tr!("common.reveal_in_finder")
+    } else {
+        tr!("common.reveal_unavailable_remote")
+    };
     vec![
-        MenuItem::new(tr!("common.reveal_in_finder"), move |_, cx| {
+        MenuItem::new(label, move |_, cx| {
             crate::platform::reveal_in_file_manager(&path, cx);
         })
         .icon("icons/folder.svg")
@@ -108,16 +116,19 @@ impl Waku {
         self.cache_image(cache_key, RemoteImageState::Loading, cx);
         let fetch_reference = reference.to_owned();
         let daemon_path = daemon_path.map(Path::to_path_buf);
-        let daemon = self.daemon.clone();
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let image = cx
                 .background_executor()
                 .spawn(async move {
-                    waku_client::persistence::read_remote_reference(
+                    // A local daemon names the file and this process reads
+                    // it; a remote one streams it (`blobDownload`).
+                    waku_client::surfaces::blobs::read_reference(
+                        &daemon_v8,
                         &fetch_reference,
                         daemon_path.as_deref(),
-                        &daemon,
                     )
+                    .ok()
                     .map(|bytes| {
                         // Header-only size probe, off the UI thread.
                         RemoteImageState::ready(Arc::new(gpui::Image::from_bytes(format, bytes)))

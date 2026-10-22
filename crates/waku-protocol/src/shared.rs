@@ -120,14 +120,6 @@ impl<T: Clone> SharedVec<T> {
         self.0.iter_mut().map(Arc::make_mut)
     }
 
-    /// [`Self::iter_mut`] restricted to `range`.
-    pub fn range_mut(
-        &mut self,
-        range: impl std::slice::SliceIndex<[Arc<T>], Output = [Arc<T>]>,
-    ) -> impl DoubleEndedIterator<Item = &mut T> + ExactSizeIterator {
-        self.0[range].iter_mut().map(Arc::make_mut)
-    }
-
     /// The last element matching `matches`, made mutable. Elements that are
     /// only inspected stay shared.
     pub fn rfind_mut(&mut self, mut matches: impl FnMut(&T) -> bool) -> Option<&mut T> {

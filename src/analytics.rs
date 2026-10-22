@@ -122,9 +122,6 @@ pub enum TurnOutcome {
     Completed,
     Failed,
     Cancelled,
-    ProcessExited,
-    StartFailed,
-    PreparationFailed,
 }
 
 impl TurnOutcome {
@@ -133,9 +130,6 @@ impl TurnOutcome {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
-            Self::ProcessExited => "process_exited",
-            Self::StartFailed => "start_failed",
-            Self::PreparationFailed => "preparation_failed",
         }
     }
 }

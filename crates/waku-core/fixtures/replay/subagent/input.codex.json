@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"Spawn one subagent whose only task is to reply with exactly: Hello. Wait for it to finish, then reply with exactly what it said."},{"type":"wait","until":"turn_terminal"}]}

@@ -1,8 +1,9 @@
-import type { AgentSession, ProviderKind, ProviderModel, ProviderProbe } from '@waku/client'
+import type { ProviderModel } from '@waku/client/v8'
 import { Popover } from '@base-ui/react/popover'
 import { useEffect, useRef, useState, type RefObject } from 'react'
-import { ProviderIcon, PROVIDERS, providerMeta, WakuIcon } from '@/components/waku-icon'
+import { ProviderIcon, PROVIDERS, providerMeta, WakuIcon, type ProviderKind } from '@/components/waku-icon'
 import { useDaemonSettings, useProviderProbes } from '@/hooks/use-daemon-data'
+import type { ProviderCatalog } from '@/lib/daemon-api'
 import { useI18n } from '@/lib/i18n'
 import {
   nextModelPickerHighlight,
@@ -13,15 +14,23 @@ import { cn } from '@/lib/utils'
 type PickerTab = 'favorites' | ProviderKind
 
 export function ModelPicker({
-  session,
+  provider,
+  modelId,
+  locked,
+  disabled,
   currentProbe,
   openSignal,
   onOpenSignalHandled,
   onChange,
   returnFocus,
 }: {
-  session: AgentSession
-  currentProbe?: ProviderProbe
+  /** The selected provider instance. */
+  provider: ProviderKind
+  modelId?: string
+  /** The thread has runs, so only this provider's models are offered. */
+  locked: boolean
+  disabled: boolean
+  currentProbe?: ProviderCatalog
   openSignal?: number
   onOpenSignalHandled?: () => void
   onChange: (provider: ProviderKind, model: ProviderModel) => void
@@ -30,7 +39,7 @@ export function ModelPicker({
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const [tab, setTab] = useState<PickerTab>(session.provider)
+  const [tab, setTab] = useState<PickerTab>(provider)
   const [highlight, setHighlight] = useState<number | null>(null)
   const [favorites, setFavorites] = useState<string[]>(() => {
     if (typeof window === 'undefined') return []
@@ -41,12 +50,12 @@ export function ModelPicker({
   const list = useRef<HTMLDivElement>(null)
   const settings = useDaemonSettings()
   const probes = useProviderProbes(open)
-  const lockedProvider = session.messages.length ? session.provider : null
-  const currentModel = currentProbe?.models.find((model) => model.id === session.model)
-    ?? currentProbe?.models.find((model) => model.is_default)
+  const lockedProvider = locked ? provider : null
+  const currentModel = currentProbe?.models.find((model) => model.id === modelId)
+    ?? currentProbe?.models.find((model) => model.isDefault)
     ?? currentProbe?.models[0]
-  const selectedModelId = session.model ?? currentModel?.id
-  const selectedName = currentModel?.name ?? session.model ?? providerMeta(session.provider).shortName
+  const selectedModelId = modelId ?? currentModel?.id
+  const selectedName = currentModel?.name ?? modelId ?? providerMeta(provider).shortName
 
   useEffect(() => {
     if (!openSignal) return
@@ -57,19 +66,19 @@ export function ModelPicker({
   useEffect(() => {
     if (!open) return
     setQuery('')
-    setTab(session.provider)
+    setTab(provider)
     setHighlight(null)
-  }, [open, session.provider])
+  }, [open, provider])
 
   const probeMap = ({
     ...(probes.data ?? {}),
-    ...(currentProbe ? { [session.provider]: currentProbe } : {}),
-  }) as Partial<Record<ProviderKind, ProviderProbe>>
+    ...(currentProbe ? { [provider]: currentProbe } : {}),
+  }) as Partial<Record<ProviderKind, ProviderCatalog>>
 
   const usable = PROVIDERS.filter(({ id }) => {
     if (lockedProvider && id !== lockedProvider) return false
-    if (id === session.provider) return true
-    return !settings.data?.disabled_providers.includes(id) && probeMap[id]?.installed
+    if (id === provider) return true
+    return !settings.data?.disabledProviders?.includes(id) && probeMap[id]?.installed
   })
   const rows = (() => {
     const normalized = query.trim().toLowerCase()
@@ -78,13 +87,13 @@ export function ModelPicker({
       .filter((model) => {
         const key = `${id}:${model.id}`
         if (!normalized && tab === 'favorites' && !favorites.includes(key)) return false
-        return !normalized || `${model.name} ${model.id} ${model.sub_provider ?? ''} ${providerMeta(id).name}`.toLowerCase().includes(normalized)
+        return !normalized || `${model.name} ${model.id} ${model.subProvider ?? ''} ${providerMeta(id).name}`.toLowerCase().includes(normalized)
       })
       .map((model) => ({ provider: id, model })))
   })()
   const selectedIndex = selectedModelPickerIndex(
     rows,
-    session.provider,
+    provider,
     selectedModelId,
   )
 
@@ -115,8 +124,8 @@ export function ModelPicker({
     setOpen(false)
   }
 
-  function toggleFavorite(provider: ProviderKind, model: string) {
-    const key = `${provider}:${model}`
+  function toggleFavorite(rowProvider: ProviderKind, model: string) {
+    const key = `${rowProvider}:${model}`
     setFavorites((current) => {
       const next = current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
       window.localStorage.setItem('waku.favorite-models', JSON.stringify(next))
@@ -132,9 +141,9 @@ export function ModelPicker({
           'flex h-6 max-w-[224px] items-center gap-1.5 rounded-[6px] px-[7px] text-[11.5px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
           open && 'bg-accent text-foreground',
         )}
-        disabled={session.status !== 'idle'}
+        disabled={disabled}
       >
-        <ProviderIcon className="size-[10.5px]" provider={session.provider} />
+        <ProviderIcon className="size-[10.5px]" provider={provider} />
         <span className="truncate">{selectedName}</span>
       </Popover.Trigger>
       <Popover.Portal>
@@ -159,17 +168,17 @@ export function ModelPicker({
               <WakuIcon className="size-[17px]" name="star" />
             </ModelTab>
             <div className="my-[3px] h-px w-[34px] shrink-0 bg-border" />
-            {PROVIDERS.map((provider) => {
-              const enabled = usable.some((candidate) => candidate.id === provider.id)
+            {PROVIDERS.map((entry) => {
+              const enabled = usable.some((candidate) => candidate.id === entry.id)
               return (
                 <ModelTab
-                  active={tab === provider.id && !query}
+                  active={tab === entry.id && !query}
                   disabled={!enabled}
-                  key={provider.id}
-                  label={provider.name}
-                  onClick={() => { setTab(provider.id); setQuery(''); setHighlight(null) }}
+                  key={entry.id}
+                  label={entry.name}
+                  onClick={() => { setTab(entry.id); setQuery(''); setHighlight(null) }}
                 >
-                  <ProviderIcon className="size-[18px]" provider={provider.id} />
+                  <ProviderIcon className="size-[18px]" provider={entry.id} />
                 </ModelTab>
               )
             })}
@@ -226,7 +235,7 @@ export function ModelPicker({
                 </div>
               )}
               {rows.map((row, index) => {
-                const selected = row.provider === session.provider && row.model.id === selectedModelId
+                const selected = row.provider === provider && row.model.id === selectedModelId
                 const favorite = favorites.includes(`${row.provider}:${row.model.id}`)
                 return (
                   <div
@@ -254,7 +263,7 @@ export function ModelPicker({
                       <span className="block truncate text-[13px] font-semibold">{row.model.name}</span>
                       <span className="mt-1 flex items-center gap-1.5 truncate text-[11px] text-[var(--text-tertiary)]">
                         <ProviderIcon className="size-[10.5px]" provider={row.provider} />
-                        {row.model.sub_provider ?? providerMeta(row.provider).name}
+                        {row.model.subProvider ?? providerMeta(row.provider).name}
                       </span>
                     </span>
                     <span

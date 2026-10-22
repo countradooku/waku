@@ -1,0 +1,1 @@
+{"type":"items","channel":5,"items":[{"type":"replace","text":"running 3 tests\n","truncated":false,"running":true},{"type":"append","text":"test a ... ok\n"},{"type":"finished","exitCode":101,"truncated":false}]}

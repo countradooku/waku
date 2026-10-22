@@ -55,27 +55,15 @@ impl Waku {
             Query::Pending => fallback,
             Query::Missing(token) => {
                 let fetch_path = workspace_path.clone();
-                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+                let daemon_v8 = self.daemon_v8.clone();
                 cx.spawn(async move |waku, cx| {
                     let result = cx
                         .background_executor()
                         .spawn({
                             let fetch_path = fetch_path.clone();
                             async move {
-                                match workspace.request(
-                                    waku_client::WorkspaceOperation::InspectBranches {
-                                        cwd: fetch_path.clone(),
-                                    },
-                                ) {
-                                    Ok(waku_client::WorkspaceResult::Branches { snapshot }) => {
-                                        Ok(snapshot)
-                                    }
-                                    Ok(_) => {
-                                        Err("the daemon returned an invalid branch response"
-                                            .to_owned())
-                                    }
-                                    Err(error) => Err(error.to_string()),
-                                }
+                                waku_client::surfaces::vcs::refs(&daemon_v8, &fetch_path)
+                                    .map_err(|error| error.to_string())
                             }
                         })
                         .await;
@@ -97,7 +85,7 @@ impl Waku {
                                 Ok(Some(snapshot)) => {
                                     let mut persisted_branch_changed = false;
                                     if let Some(current) = snapshot.current.as_deref()
-                                        && let Some(session) = waku.selected_session_mut()
+                                        && let Some(session) = waku.selected_draft_mut()
                                         && let SessionWorkspace::Worktree { branch, .. } =
                                             &mut session.workspace
                                         && branch != current
@@ -154,7 +142,7 @@ impl Waku {
             return false;
         }
         if matches!(session.workspace, SessionWorkspace::NewWorktree { .. }) {
-            let changed = self.selected_session_mut().is_some_and(|session| {
+            let changed = self.selected_draft_mut().is_some_and(|session| {
                 let SessionWorkspace::NewWorktree { base_branch } = &mut session.workspace else {
                     return false;
                 };
@@ -317,7 +305,7 @@ impl Waku {
         }
         self.branch_operation_pending = true;
         cx.notify();
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
@@ -328,18 +316,7 @@ impl Waku {
                             BranchOperation::Checkout(branch) => (branch, false),
                             BranchOperation::Create(branch) => (branch, true),
                         };
-                        match workspace.request(
-                            waku_client::WorkspaceOperation::CheckoutBranch {
-                                cwd: path,
-                                branch,
-                                create,
-                            },
-                        )? {
-                            waku_client::WorkspaceResult::BranchChanged { snapshot } => {
-                                Ok(snapshot)
-                            }
-                            _ => anyhow::bail!("the daemon returned an invalid branch response"),
-                        }
+                        waku_client::surfaces::vcs::switch_ref(&daemon_v8, &path, branch, create)
                     }
                 })
                 .await;
@@ -356,7 +333,7 @@ impl Waku {
                             .map(std::path::Path::to_path_buf);
                         if selected_path.as_ref() == Some(&path) {
                             if let Some(current) = current
-                                && let Some(session) = waku.selected_session_mut()
+                                && let Some(session) = waku.selected_draft_mut()
                                 && let SessionWorkspace::Worktree { branch, .. } =
                                     &mut session.workspace
                             {

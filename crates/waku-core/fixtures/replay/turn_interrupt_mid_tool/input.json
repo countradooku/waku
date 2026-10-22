@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"Run sleep 30, then answer: interrupt fixture should not finish naturally"},{"type":"wait","until":"tool_started"},{"type":"interrupt"},{"type":"wait","until":"turn_terminal"}]}

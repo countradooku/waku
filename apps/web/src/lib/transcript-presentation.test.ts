@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { ActivityItem, AgentSession } from '@waku/client'
+import type { ActivityKind, ActivityView, RunView, TranscriptEntry } from './thread-model'
 import {
   activityActionLabel,
   activityDisclosureSections,
@@ -17,16 +17,15 @@ import {
   shouldVirtualizeActivityText,
   turnAnswerStart,
   turnFoldLabel,
-  userMessageRewindTurnCount,
   formatMessageTime,
   formatWorkingElapsed,
 } from './transcript-presentation'
 
 describe('desktop transcript language', () => {
   test('uses the desktop stopped and worked labels', () => {
-    expect(turnFoldLabel(turn('interrupted', 100, 164))).toBe('You stopped after 1 minute 4 seconds')
-    expect(turnFoldLabel(turn('completed', 100, 160))).toBe('Worked for 1 minute')
-    expect(turnFoldLabel(turn('completed', 100, 3_820))).toBe('Worked for 1 hour 2 minutes')
+    expect(turnFoldLabel(run('interrupted', 100, 164))).toBe('You stopped after 1 minute 4 seconds')
+    expect(turnFoldLabel(run('completed', 100, 160))).toBe('Worked for 1 minute')
+    expect(turnFoldLabel(run('completed', 100, 3_820))).toBe('Worked for 1 hour 2 minutes')
   })
 
   test('calls provider reasoning a thought', () => {
@@ -46,18 +45,17 @@ describe('desktop transcript language', () => {
   test('summarizes an activity group only after it leaves the live tail', () => {
     const command = {
       ...activity('command', false),
-      display_target: 'git log --oneline -15',
+      displayTarget: 'git log --oneline -15',
     }
     const activities = [reasoning(true, 0, 1_000), command]
 
     expect(activityHeaderTitle(activities, true)).toBe('Running git log --oneline -15')
-    expect(activityGroupIsLive(true, true, 1, 1)).toBe(true)
+    expect(activityGroupIsLive(true, true)).toBe(true)
     command.complete = true
     expect(activityHeaderTitle(activities, true)).toBe('Ran git log --oneline -15')
-    expect(activityGroupIsLive(true, true, 1, 2)).toBe(false)
     expect(activityHeaderTitle(activities, false)).toBe('Ran 1 thought · 1 command')
-    expect(activityGroupIsLive(true, false, 1, 1)).toBe(false)
-    expect(activityGroupIsLive(false, true, 1, 1)).toBe(false)
+    expect(activityGroupIsLive(true, false)).toBe(false)
+    expect(activityGroupIsLive(false, true)).toBe(false)
     expect(activityActionLabel(command)).toBe('Run')
     expect(activityRowDetail(command)).toBe('git log --oneline -15')
   })
@@ -90,29 +88,29 @@ describe('desktop transcript language', () => {
     expect(activityDisplayTitle({
       ...activity('fileChange', true),
       title: 'Edit file',
-      file_changes: [{ path: '/tmp/src/app.ts', additions: 4, deletions: 1 }],
+      fileChanges: [{ path: '/tmp/src/app.ts', additions: 4, deletions: 1 }],
     })).toBe('Edited app.ts')
     expect(activityDisplayTitle({
       ...activity('command', false),
       title: 'Run command',
-      display_target: 'bun test',
+      displayTarget: 'bun test',
     })).toBe('Running bun test')
     expect(activityDisplayTitle({
       ...activity('command', true),
       title: 'Run command',
-      display_target: 'python3 analyze.py',
-      display_description: 'Analyze color statistics',
+      displayTarget: 'python3 analyze.py',
+      displayDescription: 'Analyze color statistics',
     })).toBe('Ran command: Analyze color statistics')
     expect(activityDisplayTitle({
       ...activity('command', false),
       title: 'Run command',
-      display_target: 'python3 analyze.py',
-      display_description: 'Analyze color statistics',
+      displayTarget: 'python3 analyze.py',
+      displayDescription: 'Analyze color statistics',
     })).toBe('Running command: Analyze color statistics')
     expect(activityDisplayTitle({
       ...activity('fileRead', true),
       title: 'Read file',
-      display_target: '/tmp/README.md',
+      displayTarget: '/tmp/README.md',
     })).toBe('Read README.md')
   })
 
@@ -135,7 +133,7 @@ describe('desktop transcript language', () => {
     const item = {
       ...activity('command', true),
       arguments: 'bun test',
-      display_target: 'bun test',
+      displayTarget: 'bun test',
       output: '12 pass',
       detail: 'Completed',
     }
@@ -148,13 +146,13 @@ describe('desktop transcript language', () => {
   test('shows file edit stats only when every settled edit has counts', () => {
     const item = {
       ...activity('fileChange', true),
-      file_changes: [
+      fileChanges: [
         { path: 'a.ts', additions: 3, deletions: 1 },
         { path: 'b.ts', additions: 2, deletions: 4 },
       ],
     }
     expect(activityFileChangeStats(item)).toEqual({ additions: 5, deletions: 5 })
-    expect(activityFileChangeStats({ ...item, file_changes: [{ path: 'a.ts' }] })).toBeNull()
+    expect(activityFileChangeStats({ ...item, fileChanges: [{ path: 'a.ts' }] })).toBeNull()
   })
 
   test('keeps the live working duration compact', () => {
@@ -189,12 +187,20 @@ describe('desktop transcript language', () => {
   })
 
   test('puts one footer on the terminal answer and copies every visible part', () => {
-    const session = transcriptSession()
-    const footers = assistantResponseFooters(session)
-    expect([...footers.keys()]).toEqual([3])
-    expect(footers.get(3)).toEqual({
+    const { entries, runs } = transcript()
+    const footers = assistantResponseFooters(entries, runs)
+    expect([...footers.keys()]).toEqual(['message-3'])
+    expect(footers.get('message-3')).toEqual({
       content: 'First half.\n\nSecond half.',
-      timestamp: 200,
+      timestamp: 200_000,
+    })
+  })
+
+  test('gives a message outside any run its own footer', () => {
+    const entries: TranscriptEntry[] = [message('assistant', 'Notice.', 0, undefined)]
+    expect(assistantResponseFooters(entries, new Map()).get('message-0')).toEqual({
+      content: 'Notice.',
+      timestamp: 100_000,
     })
   })
 
@@ -226,116 +232,93 @@ describe('desktop transcript language', () => {
     expect(turnAnswerStart(['thought', 'tool'], () => false)).toBe(2)
   })
 
-  test('does not publish a footer while the turn is running', () => {
-    const session = transcriptSession()
-    session.turns[0]!.status = 'running'
-    session.turns[0]!.completed_at = null
-    expect(assistantResponseFooters(session).size).toBe(0)
-  })
+  test('does not publish a footer while the run is live or the answer streams', () => {
+    const { entries, runs } = transcript()
+    runs.set('run', { ...runs.get('run')!, status: 'running', live: true, completedAt: undefined })
+    expect(assistantResponseFooters(entries, runs).size).toBe(0)
 
-  test('offers prior-message rewind only from a daemon checkpoint and resumable provider', () => {
-    const session = transcriptSession()
-    session.provider_cursor = { provider: 'codex', threadId: 'thread' }
-    const firstMessage = session.messages[0]!
-
-    expect(userMessageRewindTurnCount(session, firstMessage, new Set([0]))).toBe(1)
-    expect(userMessageRewindTurnCount(session, firstMessage, new Set())).toBeNull()
-
-    session.provider_cursor = null
-    expect(userMessageRewindTurnCount(session, firstMessage, new Set([0]))).toBeNull()
-
-    session.provider_cursor = { provider: 'codex', threadId: 'thread' }
-    session.status = 'working'
-    expect(userMessageRewindTurnCount(session, firstMessage, new Set([0]))).toBeNull()
+    const streaming = transcript()
+    const last = streaming.entries.at(-1)!
+    if (last.kind === 'message') last.message.streaming = true
+    expect(assistantResponseFooters(streaming.entries, streaming.runs).size).toBe(0)
   })
 })
 
-function transcriptSession(): AgentSession {
+function transcript(): { entries: TranscriptEntry[]; runs: Map<string, RunView> } {
   return {
-    id: 'session',
-    title: 'New Task',
-    project_id: 'project',
-    provider: 'codex',
-    runtime_mode: 'fullAccess',
-    status: 'idle',
-    created_at: 10,
-    updated_at: 200,
-    provider_cursor: null,
-    turns: [turn('completed', 100, 200)],
-    queued_messages: [],
-    transcript_blocks: [{
-      turn_id: 'turn',
-      after_message: 2,
-      content: { kind: 'activities', data: [] },
-    }],
-    messages: [
+    entries: [
       message('user', 'Build it', 0),
       message('assistant', 'Interim commentary.', 1),
+      { kind: 'activity', key: 'activity-1', runId: 'run', position: 2, activity: activity('command', true) },
       message('assistant', 'First half.', 2),
       message('assistant', 'Second half.', 3),
     ],
+    runs: new Map([['run', run('completed', 100, 200)]]),
   }
 }
 
 function message(
-  role: AgentSession['messages'][number]['role'],
-  content: string,
+  role: 'user' | 'assistant' | 'system',
+  text: string,
   index: number,
-): AgentSession['messages'][number] {
+  runId: string | undefined = 'run',
+): TranscriptEntry {
   return {
-    id: `message-${index}`,
-    turn_id: 'turn',
-    role,
-    content,
-    created_at: 100 + index,
-    streaming: false,
-  }
-}
-
-function seconds(year: number, month: number, day: number, hour: number, minute: number) {
-  return new Date(year, month, day, hour, minute).getTime() / 1_000
-}
-
-function turn(
-  status: AgentSession['turns'][number]['status'],
-  startedAt: number,
-  completedAt: number,
-): AgentSession['turns'][number] {
-  return {
-    id: 'turn',
-    turn_count: 1,
-    status,
-    provider_turn_started: true,
-    started_at: startedAt,
-    completed_at: completedAt,
-    checkpoint: null,
-  }
-}
-
-function reasoning(complete: boolean, startedAt: number, finishedAt: number): ActivityItem {
-  return {
-    ...activity('reasoning', complete),
-    reasoning: {
-      content: 'Checking',
-      started_at_ms: startedAt,
-      finished_at_ms: finishedAt,
+    kind: 'message',
+    key: `message-${index}`,
+    runId,
+    position: index,
+    message: {
+      id: `message-${index}`,
+      role,
+      text,
+      attachments: [],
+      createdAt: (100 + index) * 1_000,
+      streaming: false,
     },
   }
 }
 
-function activity(kind: ActivityItem['kind'], complete: boolean): ActivityItem {
+/** Epoch milliseconds, as v8 timestamps are. */
+function seconds(year: number, month: number, day: number, hour: number, minute: number) {
+  return new Date(year, month, day, hour, minute).getTime()
+}
+
+/** A run that started and finished at these second marks. */
+function run(status: RunView['status'], startedAt: number, completedAt: number): RunView {
+  return {
+    id: 'run',
+    ordinal: 1,
+    status,
+    requestedAt: startedAt * 1_000,
+    startedAt: startedAt * 1_000,
+    completedAt: completedAt * 1_000,
+    live: false,
+    diffable: false,
+  }
+}
+
+function reasoning(complete: boolean, startedAt: number, finishedAt: number): ActivityView {
+  return {
+    ...activity('reasoning', complete),
+    reasoning: {
+      content: 'Checking',
+      startedAtMs: startedAt,
+      finishedAtMs: finishedAt,
+    },
+  }
+}
+
+function activity(kind: ActivityKind, complete: boolean): ActivityView {
   return {
     id: kind,
-    source_id: kind,
     kind,
     title: kind,
-    detail: null,
-    display_target: null,
-    display_description: null,
-    output: null,
     failed: false,
     complete,
-    image_urls: [],
-    reasoning: null,
+    imageUrls: [],
+    fileChanges: [],
+    omitted: false,
+    streamsOutput: false,
   }
 }

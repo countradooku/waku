@@ -1,37 +1,83 @@
 import { describe, expect, test } from 'bun:test'
 import { hydratePartialDiff, parsePatchFiles } from '@pierre/diffs'
-import type { AgentSession, ReviewDiffSource } from '@waku/client'
 import {
   compactReviewPatch,
   createReviewDiffLoader,
-  latestReviewTurnSource,
+  diffSourceChoices,
   reviewDiffSourceLabel,
-  sameReviewDiffSource,
+  reviewTurns,
 } from './review-diff'
+import type { RunView } from './thread-model'
 
-describe('desktop review sources', () => {
-  test('uses the newest ready checkpoint as Last turn', () => {
-    const session = {
-      id: 'session-1',
-      turns: [
-        turn('turn-1', 1, 'ready'),
-        turn('turn-2', 2, 'unavailable'),
-        turn('turn-3', 3, 'ready'),
-      ],
-    } as AgentSession
+const translate = (key: string, params?: Record<string, string | number>) =>
+  params ? `${key}(${JSON.stringify(params)})` : key
 
-    expect(latestReviewTurnSource(session)).toEqual(lastTurn('session-1', 'turn-3', 3))
+function runOf(id: string, status: RunView['status'], diffable: boolean): RunView {
+  return { id, status, diffable, requestedAt: 0, live: false }
+}
+
+describe('review sources', () => {
+  test('labels every review.diff source', () => {
+    expect(reviewDiffSourceLabel('uncommitted')).toBe('Uncommitted')
+    expect(reviewDiffSourceLabel('staged')).toBe('Staged')
+    expect(reviewDiffSourceLabel('branch')).toBe('Branch')
+    expect(reviewDiffSourceLabel('committed', (key) => key)).toBe('diff.source_committed')
   })
 
-  test('labels an older checkpoint by turn and compares structured sources by value', () => {
-    const latest = lastTurn('session-1', 'turn-3', 3)
-    const older = lastTurn('session-1', 'turn-1', 1)
+  test('numbers turns among the runs that were not rolled back', () => {
+    const turns = reviewTurns([
+      runOf('r1', 'completed', true),
+      runOf('gone', 'rolled_back', false),
+      runOf('r2', 'failed', false),
+      runOf('r3', 'completed', true),
+      runOf('r4', 'running', false),
+    ])
+    expect(turns).toEqual([{ runId: 'r1', turn: 1 }, { runId: 'r3', turn: 3 }])
+  })
 
-    expect(sameReviewDiffSource(latest, lastTurn('session-1', 'turn-3', 3))).toBe(true)
-    expect(sameReviewDiffSource(latest, older)).toBe(false)
-    expect(reviewDiffSourceLabel(latest, latest)).toBe('Last turn')
-    expect(reviewDiffSourceLabel(older, latest)).toBe('Turn 1')
-    expect(reviewDiffSourceLabel('staged', latest)).toBe('Staged')
+  test('labels the last turn, an earlier turn and the whole thread', () => {
+    const turns = [{ runId: 'r1', turn: 1 }, { runId: 'r3', turn: 3 }]
+    expect(reviewDiffSourceLabel({ type: 'turn', runId: 'r3' }, undefined, turns)).toBe('Last Turn')
+    expect(reviewDiffSourceLabel({ type: 'turn', runId: 'r1' }, undefined, turns)).toBe('Turn 1')
+    expect(reviewDiffSourceLabel({ type: 'turn', runId: 'r1' }, translate, turns)).toBe('diff.source_turn({"turn":1})')
+    expect(reviewDiffSourceLabel({ type: 'turn', runId: 'r3' }, translate, turns)).toBe('diff.source_last_turn')
+    expect(reviewDiffSourceLabel({ type: 'thread' }, translate, turns)).toBe('diff.source_all_turns')
+  })
+
+  test('the menu offers turns of a task around the working-tree sources', () => {
+    const turns = [{ runId: 'r1', turn: 1 }, { runId: 'r2', turn: 2 }, { runId: 'r3', turn: 3 }]
+    const choices = diffSourceChoices({ type: 'turn', runId: 'r2' }, turns)
+    expect(choices.map((choice) => [choice.id, choice.label, choice.selected, Boolean(choice.separatorBefore)])).toEqual([
+      ['turn:r3', 'Last Turn', false, false],
+      ['thread', 'All Turns', false, false],
+      ['uncommitted', 'Uncommitted', false, true],
+      ['unstaged', 'Unstaged', false, false],
+      ['staged', 'Staged', false, false],
+      ['committed', 'Committed', false, true],
+      ['branch', 'Branch', false, false],
+      ['turn:r2', 'Turn 2', true, true],
+      ['turn:r1', 'Turn 1', false, false],
+    ])
+    expect(choices[0]!.source).toEqual({ type: 'turn', runId: 'r3' })
+  })
+
+  test('a task without reviewable turns disables them; a new task has none', () => {
+    const empty = diffSourceChoices('uncommitted', [])
+    expect(empty.slice(0, 2).map((choice) => [choice.id, choice.disabled, choice.source])).toEqual([
+      ['last-turn', true, null],
+      ['thread', true, { type: 'thread' }],
+    ])
+    expect(diffSourceChoices('staged', undefined).map((choice) => choice.id)).toEqual([
+      'uncommitted', 'unstaged', 'staged', 'committed', 'branch',
+    ])
+  })
+
+  test('earlier turns are capped, keeping the selected one', () => {
+    const turns = Array.from({ length: 6 }, (_, index) => ({ runId: `r${index + 1}`, turn: index + 1 }))
+    const ids = diffSourceChoices({ type: 'turn', runId: 'r1' }, turns, undefined, 2)
+      .filter((choice) => choice.id.startsWith('turn:'))
+      .map((choice) => choice.id)
+    expect(ids).toEqual(['turn:r6', 'turn:r5', 'turn:r4', 'turn:r1'])
   })
 })
 
@@ -75,24 +121,4 @@ function hydratedFilePatch(name: string, changedLine: number): string {
     '@@ -1,40 +1,40 @@',
     ...lines,
   ].join('\n') + '\n'
-}
-
-function turn(id: string, turnCount: number, status: 'ready' | 'unavailable' | 'error') {
-  return {
-    id,
-    turn_count: turnCount,
-    checkpoint: {
-      status,
-    },
-  }
-}
-
-function lastTurn(sessionId: string, turnId: string, turnCount: number): ReviewDiffSource {
-  return {
-    lastTurn: {
-      session_id: sessionId,
-      turn_id: turnId,
-      turn_count: turnCount,
-    },
-  }
 }

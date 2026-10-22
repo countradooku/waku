@@ -65,11 +65,13 @@ MessagePack with named fields costs more bytes than postcard. Field names add ro
 - **No `serde_json::Value`, no `untagged`, no `flatten`.** Opaque provider JSON (computer-use arguments, native metadata) travels as `JsonText(String)`.
 - **No `HashMap`.** Maps use `BTreeMap<String, T>` so encoding is deterministic.
 - **Integers.** `u64` values on the wire stay at or below 2^53 − 1, so JavaScript numbers can hold them. This includes sequences, sizes and offsets.
-- **Ids** are canonical lowercase hyphenated UUID strings.
+- **Ids** are canonical lowercase hyphenated UUID strings. (Implemented by running `rmp-serde` in human-readable mode, so `Uuid` serializes as a string in both encodings; see `waku_protocol::v8::codec`.)
 - **Timestamps** are `i64` milliseconds since the Unix epoch (UTC).
 - **Paths** are UTF-8 strings. Non-UTF-8 paths are reported as errors, not converted lossily.
 - **Bytes:** MessagePack `bin` via `serde_bytes`, and standard padded base64 in JSON. Byte fields are reserved for small values (under 64 KiB). Bulk bytes use DATA frames ([§5.6](#56-blob-transfer)).
 - **Large values.** A response field that can exceed 1 MiB is typed `Payload<T> = inline{value: T} | blob{reference: BlobRef, size}`. The client fetches the blob form through blob transfer.
+
+> **Changed in #54.** Two schema markers relax the open-union rule where it cannot hold. A union that only clients send (`Command`, `DispatchMode`, `ForkSourcePoint`) is marked `x-waku-closed`: the daemon is the side that must refuse what it does not know, so an unknown command fails to decode and the call is answered `badRequest` (RFC 0001: commands have no `Unknown`). A union whose unknown tags decode to one of its own variants (`NotificationSource` → `background_task`, RFC 0001 amendments) is marked `x-waku-fallback`; generated decoders map unknown tags to that variant. The lint accepts both; every other union still needs `Unknown`. Orchestration's fieldless enums use `snake_case` strings and data-carrying unions `snake_case` tags (RFC 0001 amendments), while the v8 envelopes keep `camelCase`.
 
 ### 1.2 Forward compatibility
 
@@ -149,6 +151,8 @@ Mixing message encodings on one connection is a protocol error.
 - Local sockets never select compression. JSON text frames cannot carry it.
 - DATA is never compressed by the protocol.
 - permessage-deflate is rejected for three reasons: it keeps per-connection inflate state, compresses tiny delta frames for nothing, and mixes secrets with attacker-influenced text in one compression context.
+
+> **Changed in #53.** Two receiver rules are stricter than the table above: a frame whose reserved bytes (6–7) are not zero is a protocol error, like an unknown flag, because both could change how the body is read; and a frame of an unknown `kind` is still skipped by length, but only up to `maxMessageBytes` (otherwise `frameTooLarge`), so a peer cannot make the receiver read gigabytes it throws away. A `ZSTD` MSG frame is a protocol error until compression is implemented; `welcome.compression` is always absent for now.
 
 **Writer priority:**
 - each connection's writer drains three queues in order: control (`pong`, `goodbye`), messages (replies and stream items, kept in their own order), then DATA;
@@ -241,6 +245,8 @@ enum Notice { updateAvailable { version: String }, credentialExpiring { at: i64 
 {"type":"items","channel":3,"items":[{"type":"event","seq":1042,"event":{…}}]}
 ```
 
+- `notice` nests its open union under a `notice` key (`{"type":"notice","notice":{"type":"updateAvailable",…}}`), because both levels are tagged by `type`.
+- `reply.ok` may be `null` for a method whose result is an `Option`. A reply whose `id` is not pending decodes with its `ok` skipped.
 - `reply.ok` is the method's result value as-is, with no extra wrapper. The receiver decodes it according to the method of the pending call with that `id`.
 - The `methods!` macro generates `Method`, `MethodResult` and their serde impls:
   - the daemon decodes `params` according to `method`, in any key order;
@@ -250,6 +256,7 @@ enum Notice { updateAvailable { version: String }, credentialExpiring { at: i64 
 
 - **Call ids** are `u32`, chosen by the client, and unique among its in-flight calls on that connection. Replies may arrive in any order.
 - **In-flight cap.** At most `maxInFlightCalls` (64) calls per connection; further calls get `busy`.
+- **Malformed params.** A `call` whose `params` do not decode for its `method` is answered `badRequest`; only an undecodable envelope closes the connection with `protocolError`.
 - **Cancellation.** `cancel{id}` is best effort. A daemon that has already finished sends the normal reply.
 - **Idempotency.**
   - `orchestration.dispatch` is idempotent by `commandId`, through durable command receipts (RFC 0001).
@@ -378,6 +385,8 @@ type HistoryCursor = String;                     // opaque, at most 4,096 bytes
 - Applying an event is an upsert by entity id (RFC 0001 rule 4). Events with `seq` at or below the client's applied cursor are therefore harmless no-ops.
 - Unknown items still advance the cursor.
 
+> **Changed in #54.** `store` is a random id written once into the `store_identity` table of `state.sqlite` (created by `Store::open` outside the numbered migrations, like the migration ledger, because it describes the file, not the schema). The welcome's `environment.storeId` is that id when the daemon serves orchestration. The thread replay pre-check reads `LENGTH(payload_json)` of at most 129 rows through `events_thread_seq`; the encoded budget is measured as JSON, the larger encoding. The shell gap is counted with `LIMIT 4097` over the primary key.
+
 ## 5. Message catalogue
 
 ### 5.1 Common types
@@ -437,6 +446,23 @@ Entity types for threads, runs, nodes, turn items and the rest are defined by RF
 | `threads.turnDiff` | `{threadId, runId, ignoreWhitespace}` | `ReviewDiff` | `read` | `CollectReviewDiff{LastTurn}` |
 | `threads.fullDiff` | `{threadId, ignoreWhitespace}` | `ReviewDiff` | `read` | new |
 | `checkpoints.list` | `{threadId}` | `Vec<CheckpointInfo{runOrdinal, ref, capturedAt}>` | `read` | `SessionTurnRefs` |
+
+> **Changed in #54, #57.**
+> - `orchestration.dispatch` takes `{commandId, command}` where `command` is RFC 0001's `Command` (dotted tags, R17) and replies `DispatchResult{sequence, duplicate}`. There is no `created`: clients supply the ids of new entities (§5.3). The method's declared scope is the `read` floor; the daemon then checks each command's scopes (`v8::orchestration::command_scopes`, §6.3). Commands are issued as `user` with a creation source from `hello.client.kind`. Read-your-writes (§2.3) holds: the reply waits until the event hub has routed `sequence` and every `thread` and `shell` stream of the connection has queued what it was routed (a barrier through each stream's queue, which also flushes held tool updates), for at most 2 s.
+> - `threads.historyPage` returns `HistoryPage{items, runs, next}`: the runs the page's items belong to instead of `messages`, so no page duplicates the message table (T3 regression §4.7.2). `next` is absent on the oldest page.
+> - `threads.turnItem` returns the stored `TurnItem` without `Payload`: storage already caps the large bodies (command output 256 KiB, R12), so an item fits a message; a larger one is answered `payloadTooLarge` by the connection. Images inside dynamic-tool output are moved to the blob store first and appear as `waku-blob:` references, never data URLs.
+> - `threads.archived` takes `{cursor?, limit?, projectId?}` (archived most recently first, `limit` ≤ 200 and 200 by default).
+> - `threads.snapshot` takes `compactTurnItems` like the `thread` stream.
+> - Since #55 the orchestrator is the daemon's source of truth and the daemon always serves these methods and streams (the `WAKU_V8_ORCHESTRATOR` gate is gone). A server composed without one (the bench daemon, legacy-protocol tests) answers them, and ends the streams, with `unsupported`.
+
+> **Changed in #55.**
+> - `threads.search` takes `{query, projectId?, includeArchived?, limit?}` (`limit` ≤ 200, 50 by default) and returns `Vec<ThreadSearchHit{threadId, projectId, title, source, entityId, position?, snippet, activityAt}>`: one hit per thread, its best match (`source` is `title`, else the latest matching `message`, else the latest matching `plan`; RFC 0001 amendment "Search"), ordered by source and then recency. `entityId` is the matching message, plan or thread id, `position` the matching turn item's (absent for a title).
+> - `threads.find` takes `{threadId, query, anchor?, window?, itemsAround?: {before, after}}` and returns `ThreadFindResult{matches: Vec<FindHit{source, entityId, position}>, truncated, current?, window: Vec<FindSnippet{index, hit, snippet}>, items}`: every match in transcript order (at most 5,000), the current one (the first at or after `anchor`, else the latest), snippets for up to `window` (≤ 50, 17 by default) matches around it, and with `itemsAround` (each side ≤ 50) the wire-projected turn items around the current match, so a client jumps to history it never paged in. It replaces the sketch's `limit` and `ThreadFindHit` list.
+
+> **Changed in #180.**
+> - `threads.turnDiff` takes `{threadId, runId, ignoreWhitespace?}` and `threads.fullDiff` `{threadId, ignoreWhitespace?}`; both return `ReviewDiff` (the `review.diff` shape, patch inline up to 1 MiB, else a blob) whose `source` is the new `ReviewDiffSource` variant `turn{runId}` or `thread` (`review.diff` refuses both). A turn's diff is its turn-start checkpoint to the checkpoint it ended with; the thread's is the first live run's turn start to the last live run's checkpoint (RFC 0001 amendment "Gaps found while moving the clients"). No ready checkpoint (the run is still going, the workspace is not a repository) answers `conflict`; an unknown run `notFound`.
+> - `HistoryPage` adds `checkpointScopes` and `checkpoints` of its runs, so a client can rewind or diff a run it paged in.
+> - `ProviderSession.availableCommands: Vec<SessionCommand{name, description?}>` carries the slash commands the live session reported; clients merge them with `composer.slashCommands`. `PendingBackgroundTask.itemId` names the command item to subscribe to with `commandOutput`.
 
 **Projects**
 
@@ -520,10 +546,10 @@ Input is sent as DATA frames on an `interactive` terminal subscription's channel
 | `providers.list` | `{}` | `Vec<ProviderStatus>` | `read` | new |
 | `providers.probe` | `{instanceId, discoverModels, probeVersion}` | `{probe: ProviderProbe, version?}` | `read` | `ProbeProvider` |
 | `providers.planUsage` | `{instanceId}` | `Option<PlanUsage>` | `read` | `FetchPlanUsage` |
-| `providers.models` | *reserved* (Phase 3) | | `read` | new |
+| `providers.models` | `{instanceId, refresh}` | `ProviderModels{models, agentPresets, source}` (implemented in #53) | `read` | new (the model half of `ProbeProvider{discoverModels}`) |
 | `providers.authStart`, `.authRespond`, `.authCancel`, `.logout` | *reserved* (Phase 7) | | `providers:manage` | new |
 | `providerSessions.list` | `{instanceId, limit ≤ 500}` | `Vec<ProviderSessionSummary>` | `read` | `ListProviderSessions` |
-| `providerSessions.preview` | `{instanceId, nativeRef: ProviderResumeCursor, cwd}` | `ProviderSessionHistory` | `read` | `LoadProviderSession` |
+| `providerSessions.preview` | *not added* (#53): loading a provider session only served its import, now `threadImport` | | `read` | `LoadProviderSession` |
 | `usage.history` | `{window: UsageWindow, projectIds}` | `UsageHistory` | `read` | `LoadUsageHistory` |
 
 `binaryOverride` leaves the request. The binary belongs to the provider instance in settings, and changing it needs `providers:manage`.
@@ -535,6 +561,8 @@ Input is sent as DATA frames on an `interactive` terminal subscription's channel
 | `settings.get` | `{}` | `{revision, settings: DaemonSettings}` with secrets redacted | `read` | `GetSettings` |
 | `settings.update` | `{baseRevision?, patch: SettingsPatch, opId}` | `{revision, settings}` | `settings:write` + | `UpdateSettings` (whole object → patch) |
 | `settings.upsertKeybinding`, `.removeKeybinding` | *reserved* (Phase 5) | | `settings:write` | new |
+| `storage.worktreeCleanupStatus` | `{}` | `WorktreeCleanupStatus{lastRunAt?, lastReport?, nextRunAt?, running}` | `read` | `GetWorktreeCleanupStatus` (#62) |
+| `storage.runWorktreeCleanup` | `{opId}` | `WorktreeCleanupReport` | `settings:write` | `RunWorktreeCleanup` (#62) |
 
 **Computer use** (Waku extension)
 
@@ -555,6 +583,31 @@ Input is sent as DATA frames on an `interactive` terminal subscription's channel
 | `access.rotateCertificate` | `{}` | `{fingerprint}` (existing pins break; remote clients must re-pair) | `admin` | new |
 
 **Reserved domains:** `scheduledTasks.*` (Phase 4), `mcpApps.*` (Phase 5), `preview.*` and `device.*` (Phase 9).
+
+> **Changed in #53 (part 2), the non-orchestration catalog.** Every method above outside orchestration and `access.*` is served, as an adapter over the daemon's existing backend (the same functions the legacy protocol calls), so both protocols see one daemon until v7 is deleted (D6). The shapes differ from the tables as follows; the Rust types in `waku_protocol::v8::{files, vcs, terminal, providers, composer, blobs, daemon}` are the contract.
+> - **Results.** `ack` is the empty map `Ack{}`. `Payload<T>` exists only as `TextPayload` (`inline{value}` \| `blob{reference, size}`), because generic types do not survive codegen; `review.diff.patch` uses it above 1 MiB.
+> - **Mutations** carry `opId`. Receipts are daemon-wide while every connection holds the one local credential (Phase 7 scopes them per credential session); only successes are stored, a retry of an op that is still running waits for it, and a cancelled op leaves no receipt.
+> - **Errors.** Filesystem failures map by kind (`notFound`, `badRequest`, `alreadyExists`, `forbidden`, else `io`); git failures are `vcs` with `details.vcs.kind` recognized from git's message (`notARepository`, `mergeConflict`, `nonFastForward`, `authRequired`, `refNotFound`, `dirtyWorktree`); provider failures are `provider`. Stale `baseRevision`s answer `conflict` with `revisionConflict{current}` (a settings or drafts revision as its decimal string).
+> - **`daemon.info`** adds `home`; `features` is empty like `welcome.features`. **`daemon.shutdown`** is `admin` and answers `forbidden` unless the daemon is desktop-owned (`allowShutdown`); it replies `ack` and stops 100 ms later.
+> - **Files.** `files.searchEntries{root, query, limit?}` ranks the `@`-mention index (`git ls-files`, or a bounded walk) with the composer's fuzzy path matcher; an empty query lists it shallow first; `limit` defaults to 200 (≤ 10,000); directories end in `/`. `files.searchContents{root, query, regex, caseSensitive, limit?}` searches the same index (≤ 50,000 files, text files ≤ 2 MiB) with Rust `regex` syntax; `line` and `column` are 1-based, `column` in Unicode scalar values, `preview` ≤ 200 characters; `limit` defaults to 200 (≤ 1,000). `files.read` refuses files over `maxBytes` and otherwise hands text over 2 MiB (up to `maxBlobBytes`) to the blob store (`blob`). `files.write` revisions are `sha256:<hex>`; `baseRevision: ""` means the file must not exist yet. `fs.browse` entries are `{name, path, isDir}` with absolute paths.
+> - **Composer.** `composer.slashCommands` needs `instanceId` until a thread's own instance can stand in for it. `skills.list` returns `SkillsCatalog{skills: Vec<Skill>}`; an install's `source` is `shared` or a provider id; `rowKey` is cut to 53 bits; `modifiedAt` is milliseconds.
+> - **Drafts.** `ComposerDrafts{newThreads, threads}` maps project ids (a thread not started yet) and thread ids to `{text, attachments}`; `DraftTarget` is `newThread{projectId}` \| `thread{threadId}`. The revision is a 53-bit content hash like settings'; an empty draft is a removal and the `changed` item carries it as such. Drafts changed through the legacy protocol reach `drafts` subscribers on their next snapshot only.
+> - **Blobs.** `blobs.put` buffers the upload in daemon memory (at most `maxBlobBytes`) instead of a temporary file, then stores it through the legacy blob store, whose references are `waku-blob:<16 hex>.<ext>` (its own content hash), not sha256. `sha256` deduplicates against blobs this daemon stored or `blobs.stat`ed since it started. Upload DATA has no credit: the daemon reads it as fast as it stores it, and a slow consumer backs up the socket. The channel is reserved when the call is read and freed with its reply. `blobs.stat{reference, path?}` and `blobDownload{reference, offset?, path?}` take `path` (the absolute path of a file inside it, as `StoredAttachment.path` names it) for a `waku-attachment:` reference; `stat` hashes the file to report `sha256`. `attachments.import{name, kind: file | directory, parts}` takes exactly one part for a file.
+> - **VCS.** `vcs.createWorktree` adds `threadId?` (recorded in the worktree's name; `branchHint` is the text the names come from). `vcs.commit` commits, then pushes as a separate step; a failed push is a `vcs` error naming the new commit. `vcs.pull` reports `conflicts` (unmerged paths) instead of failing when the pull stopped on them. `ReviewDiffSource` is `uncommitted` \| `unstaged` \| `staged` \| `committed` \| `branch`, tagged by `type`; `files` is `numstat` parsed (`binary` with no counts).
+> - **Terminals.** A `generation` is a UUID the daemon mints per shell process (the PTY host counts restarts). `terminal.open{root, cols, rows, title?, opId}` opens the backend's PTY host (#60) and routes its events to v8 subscribers; v7 and v8 terminals are separate sets. `attached` adds `replay` (DATA bytes of retained output that follow, ending at `offset`), `truncated`, `exited`, `exitCode?`; `reset` adds `generation` and `replay`. A subscriber resumes without replay only when its cursor is the current `{generation, offset}`, because the retained history is filtered (query/response sequences stripped) and cannot be addressed by raw offset; otherwise it gets the tail. Output that arrives while a subscriber has no credit waits up to 1 MiB; past that the subscriber is behind, and when credit returns it receives `reset` and a fresh tail. Items that follow DATA (a `reset` after output) are queued behind it. `resized` is sent after `terminal.resize` with the size the PTY applied. `terminalList{root?}` filters by working directory; `TerminalInfo{terminalId, cwd, title?, cols, rows, generation, exited, createdAt}`.
+> - **Providers.** `providers.list` returns `ProviderStatus{instanceId, kind, displayName, enabled, binaryOverride?, installed, path?, version?, planUsage}` from settings and the cached probe (a `PATH` lookup, no provider process). An instance id is the provider kind's id until provider instances are configured in settings. `providers.models{instanceId, refresh}` (no longer reserved) returns `ProviderModels{models, agentPresets, source: discovered | cached | fallback}`; without `refresh` no provider process runs. `providers.planUsage` is `null` for providers without a plan-usage source and publishes `planUsageUpdated`; `resetsAt` is milliseconds. The `providers` stream publishes statuses when settings or probes change them and never polls. `providerSessions.list{instanceId, limit?}` returns `ProviderSessionSummary{instanceId, nativeId, resumeCursor: JsonText, title, cwd, createdAt, updatedAt}` (≤ 500, without conversations already imported). `providerSessions.preview` is not added: the desktop loaded a provider session only to import it, which is `threadImport`.
+> - **Usage.** `UsageHistory` mirrors the legacy report with `YYYY-MM-DD` days, per-provider parts as lists (`byProvider`), `topModels` as `{model, costUsd}` and `scanDurationMs`; `projectIds` select the projects broken out.
+> - **Settings and storage.** `Settings` gains `storage: StorageSettings{worktreesDirectory?, previousWorktreesDirectories, worktreeCleanup}` (#62). `settings.update`'s `SettingsPatch` replaces whole fields (`providerBinaryOverrides` is the whole map); `storage` paths are validated (absolute, `~` expanded, never the filesystem root) and moving the folder keeps the old one in `previousWorktreesDirectories`. Cleanup times are milliseconds.
+> - **`vcsStatus`** has no filesystem watcher yet: while subscribed it re-reads the repository every 2 s, at most once a second, and at once after this daemon's own `vcs.*` mutations; it sends a `status` only when it changed and ends with the error when the root is not a repository.
+> - **`computerUse.permissions{prompt: true}`** from anything but the local socket answers `forbidden`.
+> - **Not on the wire.** `SweepBlobs` has no method: the daemon schedules blob sweeps itself (below).
+
+> **Changed by merging the catalog into the #55 cut-over** (D6: no compatibility with upstream Waku).
+> - **Projects and threads come from the orchestrator** everywhere, never from the legacy task state. `RootRef::project` and `RootRef::thread` resolve through it (a thread's worktree, else its project's path), and so do the project ids of `skills.list`, `usage.history` and `vcs.createWorktree`. A server composed without an orchestrator answers project and thread roots, `drafts.*`, the `drafts` stream and `providerSessions.list` with `unsupported`.
+> - **Drafts** are keyed by orchestration ids: `newThread{projectId}` by a project that is not removed, `thread{threadId}` by a thread that is not deleted. Setting a draft for any other id answers `notFound`; removing one is a no-op. Drafts of removed projects, deleted threads (and any legacy session id) are left out of `drafts.get`, the `drafts` stream and the revision, and are pruned from storage by the next `drafts.apply`.
+> - **`vcs.createWorktree{threadId}`** must name a thread that is not deleted (`notFound` otherwise).
+> - **`providerSessions.list`** leaves out the conversations that a thread which is not deleted already holds: the orchestrator's provider threads with the instance's driver and that native id. `threadImport` is not served yet; until it is, a client adopts a listed conversation with `thread.create{importedNativeThread: {driver, nativeId}}`, and `resumeCursor` is what `threadImport` will take back unchanged.
+> - **Blob sweeps are scheduled by the daemon** (`waku_core::blob_sweep`), replacing the desktop's v7 `SweepBlobs`. A sweep deletes blobs and attachment trees older than the one-hour grace period that nothing references: the turn items and messages of threads that are not deleted, the composer drafts, and, until v7 is deleted, the legacy sessions the desktop still writes. One thread sleeps until a sweep is due: once 5 minutes after startup, an hour and a minute after a blob or attachment is stored (so an upload nothing came to reference is reclaimed), and a minute after references are released (a thread deleted or rolled back, a v7 `SweepBlobs`). Draft edits request nothing: a draft is cleared on every send, and a discarded draft's attachments were stored first, so the sweep after their store reclaims them. Requests coalesce into the earliest due time and sweeps are at least 10 minutes apart; nothing polls. Under the daemon host, v7 `SweepBlobs` only requests a sweep, because sweeping the legacy references alone would delete what the orchestrator holds. Images the wire projection moves out of tool output are referenced by no row, so they too go after the grace period; a client that needs one again re-reads the turn item, which stores it again.
 
 ### 5.3 Orchestration commands
 
@@ -593,6 +646,8 @@ Input is sent as DATA frames on an `interactive` terminal subscription's channel
 | `queuedRunCancel`, `queuedRunReorder`, `queuedRunEdit`, `queuedMessagePromoteToSteer`, `queueResume` | *reserved* (Phase 3) | `operate` | new |
 | `threadSettle`, `threadUnsettle`, `threadSnooze`, `threadUnsnooze`, `providerSwitch`, `threadMergeBack`, `delegatedTask*` | *reserved* (Phases 3–4) | `operate` | new |
 
+> **Changed in #180.** `projectCreateScratch` is `project.create_scratch {projectId, name?, prompt?}` (operate): the daemon creates a fresh folder under its projectless root per call and records it as `project.create`, so every task without a project gets its own folder. `backgroundWorkRefresh` is `background_work.refresh {threadId}`, and `background_work.stop {threadId, taskId, providerThreadId?}` stops a process or monitor (subagents keep `subagent.stop`).
+
 Commands that are internal in T3 (`thread.stop`, `checkpoint.rollback.fail`, and so on) are never accepted from clients. They decode as `Unknown` and are rejected with `badRequest`.
 
 ### 5.4 Streams
@@ -608,12 +663,14 @@ Commands that are internal in T3 (`thread.stop`, `checkpoint.rollback.fail`, and
 | `terminalList` | `{root?}` | `snapshot{terminals: Vec<TerminalInfo>}`, `upserted{terminal}`, `removed{terminalId}` | none | `read` |
 | `vcsStatus` | `{root}` | `status{status: GitStatus, at}`, coalesced to at most one per second and computed only while subscribed | none | `read` |
 | `blobDownload` | `{reference, offset?}` | `meta{size, mime, sha256}`, then DATA with `FIN` on the last chunk, then `end{completed}` | `offset` | `read` |
-| `settings` | `{}` | `snapshot{revision, settings}`, `updated{revision, settings}` | `revision` | `read` |
+| `settings` | `{}` | `snapshot{revision, settings}`, `updated{revision, settings}`, `synchronized{cursor}` | `revision` | `read` |
 | `providers` | `{}` | `snapshot{revision, statuses}`, `statusUpdated{revision, status}`, `planUsageUpdated{instanceId, usage}` | `revision` | `read` |
 | `drafts` | `{}` | `snapshot{revision, drafts}`, `changed{revision, changes}` | `revision` | `read` |
 | `access` | `{}` | `snapshot{revision, pairings, clients}`, `pairingUpserted`, `pairingRemoved`, `clientUpserted`, `clientRemoved` (each with `revision`) | `revision` | `admin` |
 | `providerAuth` | *reserved* (Phase 7) | `progress{stage, url?, userCode?}`, `completed`, `failed{error}` | none | `providers:manage` |
 | `scheduledTasks` | *reserved* (Phase 4) | | `revision` | `read` |
+
+> **Changed in #53.** A settings `revision` is a content hash (53-bit FNV-1a of the MessagePack encoding of `Settings`), not a counter: equal revisions mean equal settings even across daemon restarts, so `after` stays valid without persisted state. Revisions are compared for equality only. Settings changed through the legacy protocol are published to v8 subscribers as well.
 
 **Stream rules:**
 - **Bounded thread snapshot.** At most 10 user turns, 75 turn items and 1 MiB. Required control records, such as pending runtime requests, are always included. At least one row is always admitted. Older rows come from `threads.historyPage`.
@@ -632,6 +689,17 @@ Commands that are internal in T3 (`thread.stop`, `checkpoint.rollback.fail`, and
   - Clients subscribe only while a row is expanded.
 - **Terminal tail.** Each terminal retains 5,000 lines and 8 MiB. Eviction never splits a UTF-8 code point, and query/response escape sequences are stripped from retained history.
 - **No polling.** `vcsStatus` and `providers` compute only while someone is subscribed (the "leased to the viewport" rule).
+
+> **Changed in #54.** The `shell` and `thread` streams as implemented:
+> - **Rows.** Project rows are the `Project` entity. A thread row is `ThreadRow{thread: AppThread, activity, pendingRequestCount, queuedRunCount}`: the thread (never its transcript) plus the derived sidebar columns of `p_threads`. `threadUpdated` is sent when a row changes in the subscribed location and once when it leaves it (`location` says where it went); a row whose state did not change is skipped. While events that touch no row commit, the shell re-sends `synchronized` at most once a second so its cursor keeps up (T3 re-sends unchanged rows after 5 s instead). A resume sends one item per row touched since the cursor, at its newest state, under the sequence of its last change, then `synchronized`; after a resume, removals and moves out of the location are sent for every row because the daemon does not know which rows the client still holds.
+> - **Thread snapshot.** `snapshot` carries `ThreadSnapshot{cursor, projection, history?, hasMoreHistory, budgetExceeded}`; `projection` is `ThreadProjection{thread, runs, runAttempts, nodes, subagents, providerSessions, providerThreads, providerTurns, runtimeRequests, messages, plans, checkpointScopes, checkpoints, contextTransfers, contextHandoffs, turnItems}`. The window is selected newest first through `p_turn_items_position`: it stops before the item that would exceed 75 items or 1 MiB of JSON-encoded wire-projected items (at least one is admitted), and before any item older than the tenth user message. The required control records are every pending runtime request with its node and its request turn item, wherever they sit in history. Runs are those of the window plus every non-terminal run (queued ones included), each with its attempts, provider turns, plans, checkpoint scopes and checkpoints; nodes only for non-terminal runs; messages only of non-terminal runs, and with `compactTurnItems` only those no item in the window shows. All of it is read in one read transaction whose head is the cursor; the in-memory `ThreadProjection` of `decide` is not used. A 5,000-message thread opens with a 17 KB snapshot (MessagePack).
+> - **Live.** A subscription registers with the daemon's event hub before its snapshot or replay is read, and drops events at or below the cursor it sent. Each event is wire-projected once and encoded at most once per encoding for every subscriber. The hub queue of a subscription holds 4,096 messages before the subscription ends with `end{overflow}` (the connection's live budget of 1,000 items / 8 MiB applies after it); when the hub itself falls behind the committed feed, every subscription ends that way. Coalescing holds `turn_item.updated` of running or pending tool rows (command execution, dynamic tool, file change, file search, web search, subagent) for 50 ms, a newer update of the same row replacing the held one; any other event, a final update of a held row, 512 held updates or a dispatch barrier flush them first, in sequence order, so a client's cursor never passes an update it has not received.
+> - **Deltas.** The `computerUse` item is not implemented yet. `delta` items come from the provider session manager through `waku_orchestrator::streams::DeltaBus`; a subscriber holds 1,024 before dropping new ones, which its client sees as a `rev` gap.
+> - **Command output.** `commandOutput` sends `replace` first (the retained text: the first 64 KiB, `\n…\n` and the last 192 KiB when anything was dropped), then `append`s, then `finished` followed by `end{completed}`. A command the hub no longer holds is served from its stored item (`replace` with the stored output, `finished`); an unknown item ends `notFound`; a command that finishes without output sends `finished` alone. Evicting a running tail (more than 64 running commands) finishes its subscribers with `truncated`.
+>
+> **Changed in #57.** The wire projection also summarizes a command line or a dynamic-tool input over 4 KiB (`WIRE_VALUE_BYTES`) to its first line within 160 characters, ending in `…` when cut, and sets `outputOmitted` so the client fetches the item. A file change omits `diff`, `oldText` and `newText` and sets `bodyOmitted`. Subagent progress and results, compaction summaries and notification details over 4 KiB are summarized the same way; the handoff summary is dropped. `outputIndicatesFailure` is set from a non-zero exit code or a failed status.
+
+> **Changed in #55 (the desktop client).** The desktop renders only from these streams (D6). `waku_client::store::ProjectionStore` runs the Rust twin of the TS reducers (`waku_client::projection`, replaying the same `fixtures/reducers.json`) on its own thread: one `shell{active}` subscription, at most 8 `thread` subscriptions (`compactTurnItems: true`, least recently opened closed first), `commandOutput` only for expanded command rows (at most 16) and `threads.turnItem` for omitted bodies of expanded rows (at most 32 per thread). It derives render views off the UI thread and hands the UI the newest view per thread (a slot, not a queue), each with what changed (`ThreadChange`) for redraw routing. A history page is fetched when the reader scrolls near the top. Dispatches to one thread or project are sent one at a time in the order they were made (two quick sends must not race into `conflict`), and `thread.create` + the first `message.dispatch` are chained. A composer submit or queue is `queueAfterActive` (it starts an idle thread with an empty queue), a steer is `steerActive` only when the live session can steer. The client chooses entity ids (`threadId`, `messageId`), so a thread can be subscribed before its `thread.create` lands; a `notFound` end while that dispatch is pending resubscribes after it. On disconnect the store reconnects (immediate, then 250 ms doubling to 10 s, ±20%), resubscribes every stream from its applied cursor and re-sends in-flight dispatches with their command ids. Not dispatchable yet, so the desktop degrades: goals (no command; the view shows `ProviderThread.goal`), `thread.fork` (answered `unsupported`, Phase 3), `queued_run.edit` and `queued_run.promote_to_steer` (done as `queued_run.cancel` + a new `message.dispatch`).
 
 ### 5.5 Domain events and turn items
 
@@ -741,6 +809,8 @@ The daemon removes `WAKU_DAEMON_TOKEN` from provider child environments, as it a
 - 64 connections per daemon (the v7 cap);
 - 8 connections per session.
 
+> **Changed in #53 (interim).** Until pairing and session tokens land (Phase 7), the daemon accepts only `credential: local`, on both the local socket and `/v8`, checked against the daemon token in constant time; that is the same trust as the legacy `/v1` bearer token. `session` and `pairing` are answered `rejected{unauthenticated}`. Every accepted connection gets `admin`.
+
 ### 6.3 Payload-dependent scopes
 
 - `threadCreate` with `newWorktree` adds `vcs:write`.
@@ -765,6 +835,8 @@ Names come from `crates/waku-protocol/src/identity.rs` (D5). Debug builds use th
 | Windows | `\\.\pipe\waku-fork-<user SID>-v8` |
 
 - **Override.** `WAKU_DAEMON_SOCKET` overrides the path (tests, multiple daemons), and the `DaemonReady` stdout line gains a `socket` field.
+
+> **Changed in #53.** v8 shares the legacy daemon socket (`daemon.sock`, #19) instead of opening `daemon-v8.sock`. The first four bytes tell the protocols apart: a v8 client opens with the `WAKU` preface, a legacy client with an HTTP `GET`. One socket keeps one lock, one permission check and one peer-credential check, and the `DaemonReady` line does not change. Endpoints still never mix: a connection is one protocol from its first byte. The socket can take the `-v8` name when the legacy protocol is removed.
 - **Permissions (Unix).**
   - The `run` directory is mode 0700 and owned by the daemon's euid. The daemon refuses to start if it is not.
   - The daemon binds with umask `0177`, then sets 0600 explicitly.
@@ -860,7 +932,7 @@ Every v7 message, command, operation, response, event and constant appears below
 | `HydrateSession{sessionId}` | `thread` stream bounded snapshot + `threads.historyPage` |
 | `SearchSessionMessages{query, limit}` | `threads.search` |
 | `ListProviderSessions{provider, limit}` | `providerSessions.list` |
-| `LoadProviderSession{cursor, cwd}` | `providerSessions.preview` |
+| `LoadProviderSession{cursor, cwd}` | `dispatch threadImport{resumeCursor}` (the desktop loaded it only to import it) |
 | `LoadComposerDrafts` | `drafts.get` / `drafts` stream |
 | `SaveComposerDrafts{drafts, generation}` | `drafts.apply` (`generation` → `baseRevision`) |
 | `ApplyComposerDraftChanges{changes}` | `drafts.apply` |
@@ -868,8 +940,10 @@ Every v7 message, command, operation, response, event and constant appears below
 | `ImportAttachment{name, upload}` | `blobs.put` per file + `attachments.import` |
 | `ImportPathAttachment{path}` | `attachments.importPath` |
 | `ReadBlob{reference}` | `blobDownload` stream (or `blobs.stat.localPath` locally) |
-| `ReadAttachment{reference, path}` | `blobDownload` stream |
-| `SweepBlobs` | Removed from the wire; daemon effect `attachment.cleanup` |
+| `ReadAttachment{reference, path}` | `blobDownload` stream (`path`) |
+| `LocateBlob{reference}`, `LocateAttachment{reference, path}` (added in v7 by #22) | `blobs.stat{reference, path?}.localPath` (local socket only) |
+| `SweepBlobs` | Removed from the wire; daemon-scheduled sweeps (§5.2 notes), and the `attachment.cleanup` effect for a cancelled queued run's attachments |
+| `GetWorktreeCleanupStatus`, `RunWorktreeCleanup` (added in v7 by #62) | `storage.worktreeCleanupStatus`, `storage.runWorktreeCleanup` |
 | `ForkSessionFromResponse{turnCount}` | `dispatch threadFork{throughRunOrdinal}` |
 | `RewindSessionToMessage{turnCount}` | `dispatch checkpointRollback{restoreFiles: true}`, then `messageDispatch` of the edited text |
 | `ForkProviderSession{request}` | `dispatch threadImport{forkThroughTurn}` (per-provider fork logic moves behind `DriverV2::fork`) |
@@ -878,6 +952,9 @@ Every v7 message, command, operation, response, event and constant appears below
 | `WriteTerminal{data}` | DATA frames on the interactive `terminal` channel |
 | `ResizeTerminal{cols, rows}` | `terminal.resize` |
 | `CloseTerminal` | `terminal.close` |
+| `AttachTerminal{cols?, rows?, maxReplayBytes?}` (added in v7 by #60) | `terminal` stream subscription: `attached{generation, cols, rows, offset}` then the retained tail as DATA; the v7 response carries the tail as `TerminalSnapshot.replay` and its end `offset` |
+| `ClearTerminal` (added in v7 by #60) | `terminal.clear` |
+| `RestartTerminal` (added in v7 by #60) | `terminal.restart` |
 | `CloseSession` | `dispatch providerSessionDetach` (the thread survives) |
 
 ### 8.3 Workspace operations (all 30)
@@ -931,11 +1008,14 @@ Every v7 message, command, operation, response, event and constant appears below
 | `Session{session}` | `thread` snapshot |
 | `SessionMessageMatches` | `threads.search` result |
 | `ProviderSessions` | `providerSessions.list` result |
-| `ProviderSessionHistory` | `providerSessions.preview` result |
+| `ProviderSessionHistory` | The history `threadImport` adopts (no wire result) |
 | `ComposerDrafts` | `drafts.get` result |
 | `BlobStored{reference, path}` | `blobs.put` result (path via `blobs.stat.localPath`) |
 | `AttachmentStored` | `attachments.import` / `.importPath` result |
 | `BlobData{bytes}` | `blobDownload` DATA frames |
+| `BlobLocation{path}` | `blobs.stat.localPath` |
+| `TerminalAttached{terminal}` | `terminal` stream `attached` (+ replay as DATA); `terminal.restart` result `{generation}` |
+| `WorktreeCleanupStatus`, `WorktreeCleanupReport` | `storage.worktreeCleanupStatus` / `storage.runWorktreeCleanup` results |
 | `ProviderSessionForked` | `DispatchResult` of `threadImport` + `threadUpdated` |
 | `SessionForked{session, checkpointWarning}` | `DispatchResult` + events; the warning → `systemNotice` turn item |
 | `SessionRewound{session, cleanupWarning}` | Same as above |
@@ -990,9 +1070,10 @@ Every v7 message, command, operation, response, event and constant appears below
 | `turnFinished{success, summary}` | `runUpdated{completed \| failed}` from `TurnTerminal` (RFC 0002) |
 | `error` | `runUpdated.failure`, or `turnItemUpdated{error}` outside a run |
 | `processExited` | `providerSessionUpdated{status: exited}` |
-| `terminalOutput{data: base64}` | `terminal` DATA frames (raw bytes) |
+| `terminalOutput{data: base64, offset?}` | `terminal` DATA frames (raw bytes); `offset` becomes the stream cursor |
 | `terminalExited` | `terminal` item `exited{code}` |
 | `terminalError` | `terminal` item `error{message}` |
+| `terminalReset{generation, offset}` (added in v7 by #60) | `terminal` item `reset{offset}` |
 | `RuntimeEventCursorAdvanced` (client-only) | Removed; the client tracks its applied `StreamCursor` |
 
 ## 9. Codegen
@@ -1025,6 +1106,8 @@ commands! { "messageDispatch" => MessageDispatch(MessageDispatchCommand), scope 
    - Mobile starts on JSON. MessagePack is added through each platform's Codable or kotlinx format once measurements justify it.
 4. `protocol:generate` and `protocol:check` cover v8 the same way they cover v7 today: regenerate into a temporary directory, then diff byte for byte.
 
+> **Changed in #53.** The exporter, the lint and the TypeScript generator live in one crate, `crates/waku-codegen` (binary `waku-codegen`, `--check` for CI), instead of a mode of `export_types`, which stays the legacy ts-rs exporter. The generated TypeScript goes to `packages/waku-client/src/v8/generated/`, beside the hand-written v8 client in `src/v8/`, because `export_types` owns and rewrites `src/generated/`. The TypeScript MessagePack codec is our own (`src/v8/msgpack.ts`, about 300 lines) rather than `@msgpack/msgpack`: it writes the same bytes as `rmp-serde` for the same values (verified against the golden fixtures in both directions) and adds no dependency. The lint also rejects closed string enums: every string enum on the wire is an `open_string_enum!`. The `schema` feature only builds through `waku-codegen`, which is not a default workspace member.
+
 **ts-rs stays only for legacy types** until legacy removal, behind a feature flag (PLAN §5.2 item 8). It is not used for v8 because:
 - it emits TypeScript only, which rules it out under D2;
 - it models `Option` as `T | null`;
@@ -1041,23 +1124,26 @@ commands! { "messageDispatch" => MessageDispatch(MessageDispatchCommand), scope 
    - Move the current types to `waku_protocol::legacy`, re-exported at the old paths so nothing breaks.
    - Add `waku_protocol::v8`: the types in this RFC, the macros, the frame codec (preface, header, limits, zstd) and `export_schema`.
    - Rename the legacy constant.
+   - Done in #53 (part 1) with one difference: `LEGACY_PROTOCOL_VERSION` is added as an alias of `PROTOCOL_VERSION` instead of renaming it, so in-flight work on the legacy protocol does not conflict; the old name goes with the `legacy` module (step 5). The legacy types stay where they are until then.
 2. **Daemon serves both.** Legacy JSON stays on TCP `/v1`; v8 runs on the local socket and on `/v8`.
    - v8 methods that already have a v7 backend (settings, probe, files, vcs, skills, drafts, blobs, terminal, usage) start as adapters over the existing `Backend`.
+   - Done in #53 (part 2) for the whole non-orchestration catalog (see the note after §5.2's tables); the end-to-end tests in `waku-core`'s `v8::catalog` run the Rust client against the real backend for every domain.
    - Orchestration methods, the `shell` and `thread` streams and the output hub land with RFC 0001 (#165), #54 and #56.
 3. **Desktop.** `waku-client` gets the v8 transport (blocking reader and writer threads, keepalive, resume). The desktop switches behind a setting, then by default.
 4. **Web** (#144). The generated TS client replaces `packages/waku-client/src/client.ts`, and `apps/web` moves to it.
 5. **Removal.** Remove the legacy endpoint, the `legacy` module, `SaveTaskState`, the duplicate `event_to_wire` in `daemon.rs`, and the ts-rs export.
+   - Done under D6 (see Amendments): v7 and `/v1` are gone and v8 is the only protocol.
 
 **Existing data and other clients:**
-- **Persisted state.** No persisted state uses the wire format. `waku-blob:` and `waku-attachment:` references stay valid. Composer drafts are migrated by the daemon.
-- **Expo app.** `apps/mobile` stays on legacy and stops working against the fork's daemon at step 5. That is accepted under D2. Native apps arrive later via codegen.
+- **Persisted state.** No persisted state uses the wire format. `waku-blob:` and `waku-attachment:` references stay valid. Composer drafts are not migrated (D6): their keys are orchestration project and thread ids, and drafts under any other id are pruned (§5.2 notes).
+- **Expo app.** Deleted with the legacy protocol (PLAN decision D7). Native apps arrive later via codegen.
 - **Version skew.** A local daemon and the desktop ship together. A remote daemon with a different major answers `rejected{versionUnsupported}`, and the client asks the user to update one side.
 
 ## 11. Test plan
 
 - **Golden encodings.**
   - A `golden` generator builds canonical sample values for every message variant (frames, every method's params and result, every stream item, `DomainEvent`, `TurnItem`, `Error`).
-  - It writes `crates/waku-protocol/tests/golden/v8/<name>.json` and `<name>.msgpack.hex`.
+  - It writes `crates/waku-protocol/tests/v8/<name>.json` and `<name>.msgpack.hex` (plus raw frames as `<name>.hex` and an `index.json` with the routes needed to decode replies and items), from `tests/v8_golden.rs` with `WAKU_UPDATE_GOLDEN=1`.
   - Rust tests assert `encode(sample) == golden` byte for byte, and `decode(golden) == sample`.
   - Determinism comes from declaration-order fields, `BTreeMap`, omitted `None`s and minimal-width integers.
 - **Forward compatibility.** Vectors with unknown variants, unknown fields, unknown methods, unknown frame kinds and unknown string-enum values. Each must decode to `Unknown` or be skipped without losing the frame, and stream cursors must still advance.
@@ -1127,3 +1213,12 @@ commands! { "messageDispatch" => MessageDispatch(MessageDispatchCommand), scope 
 | Session TTL | 30 days, sliding |
 | Failed `Hello` limit | 10 per minute per remote address |
 | Reconnect backoff | 0, then 250 ms doubling to 10 s, ±20% jitter |
+
+## Amendments
+
+- **v7 and `/v1` are removed (D6, step 5 of §10).** The daemon speaks protocol v8 only. Deleted: the v7 messages and commands (`waku_protocol::protocol`: `ClientMessage`, `ServerMessage`, `Command`, `Request`, `ResponsePayload`, `SequencedEvent`, `ReplayCursor`), `WireDriverEvent` and its `driver_wire` codec (`event_to_wire`, `event_from_wire`), the v7 binary frames, `PROTOCOL_VERSION` and `LEGACY_PROTOCOL_VERSION`, the ts-rs bindings with their `export_types` binary and `waku-ts-stub`, the legacy hub with its replay journal and per-session mailboxes, and `DaemonClient` and `WorkspaceClient` in `waku-client`.
+  - The TCP listener accepts only the `/v8` upgrade with the `waku.v8` subprotocol (anything else is `404`, a missing subprotocol `426`); the local socket accepts only the `WAKU` preface and closes any other connection. The socket keeps its name.
+  - `DaemonReady.protocolVersion` now carries `PROTOCOL_MAJOR`. The remaining process contract (the environment variables, the readiness line, the terminal retention bounds) lives in `waku_protocol::daemon`.
+  - The non-orchestration catalog's adapter layer is a typed `waku_core::Backend` trait (one method per backend operation) instead of the v7 `Command`/`ResponsePayload` pair, and the PTY host reports to a `TerminalEvents` callback with raw bytes instead of base64 `WireDriverEvent`s.
+  - The legacy task store (`app.db`, its `sessions` and `messages` tables, the drizzle schema in `db/`) is gone; the daemon's data directory holds the orchestrator's `state.sqlite`, `blobs/`, `attachments/`, the composer drafts and the cleanup state. Blob sweeps keep what the orchestrator and the drafts reference.
+  - `bun run protocol:generate` and `protocol:check` run `waku-codegen` only. `packages/waku-client` keeps the v8 client (`src/v8`) and `fuzzy-search`; the v7 client, its generated types and the helpers only the Expo app used are deleted.

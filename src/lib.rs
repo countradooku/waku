@@ -66,7 +66,7 @@ pub mod bench_support;
 mod browser;
 mod computer_use;
 pub mod daemon;
-mod driver;
+mod daemon_v8;
 mod input;
 mod md;
 #[cfg(feature = "perf-counters")]
@@ -257,6 +257,7 @@ pub fn run() {
             crate::app::init_command_palette(cx);
             crate::app::init_commit_dialog_keys(cx);
             crate::app::init_goal_dialog_keys(cx);
+            crate::app::init_remote_folder_picker_keys(cx);
             crate::app::init_image_preview_keys(cx);
             crate::app::init_sidebar_keys(cx);
             crate::app::init_skills_keys(cx);

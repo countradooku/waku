@@ -11,6 +11,7 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
 
 use super::*;
+use crate::persistence::SessionMessageMatch;
 
 actions!(
     waku_command_palette,
@@ -112,7 +113,7 @@ enum PaletteIdentifier {
 impl PaletteIdentifier {
     const ALL: [Self; 2] = [Self::TaskId, Self::AgentCliThreadId];
 
-    fn value(self, session: Option<&AgentSession>) -> Option<String> {
+    fn value(self, session: Option<&ThreadView>) -> Option<String> {
         let session = session?;
         match self {
             Self::TaskId => Some(session.id.to_string()),
@@ -622,9 +623,26 @@ impl Waku {
         let Some(token) = fetch else {
             return;
         };
-        let search = self
-            .store
-            .session_message_search(query.clone(), MESSAGE_SEARCH_LIMIT);
+        // `threads.search`: one hit per thread, its best match.
+        let daemon_v8 = self.daemon_v8.clone();
+        let search_query = query.clone();
+        let search = move || -> anyhow::Result<Vec<SessionMessageMatch>> {
+            let hits = daemon_v8.call::<waku_client::v8::method::ThreadsSearch>(
+                waku_protocol::v8::orchestration::ThreadSearchParams {
+                    query: search_query,
+                    limit: Some(MESSAGE_SEARCH_LIMIT as u32),
+                    ..Default::default()
+                },
+            )?;
+            Ok(hits
+                .into_iter()
+                .map(|hit| SessionMessageMatch {
+                    session_id: hit.thread_id.0,
+                    source: MessageRole::Assistant,
+                    snippet: hit.snippet,
+                })
+                .collect())
+        };
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(MESSAGE_SEARCH_DEBOUNCE)
@@ -840,6 +858,12 @@ impl Waku {
                 "settings preferences usage tokens cost history",
             ),
             (
+                SettingsPage::Storage,
+                "settings.storage",
+                "icons/folder.svg",
+                "settings preferences storage worktrees cleanup delete disk space location",
+            ),
+            (
                 SettingsPage::Daemon,
                 "settings.daemon",
                 "icons/server.svg",
@@ -871,8 +895,7 @@ impl Waku {
 
     fn command_palette_task_candidates(&self) -> Vec<CommandPaletteItem> {
         let projects = self
-            .state
-            .projects
+            .projects()
             .iter()
             .map(|project| {
                 (
@@ -884,9 +907,7 @@ impl Waku {
                 )
             })
             .collect::<HashMap<_, _>>();
-        self.state
-            .sessions
-            .iter()
+        self.threads.listed()
             .filter(|session| session.has_started())
             .enumerate()
             .map(|(order, session)| {
@@ -944,14 +965,8 @@ impl Waku {
         self.command_palette
             .provider_sessions
             .iter()
-            .filter(|native| {
-                !self.state.sessions.iter().any(|session| {
-                    session.provider_cursor.as_ref().is_some_and(|cursor| {
-                        cursor.provider() == native.provider()
-                            && cursor.native_id() == native.cursor.native_id()
-                    })
-                })
-            })
+            // `providerSessions.list` already leaves out conversations a
+            // thread holds.
             .enumerate()
             .map(|(order, native)| {
                 let provider = native.provider();
@@ -1341,11 +1356,18 @@ impl Waku {
         self.refresh_command_palette_results("", false, cx);
         cx.notify();
 
-        let fetch = self
-            .store
-            .provider_sessions(provider, PROVIDER_SESSION_CATALOG_LIMIT);
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
-            let result = cx.background_executor().spawn(async move { fetch() }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    waku_client::surfaces::providers::provider_sessions(
+                        &daemon_v8,
+                        provider,
+                        PROVIDER_SESSION_CATALOG_LIMIT,
+                    )
+                })
+                .await;
             let _ = waku.update(cx, |waku, cx| {
                 if !waku.command_palette.open
                     || waku.command_palette.provider_session_generation != generation
@@ -1374,163 +1396,73 @@ impl Waku {
         .detach();
     }
 
-    fn import_provider_session(
-        &mut self,
-        summary: ProviderSessionSummary,
-        history: ProviderSessionHistory,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(session_id) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| {
-                session
-                    .provider_cursor
-                    .as_ref()
-                    .is_some_and(|cursor| same_provider_session(cursor, &summary.cursor))
-            })
-            .map(|session| session.id)
-        {
-            self.close_command_palette(window, cx);
-            self.settings_page = None;
-            self.select_session(session_id, cx);
-            let focus = self.composer_focus(cx);
-            window.focus(&focus, cx);
-            return;
-        }
-
-        let project_id = if let Some(project) = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.path == summary.cwd)
-        {
-            project.id
-        } else {
-            let project = Project::from_path(summary.cwd.clone());
-            let project_id = project.id;
-            self.state.projects.push(project);
-            self.analytics.track(crate::analytics::Event::ProjectAdded);
-            project_id
-        };
-        let provider = summary.provider();
-        let runtime_mode = self
-            .selected_session()
-            .map(|session| session.runtime_mode)
-            .unwrap_or(self.state.last_runtime_mode);
-        let now = unix_time();
-        let created_at = if summary.created_at == 0 {
-            now
-        } else {
-            summary.created_at
-        };
-        let updated_at = summary.updated_at.max(created_at);
-        let has_history = !history.messages.is_empty() || !history.turns.is_empty();
-        let mut session = AgentSession::new(project_id, provider);
-        session.runtime_mode = runtime_mode;
-        session.auto_title = Some(summary.title);
-        session.provider_cursor = Some(summary.cursor);
-        session.created_at = created_at;
-        session.updated_at = updated_at;
-        session.last_reply_at = has_history.then_some(updated_at);
-        session.messages = history.messages.into();
-        session.turns = history.turns;
-        let session_id = session.id;
-        self.state.push_session(session);
-
-        self.close_command_palette(window, cx);
-        self.settings_page = None;
-        self.select_session(session_id, cx);
-        let focus = self.composer_focus(cx);
-        window.focus(&focus, cx);
-    }
-
+    /// Adopt a provider's own conversation as a thread:
+    /// `thread.create{importedNativeThread}` in the project at its working
+    /// directory (created first when there is none). The thread is selected
+    /// once the store has it.
     fn load_command_palette_provider_session(
         &mut self,
         summary: ProviderSessionSummary,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.command_palette.provider_session_import.is_some() {
-            return;
-        }
-        if let Some(session_id) = self
-            .state
-            .sessions
+        let project_id = match self
+            .projects()
             .iter()
-            .find(|session| {
-                session
-                    .provider_cursor
-                    .as_ref()
-                    .is_some_and(|cursor| same_provider_session(cursor, &summary.cursor))
-            })
-            .map(|session| session.id)
+            .find(|project| project.path == summary.cwd)
         {
-            self.close_command_palette(window, cx);
-            self.settings_page = None;
-            self.select_session(session_id, cx);
-            let focus = self.composer_focus(cx);
-            window.focus(&focus, cx);
-            return;
-        }
-
-        self.command_palette.provider_session_import = Some(summary.cursor.clone());
-        self.command_palette.provider_session_error = None;
-        self.command_palette.provider_session_generation = self
-            .command_palette
-            .provider_session_generation
-            .wrapping_add(1);
-        let generation = self.command_palette.provider_session_generation;
-        let cursor = summary.cursor.clone();
-        let fetch = self
-            .store
-            .provider_session_history(cursor.clone(), summary.cwd.clone());
-        let window_handle = window.window_handle();
-        cx.notify();
-
-        cx.spawn(async move |waku, cx| {
-            let result = cx.background_executor().spawn(async move { fetch() }).await;
-            let update = waku.update(cx, |waku, cx| {
-                if !waku.command_palette.open
-                    || waku.command_palette.view != CommandPaletteView::Resume
-                    || waku.command_palette.provider_session_generation != generation
-                    || waku
-                        .command_palette
-                        .provider_session_import
-                        .as_ref()
-                        .is_none_or(|pending| !same_provider_session(pending, &cursor))
-                {
-                    return None;
-                }
-                match result {
-                    Ok(history) => Some((summary, history)),
-                    Err(error) => {
-                        let error = error.to_string();
-                        waku.command_palette.provider_session_import = None;
-                        waku.command_palette.provider_session_error = Some(error.clone());
-                        waku.show_toast(tr!("command_palette.resume_failed", error = error));
-                        cx.notify();
-                        None
-                    }
-                }
-            });
-            let Ok(Some((summary, history))) = update else {
-                return;
-            };
-            let _ = window_handle.update(cx, |_, window, cx| {
-                let _ = waku.update(cx, |waku, cx| {
-                    if waku.command_palette.open
-                        && waku.command_palette.view == CommandPaletteView::Resume
-                        && waku.command_palette.provider_session_generation == generation
-                    {
-                        waku.import_provider_session(summary, history, window, cx);
-                    }
-                });
-            });
-        })
-        .detach();
+            Some(project) => project.id,
+            None => {
+                let project = Project::from_path(summary.cwd.clone());
+                let project_id = project.id;
+                self.dispatch(
+                    waku_client::commands::create_project(project_id, project.path, project.name),
+                    ThreadAction::Other,
+                );
+                self.analytics.track(crate::analytics::Event::ProjectAdded);
+                project_id
+            }
+        };
+        let provider = summary.provider();
+        let runtime_mode = self
+            .selected_session()
+            .map(|session| session.runtime_mode)
+            .unwrap_or(self.state.last_runtime_mode);
+        let thread_id = Uuid::new_v4();
+        let command = Command::ThreadCreate {
+            thread_id: waku_protocol::orchestration::ThreadId(thread_id),
+            project_id: waku_protocol::orchestration::ProjectId(project_id),
+            title: Some(summary.title.clone()),
+            model_selection: waku_client::commands::Selection {
+                provider,
+                ..Default::default()
+            }
+            .model_selection(),
+            runtime_mode: runtime_mode.into(),
+            interaction_mode: Default::default(),
+            workspace: waku_protocol::orchestration::WorkspaceStrategy::Root { branch: None },
+            imported_native_thread: Some(waku_protocol::orchestration::ProviderRef::strong(
+                provider.into(),
+                summary.cursor.native_id(),
+            )),
+        };
+        // Until the stream has it, the thread is a placeholder row.
+        let mut placeholder =
+            ThreadView::draft(thread_id, project_id, provider, runtime_mode, unix_time());
+        placeholder.title = summary.title.clone();
+        placeholder.title_source = waku_protocol::orchestration::TitleSource::User;
+        placeholder.last_reply_at = Some(summary.updated_at.max(summary.created_at));
+        self.threads.drafts.insert(thread_id, placeholder);
+        self.threads.imports.insert(thread_id);
+        self.threads.store.open_thread(thread_id);
+        let ticket = self.threads.store.dispatch(command);
+        self.threads
+            .actions_insert(ticket, ThreadAction::Create { thread_id });
+        self.close_command_palette(window, cx);
+        self.settings_page = None;
+        self.select_session(thread_id, cx);
+        let focus = self.composer_focus(cx);
+        window.focus(&focus, cx);
     }
 
     fn execute_command_palette_selection(
@@ -2081,7 +2013,7 @@ mod tests {
 
     #[test]
     fn copy_identifier_commands_use_the_selected_tasks_live_ids() {
-        let mut session = AgentSession::new(Uuid::nil(), ProviderKind::Codex);
+        let mut session = super::test_support::test_session(Uuid::nil(), ProviderKind::Codex);
         session.id = Uuid::parse_str("ed28ee51-43cf-4a83-a52f-04c509ca2c09").unwrap();
 
         assert_eq!(
@@ -2093,9 +2025,7 @@ mod tests {
             None
         );
 
-        session.provider_cursor = Some(ProviderResumeCursor::Codex {
-            thread_id: "019cfd7a-6942-78b1-9d47-30576c562321".into(),
-        });
+        session.provider_native_id = Some("019cfd7a-6942-78b1-9d47-30576c562321".into());
         assert_eq!(
             PaletteIdentifier::AgentCliThreadId
                 .value(Some(&session))

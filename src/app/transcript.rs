@@ -226,7 +226,7 @@ impl Waku {
             return None;
         }
         let message_index = session.messages.iter().position(|message| {
-            message.role == MessageRole::User && message.turn_id == Some(anchor.turn_id)
+            message.role == MessageRole::User && message.id == anchor.message_id
         })?;
         self.transcript_row_kinds
             .borrow()
@@ -436,7 +436,7 @@ pub(super) struct TranscriptNavigationTurn {
 }
 
 pub(super) fn transcript_navigation_turns(
-    session: &AgentSession,
+    session: &ThreadView,
     row_kinds: &[TranscriptRowKind],
 ) -> Vec<TranscriptNavigationTurn> {
     let user_message_indexes = session
@@ -583,7 +583,7 @@ pub(super) fn should_show_navigation_rail(
 /// messages around reasoning and tool activity. The response footer belongs
 /// only to the terminal text part, once the turn has settled.
 pub(super) fn assistant_response_footer_index(
-    session: &AgentSession,
+    session: &ThreadView,
     message_index: usize,
 ) -> Option<usize> {
     let message = session.messages.get(message_index)?;
@@ -613,7 +613,7 @@ pub(super) fn assistant_response_footer_index(
 /// as the message — interim commentary the fold hides stays out, even while
 /// the fold is expanded for inspection.
 pub(super) fn assistant_response_footer(
-    session: &AgentSession,
+    session: &ThreadView,
     message_index: usize,
 ) -> Option<String> {
     if assistant_response_footer_index(session, message_index) != Some(message_index) {
@@ -643,7 +643,7 @@ pub(super) fn assistant_response_footer(
 }
 
 pub(super) fn assistant_response_footer_time(
-    session: &AgentSession,
+    session: &ThreadView,
     message_index: usize,
 ) -> Option<u64> {
     if assistant_response_footer_index(session, message_index) != Some(message_index) {
@@ -663,10 +663,7 @@ pub(super) fn assistant_response_footer_time(
 /// The assistant message whose content and identity back a settled turn's
 /// footer row. Blank/tool-only turns have no copy action and therefore no
 /// footer row.
-pub(super) fn response_footer_message_index(
-    session: &AgentSession,
-    turn_id: Uuid,
-) -> Option<usize> {
+pub(super) fn response_footer_message_index(session: &ThreadView, turn_id: Uuid) -> Option<usize> {
     let rows = turn_rows(session, turn_id);
     response_footer_message_index_from_rows(session, &rows)
 }
@@ -824,7 +821,7 @@ pub(super) fn transcript_row_kinds(
 /// activity from the transcript. Cheap mixing, not a real hash: this runs on
 /// the frame path, and the values it folds in are already well distributed.
 pub(super) fn transcript_rows_fingerprint(
-    session: &AgentSession,
+    session: &ThreadView,
     expanded_turns: &HashSet<Uuid>,
 ) -> u64 {
     let mut hash = mix_uuid(EMPTY_TRANSCRIPT_FINGERPRINT, session.id);
@@ -907,7 +904,7 @@ fn mix_turn_id(hash: u64, turn_id: Option<Uuid>) -> u64 {
 /// Every field this reads is fingerprinted by [`transcript_rows_fingerprint`]
 /// so frames can skip the fold; consult a new one and that must learn it too.
 pub(super) fn folded_transcript_row_kinds(
-    session: &AgentSession,
+    session: &ThreadView,
     expanded_turns: &HashSet<Uuid>,
 ) -> Vec<TranscriptRowKind> {
     let anchors = session
@@ -1037,7 +1034,7 @@ pub(super) fn folded_transcript_row_kinds(
 ///
 /// Both the fold and the response footer's copy content derive from this, so
 /// what gets copied is by construction what the fold leaves visible.
-fn turn_rows(session: &AgentSession, turn_id: Uuid) -> Vec<TranscriptRowKind> {
+fn turn_rows(session: &ThreadView, turn_id: Uuid) -> Vec<TranscriptRowKind> {
     let message_count = session.messages.len();
     // A block with (clamped) anchor `n` renders before message `n`, and blocks
     // sharing an anchor keep their insertion order — the stable sort mirrors
@@ -1066,7 +1063,7 @@ fn turn_rows(session: &AgentSession, turn_id: Uuid) -> Vec<TranscriptRowKind> {
 }
 
 fn response_footer_message_index_from_rows(
-    session: &AgentSession,
+    session: &ThreadView,
     turn_rows: &[TranscriptRowKind],
 ) -> Option<usize> {
     let message_index = turn_rows.iter().rev().find_map(|row| match *row {
@@ -1102,7 +1099,7 @@ fn response_footer_message_index_from_rows(
 /// run backwards over the reasoning and tool calls between it and the answer.
 /// A turn that produced no text at all — interrupted, or pure tool output — has
 /// no answer, and all of it folds.
-fn turn_answer_start(session: &AgentSession, turn_rows: &[TranscriptRowKind]) -> usize {
+fn turn_answer_start(session: &ThreadView, turn_rows: &[TranscriptRowKind]) -> usize {
     let is_answer_text = |row: &TranscriptRowKind| match *row {
         TranscriptRowKind::Message(message_index) => session
             .messages
@@ -1123,7 +1120,7 @@ fn turn_answer_start(session: &AgentSession, turn_rows: &[TranscriptRowKind]) ->
         .map_or(0, |index| index + 1)
 }
 
-fn row_turn_id(session: &AgentSession, row: TranscriptRowKind) -> Option<Uuid> {
+fn row_turn_id(session: &ThreadView, row: TranscriptRowKind) -> Option<Uuid> {
     match row {
         TranscriptRowKind::Message(index) => session.messages.get(index)?.turn_id,
         TranscriptRowKind::TurnBlock(index) => session.transcript_blocks.get(index)?.turn_id,
@@ -1137,7 +1134,7 @@ fn row_turn_id(session: &AgentSession, row: TranscriptRowKind) -> Option<Uuid> {
 /// The response owning a row for cross-row hover affordances. A user's prompt
 /// opens the turn but is not part of the response, so hovering it must not
 /// reveal the assistant footer.
-pub(super) fn response_row_turn_id(session: &AgentSession, row: TranscriptRowKind) -> Option<Uuid> {
+pub(super) fn response_row_turn_id(session: &ThreadView, row: TranscriptRowKind) -> Option<Uuid> {
     match row {
         TranscriptRowKind::Message(index) => {
             session
@@ -1154,7 +1151,7 @@ pub(super) fn response_row_turn_id(session: &AgentSession, row: TranscriptRowKin
     }
 }
 
-pub(super) fn turn_fold_label(session: &AgentSession, turn_id: Uuid) -> String {
+pub(super) fn turn_fold_label(session: &ThreadView, turn_id: Uuid) -> String {
     let Some(turn) = session.turns.iter().find(|turn| turn.id == turn_id) else {
         return tr!("transcript.worked");
     };

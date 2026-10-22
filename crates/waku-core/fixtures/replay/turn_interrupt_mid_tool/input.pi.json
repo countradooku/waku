@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"[slow] run the long command"},{"type":"wait","until":"tool_started"},{"type":"interrupt"},{"type":"wait","until":"turn_terminal"}]}

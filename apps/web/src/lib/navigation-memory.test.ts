@@ -5,33 +5,20 @@ import {
   taskRemovalDestination,
   writeRememberedNavigation,
 } from './navigation-memory'
-import { createProject, createSession } from './daemon-api'
+import { project, taskSummary } from './test-fixtures'
 
 describe('remembered navigation', () => {
   test('restores a new task and its project per daemon', () => {
     const storage = memoryStorage()
-    writeRememberedNavigation(storage, 'ws://first', {
-      kind: 'newTask',
-      projectId: 'waku',
-    })
-    writeRememberedNavigation(storage, 'ws://second', {
-      kind: 'session',
-      sessionId: 'session-2',
-    })
+    writeRememberedNavigation(storage, 'ws://first', { kind: 'newTask', projectId: 'waku' })
+    writeRememberedNavigation(storage, 'ws://second', { kind: 'session', sessionId: 'session-2' })
 
-    expect(readRememberedNavigation(storage, 'ws://first')).toEqual({
-      kind: 'newTask',
-      projectId: 'waku',
-    })
-    expect(readRememberedNavigation(storage, 'ws://second')).toEqual({
-      kind: 'session',
-      sessionId: 'session-2',
-    })
+    expect(readRememberedNavigation(storage, 'ws://first')).toEqual({ kind: 'newTask', projectId: 'waku' })
+    expect(readRememberedNavigation(storage, 'ws://second')).toEqual({ kind: 'session', sessionId: 'session-2' })
   })
 
   test('ignores malformed state', () => {
-    const storage = memoryStorage('{broken')
-    expect(readRememberedNavigation(storage, 'ws://first')).toBeNull()
+    expect(readRememberedNavigation(memoryStorage('{broken'), 'ws://first')).toBeNull()
   })
 })
 
@@ -50,47 +37,25 @@ describe('browser route transitions', () => {
 })
 
 describe('selected task removal', () => {
-  test('opens the newest remaining task in the same project', () => {
-    const project = { ...createProject('/repos/waku'), id: 'waku' }
-    const removed = { ...createSession(project.id, 'codex', false), id: 'removed' }
-    const older = {
-      ...createSession(project.id, 'codex', false),
-      id: 'older',
-      updated_at: 10,
-    }
-    const newer = {
-      ...createSession(project.id, 'claude', false),
-      id: 'newer',
-      updated_at: 20,
-    }
+  const waku = project('waku', 'waku', '/repos/waku')
 
-    expect(taskRemovalDestination(
-      [project],
-      [project],
-      [older, newer],
-      removed,
-    )).toEqual({ kind: 'session', sessionId: 'newer' })
+  test('opens the newest remaining task in the same project', () => {
+    const removed = taskSummary({ id: 'removed', projectId: 'waku' })
+    const older = taskSummary({ id: 'older', projectId: 'waku', updatedAt: 10 })
+    const newer = taskSummary({ id: 'newer', projectId: 'waku', updatedAt: 20 })
+    expect(taskRemovalDestination([waku], [waku], [older, newer, removed], removed))
+      .toEqual({ kind: 'session', sessionId: 'newer' })
   })
 
   test('opens a fresh task in the same ordinary project when history is empty', () => {
-    const project = { ...createProject('/repos/waku'), id: 'waku' }
-    const removed = createSession(project.id, 'codex', false)
-    expect(taskRemovalDestination([project], [project], [], removed)).toEqual({
-      kind: 'newTask',
-      project,
-    })
+    const removed = taskSummary({ projectId: 'waku' })
+    expect(taskRemovalDestination([waku], [waku], [], removed)).toEqual({ kind: 'newTask', project: waku })
   })
 
-  test('creates a fresh projectless workspace after deleting its last task', () => {
-    const project = {
-      ...createProject('/home/user/.waku/projects/old-task'),
-      id: 'projectless',
-      name: 'No project',
-    }
-    const removed = createSession(project.id, 'codex', false)
-    expect(taskRemovalDestination([project], [], [], removed)).toEqual({
-      kind: 'projectless',
-    })
+  test('creates a fresh projectless task after deleting its last task', () => {
+    const projectless = project('projectless', 'No project', '/home/user/.waku/projects')
+    const removed = taskSummary({ projectId: 'projectless' })
+    expect(taskRemovalDestination([projectless], [], [], removed)).toEqual({ kind: 'projectless' })
   })
 })
 

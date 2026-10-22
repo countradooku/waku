@@ -1,0 +1,1 @@
+{"instance":{"background":true},"steps":[{"type":"message","text":"one"},{"type":"wait","until":"ms:1860000"},{"type":"release_idle"},{"type":"wait","until":"ms:12600000"},{"type":"release_idle"},{"type":"message","text":"two"}]}

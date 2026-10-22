@@ -147,6 +147,20 @@ impl AttachmentStore {
         Ok(path.to_owned())
     }
 
+    /// Removes one attachment tree. Removing a missing or malformed reference
+    /// is a no-op, so a retried cleanup succeeds. Returns the bytes freed.
+    pub fn remove(&self, reference: &str) -> io::Result<u64> {
+        let Some(path) = self.path_for(reference) else {
+            return Ok(0);
+        };
+        if !path.exists() {
+            return Ok(0);
+        }
+        let size = directory_size(&path).unwrap_or_default();
+        fs::remove_dir_all(&path)?;
+        Ok(size)
+    }
+
     /// Removes daemon-owned attachment trees that are no longer referenced by
     /// persisted messages or composer drafts. In-progress staging directories
     /// are deliberately ignored so an upload cannot race a cleanup pass.

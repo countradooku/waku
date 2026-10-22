@@ -6,47 +6,58 @@ description = "Headless provider, persistence, and workspace runtime for Waku"
 license = "GPL-3.0-only"
 readme = "README.md"
 
-[features]
-# `tracing` spans around event fan-out, request dispatch and task-state saves.
-# Off by default, and without it every span compiles to nothing.
-profiling = ["dep:tracing"]
-
 [dependencies]
 agent-client-protocol = "2.0.0"
+# `DriverV2` and `DriverSession` are object-safe async traits (RFC 0002 D-1).
+async-trait = "0.1"
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1.0"
 base64 = "0.22"
+# `canonicalize` without `\\?\` verbatim prefixes on Windows, which Git rejects.
+dunce = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 crossbeam-channel = "0.5"
 dirs = "6.0"
 nucleo-matcher = "0.3"
 parking_lot = "0.12"
+# The daemon terminal's output thread blocks on PTY readiness instead of
+# sleeping between reads (#178), through alacritty's `EventedReadWrite` on
+# Unix PTYs and ConPTY alike (#60). Already in the tree through alacritty.
+polling = "3"
 rust-i18n = "4"
+# Replay fixtures: secret shapes the recorder's sanitizer redacts (RFC 0002).
+regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde-saphyr = { version = "0.0.29", default-features = false, features = ["deserialize"] }
 serde_json = "1.0"
+# Content revisions and blob digests of protocol v8 (RFC 0003).
+sha2 = "0.10"
 smol = "2"
 subtle = "2"
+# Unified diffs of mismatched replay frames (RFC 0002 "Matching").
+similar = "3"
+# Temporary workspaces and databases of the replay harness and recorder.
+tempfile = "3"
 toml = "0.8"
-tracing = { version = "0.1", optional = true }
 trash = "5.2.6"
 # The socket layer is evented (#18): a small multi-thread runtime owns accept,
 # per-connection reader and writer tasks and the keepalive timers, while
 # backend requests run on its blocking pool. RFC 0002 moves the drivers onto
 # the same runtime later.
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util", "process"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 url = "2"
 uuid = { version = "1.18", features = ["v4", "serde"] }
+# The orchestrator is the daemon's source of truth (#55): `daemon_host`
+# composes it with the effect ports implemented here, and protocol v8 serves
+# its streams and methods (#54, #56, #57).
+waku-orchestrator = { path = "../waku-orchestrator" }
 waku-protocol = { path = "../waku-protocol" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-# The daemon terminal's output thread blocks on PTY readiness instead of
-# sleeping between reads (#178). Already in the tree through alacritty.
-polling = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", default-features = false, features = [
@@ -60,12 +71,12 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
-criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 waku-client = { path = "../waku-client" }
 
 [lints]
 workspace = true
 
-[[bench]]
-name = "persistence"
-harness = false
+# Records a replay fixture from a live session (RFC 0002 "Recorder").
+[[bin]]
+name = "waku-replay-record"
+path = "src/bin/waku-replay-record.rs"

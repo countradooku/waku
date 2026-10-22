@@ -2,32 +2,36 @@ use super::composer::{
     ComposerSubmitAction, composer_submit_action, dropped_file_mention, merged_submission,
     next_picker_highlight, visible_branch_entries,
 };
-use super::runtime::{merge_remote_session_catalog, session_has_active_provider_turn};
 use super::settings::visible_settings_pages;
+use super::test_support::{TranscriptFixture as _, test_session};
 use super::{
     ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation, EscapeStopPress, EscapeStopTarget,
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, PendingUserInput, SessionNavigation,
-    StreamDeltaKind, TranscriptRowKind::*, active_navigation_turn_index,
-    append_text_delta_to_session, assistant_response_footer, assistant_response_footer_index,
-    assistant_response_footer_time, compact_driver_error, disclosure_leading_space, fenced_code,
-    fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
+    TranscriptRowKind::*, active_navigation_turn_index, assistant_response_footer,
+    assistant_response_footer_index, assistant_response_footer_time, disclosure_leading_space,
+    fenced_code, fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
     format_worked_duration, format_working_elapsed, maintain_transcript_anchor, message_opens_turn,
     message_starts_followup_turn, navigation_preview_snippet, navigation_rail_fade_visibility,
-    navigation_rail_height, navigation_rail_scale, paused_toast_duration, pop_stream_batch,
-    push_transcript_activity, response_footer_message_index, response_row_turn_id,
-    session_accepts_turn_output, session_is_reapable, should_refresh_branch_after_activity,
-    should_show_navigation_rail, should_show_scroll_to_bottom, task_id_from_notification_tag,
-    task_notification_tag, transcript_anchor_end_space, transcript_navigation_turns,
-    transcript_rests_at_tail, transcript_row_kinds, transcript_row_splice,
-    transcript_rows_fingerprint, widened_panel_width_for_file_editor,
-    widened_panel_width_for_review,
+    navigation_rail_height, navigation_rail_scale, paused_toast_duration,
+    response_footer_message_index, response_row_turn_id, should_show_navigation_rail,
+    should_show_scroll_to_bottom, task_id_from_notification_tag, task_notification_tag,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_rests_at_tail,
+    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
-    ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointFile, CheckpointStatus,
-    DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock, RuntimeEventCursor,
-    SessionStatus, TranscriptBlock, TurnStatus, UserInputOption, UserInputQuestion,
+    ActivityItem, ActivityKind, Checkpoint, CheckpointFile, CheckpointStatus, Message, MessageRole,
+    ProviderKind, ReasoningBlock, SessionStatus, TranscriptBlock, TurnStatus, UserInputOption,
+    UserInputQuestion,
 };
+use gpui::{ListAlignment, ListState, Pixels, px};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
+use uuid::Uuid;
+use waku_client::thread_view::ThreadView;
 
 #[test]
 fn structured_user_input_preserves_question_order_and_custom_answer_precedence() {
@@ -67,14 +71,7 @@ fn structured_user_input_preserves_question_order_and_custom_answer_precedence()
     assert_eq!(answers[1].question_id, "notes");
     assert_eq!(answers[1].answers, ["Use the EU region"]);
 }
-use gpui::{ListAlignment, ListState, Pixels, px};
-use std::{
-    collections::{HashSet, VecDeque},
-    time::{Duration, Instant},
-};
-use uuid::Uuid;
-
-fn attach_changed_files(session: &mut AgentSession, files: Vec<CheckpointFile>) {
+fn attach_changed_files(session: &mut ThreadView, files: Vec<CheckpointFile>) {
     let turn = session.turns.last_mut().expect("the test has a turn");
     turn.checkpoint = Some(Checkpoint {
         turn_count: turn.turn_count,
@@ -89,42 +86,6 @@ fn attach_changed_files(session: &mut AgentSession, files: Vec<CheckpointFile>) 
         .as_mut()
         .expect("checkpoint was just attached")
         .refresh_totals();
-}
-
-#[test]
-fn remote_task_catalog_adds_web_tasks_without_replacing_hydrated_detail() {
-    let project_id = Uuid::new_v4();
-    let mut local = AgentSession::new(project_id, ProviderKind::Codex);
-    local.title = "Local title".into();
-    local
-        .messages
-        .push(Message::new(MessageRole::User, "keep this transcript"));
-    let local_id = local.id;
-
-    let mut local_projection = local.list_projection();
-    local_projection.title = "Renamed elsewhere".into();
-    local_projection.status = SessionStatus::Waiting;
-    local_projection.updated_at += 10;
-
-    let mut web_task = AgentSession::new(project_id, ProviderKind::Claude).list_projection();
-    web_task.title = "Created in Web".into();
-    let web_task_id = web_task.id;
-
-    let mut catalog = vec![local];
-    let removed =
-        merge_remote_session_catalog(&mut catalog, vec![local_projection, web_task], |_| false);
-
-    assert!(removed.is_empty());
-    assert_eq!(catalog.len(), 2);
-    let merged_local = catalog
-        .iter()
-        .find(|session| session.id == local_id)
-        .unwrap();
-    assert_eq!(merged_local.title, "Renamed elsewhere");
-    assert_eq!(merged_local.status, SessionStatus::Waiting);
-    assert_eq!(merged_local.messages.len(), 1);
-    assert_eq!(merged_local.messages[0].content, "keep this transcript");
-    assert!(catalog.iter().any(|session| session.id == web_task_id));
 }
 
 #[test]
@@ -149,48 +110,6 @@ fn composer_only_offers_stop_after_submission_preparation() {
         composer_submit_action(Some(SessionStatus::Failed), false),
         ComposerSubmitAction::Send
     );
-}
-
-#[test]
-fn connecting_status_does_not_hide_a_started_provider_turn_from_steering() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-    session.begin_turn("inspect the project");
-    session.mark_active_turn_provider_started();
-    session.status = SessionStatus::Connecting;
-
-    assert!(session_has_active_provider_turn(&session));
-}
-
-#[test]
-fn foreground_output_recovers_a_missed_provider_turn_start_for_steering() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-    session.begin_turn("inspect the project");
-    session.status = SessionStatus::Connecting;
-
-    assert!(!session_has_active_provider_turn(&session));
-    assert!(session_accepts_turn_output(&mut session));
-    assert_eq!(session.status, SessionStatus::Working);
-    assert!(session_has_active_provider_turn(&session));
-}
-
-#[test]
-fn completed_mutating_activities_refresh_git_status() {
-    assert!(should_refresh_branch_after_activity(
-        ActivityKind::FileChange,
-        true
-    ));
-    assert!(should_refresh_branch_after_activity(
-        ActivityKind::Command,
-        true
-    ));
-    assert!(!should_refresh_branch_after_activity(
-        ActivityKind::FileChange,
-        false
-    ));
-    assert!(!should_refresh_branch_after_activity(
-        ActivityKind::FileRead,
-        true
-    ));
 }
 
 #[test]
@@ -324,23 +243,6 @@ fn branch_picker_pins_selection_and_filters_by_name() {
 }
 
 #[test]
-fn driver_errors_are_bounded_before_rendering() {
-    let error = (0..20)
-        .map(|line| format!("provider diagnostic line {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let compact = compact_driver_error(&error);
-
-    assert_eq!(compact.lines().count(), 7);
-    assert!(compact.ends_with('…'));
-    assert!(!compact.contains("provider diagnostic line 6"));
-
-    let long = compact_driver_error(&"x".repeat(2_000));
-    assert_eq!(long.chars().count(), 800);
-    assert!(long.ends_with('…'));
-}
-
-#[test]
 fn session_navigation_tracks_back_forward_and_new_branches() {
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
@@ -450,7 +352,7 @@ fn conversation_navigation_active_turn_follows_the_scroll_top_and_tail() {
 #[test]
 fn conversation_navigation_preview_uses_each_prompt_and_latest_response() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let mut session = test_session(project_id, ProviderKind::Codex);
     session.begin_turn("  First\n\nprompt  ");
     session.push_message(MessageRole::Assistant, "Interim update");
     session.push_message(MessageRole::Assistant, "Final answer");
@@ -470,37 +372,6 @@ fn conversation_navigation_preview_uses_each_prompt_and_latest_response() {
         navigation_preview_snippet("one   two\nthree", 20),
         "one two three"
     );
-}
-
-#[test]
-fn conversation_navigation_preview_does_not_change_during_a_running_turn() {
-    let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
-    let session_id = session.id;
-    session.begin_turn("Streaming prompt");
-    append_text_delta_to_session(
-        std::slice::from_mut(&mut session),
-        session_id,
-        false,
-        "Partial".to_owned(),
-    );
-    let rows = [Message(0), Message(1)];
-    let before = transcript_navigation_turns(&session, &rows);
-
-    append_text_delta_to_session(
-        std::slice::from_mut(&mut session),
-        session_id,
-        true,
-        " response".to_owned(),
-    );
-    let during = transcript_navigation_turns(&session, &rows);
-
-    assert_eq!(before, during);
-    assert_eq!(during[0].response, "");
-
-    session.finish_active_turn(TurnStatus::Completed);
-    let completed = transcript_navigation_turns(&session, &rows);
-    assert_eq!(completed[0].response, "Partial response");
 }
 
 #[test]
@@ -659,7 +530,7 @@ fn pending_expansion_reasserts_the_user_message_anchor() {
 
 #[test]
 fn settling_an_anchored_turn_splices_without_resetting_its_prompt() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     session.begin_turn("hi");
     session.push_message(MessageRole::Assistant, "Hello.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -728,7 +599,7 @@ fn only_later_user_messages_start_followup_turns() {
 
 #[test]
 fn only_the_turn_opening_prompt_is_a_rewind_boundary() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     session.begin_turn("first prompt");
     session.push_message(MessageRole::Assistant, "working on it");
     // A steer the provider folded into the live turn.
@@ -755,158 +626,6 @@ fn fenced_code_collects_all_blocks_without_languages() {
         Some("fn main() {}\n\ncargo test")
     );
     assert_eq!(fenced_code("No code here"), None);
-}
-
-#[test]
-fn stream_batches_commit_full_adjacent_text_and_preserve_event_order() {
-    let runtime_id = Uuid::new_v4();
-    let epoch = Uuid::new_v4();
-    let mut events = VecDeque::from([
-        DriverEvent::TextDelta("first ".into()),
-        DriverEvent::RuntimeEventCursorAdvanced(RuntimeEventCursor {
-            runtime_id,
-            epoch,
-            sequence: 1,
-        }),
-        DriverEvent::TextDelta("line\nsecond line".into()),
-        DriverEvent::RuntimeEventCursorAdvanced(RuntimeEventCursor {
-            runtime_id,
-            epoch,
-            sequence: 2,
-        }),
-        DriverEvent::Activity {
-            id: None,
-            kind: ActivityKind::Tool,
-            title: "Tool".into(),
-            detail: None,
-            complete: true,
-        },
-        DriverEvent::TextDelta("after tool".into()),
-    ]);
-
-    assert!(matches!(
-        pop_stream_batch(&mut events, StreamDeltaKind::Text),
-        Some(DriverEvent::TextDelta(text)) if text == "first line\nsecond line"
-    ));
-    assert!(matches!(
-        events.pop_front(),
-        Some(DriverEvent::RuntimeEventCursorAdvanced(cursor)) if cursor.sequence == 2
-    ));
-    assert!(matches!(events.front(), Some(DriverEvent::Activity { .. })));
-    assert!(matches!(
-        events.get(1),
-        Some(DriverEvent::TextDelta(text)) if text == "after tool"
-    ));
-}
-
-#[test]
-fn stream_parts_keep_targeting_the_running_session_after_selection_changes() {
-    let project_id = uuid::Uuid::new_v4();
-    let mut running = AgentSession::new(project_id, ProviderKind::Codex);
-    running.begin_turn("background task");
-    running.status = SessionStatus::Working;
-    let running_id = running.id;
-    let visible = AgentSession::new(project_id, ProviderKind::Claude);
-    let visible_id = visible.id;
-    let mut sessions = vec![running, visible];
-
-    append_text_delta_to_session(&mut sessions, running_id, false, "first".into());
-    // Navigation changes only which task is rendered. The runtime keeps
-    // emitting with its own task ID while another task is visible.
-    let selected_session = visible_id;
-    append_text_delta_to_session(&mut sessions, running_id, true, " second".into());
-
-    assert_eq!(selected_session, visible_id);
-    assert_eq!(sessions[0].messages[1].content, "first second");
-    assert!(sessions[0].messages[1].streaming);
-    assert!(sessions[1].messages.is_empty());
-}
-
-#[test]
-fn reasoning_and_tools_share_one_ordered_activity_block() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-    session.begin_turn("Build it");
-
-    push_transcript_activity(
-        &mut session,
-        ActivityItem::from_reasoning(
-            ReasoningBlock {
-                content: "Inspecting the project".into(),
-                started_at_ms: 1_000,
-                finished_at_ms: 2_000,
-            },
-            true,
-        ),
-        false,
-    );
-    push_transcript_activity(
-        &mut session,
-        ActivityItem::new(None, ActivityKind::Command, "Ran tests", None, false),
-        true,
-    );
-
-    assert_eq!(session.transcript_blocks.len(), 1);
-    assert_eq!(session.transcript_blocks[0].activities.len(), 2);
-    assert_eq!(
-        session.transcript_blocks[0]
-            .activities
-            .iter()
-            .map(|activity| activity.kind)
-            .collect::<Vec<_>>(),
-        [ActivityKind::Reasoning, ActivityKind::Command]
-    );
-
-    session.push_message(MessageRole::Assistant, "Interim update");
-    push_transcript_activity(
-        &mut session,
-        ActivityItem::from_reasoning(
-            ReasoningBlock {
-                content: "Checking the result".into(),
-                started_at_ms: 3_000,
-                finished_at_ms: 4_000,
-            },
-            false,
-        ),
-        false,
-    );
-    assert_eq!(
-        session.transcript_blocks.len(),
-        2,
-        "assistant text keeps later work at its own transcript position"
-    );
-}
-
-#[test]
-fn idle_reaping_releases_finished_sessions_but_never_a_running_turn() {
-    let project_id = uuid::Uuid::new_v4();
-    let fresh = Duration::from_secs(60);
-    let stale = Duration::from_secs(60 * 60);
-
-    let idle = AgentSession::new(project_id, ProviderKind::Codex);
-    assert!(session_is_reapable(Some(&idle), stale, false));
-    assert!(!session_is_reapable(Some(&idle), fresh, false));
-    assert!(!session_is_reapable(Some(&idle), stale, true));
-
-    let mut working = AgentSession::new(project_id, ProviderKind::Codex);
-    working.begin_turn("a long tool call");
-    working.status = SessionStatus::Working;
-    assert!(!session_is_reapable(Some(&working), stale, false));
-
-    // An approval can sit unanswered far longer than the idle window; its agent
-    // is blocked on the user, not abandoned.
-    let mut waiting = AgentSession::new(project_id, ProviderKind::Codex);
-    waiting.begin_turn("needs approval");
-    waiting.status = SessionStatus::Waiting;
-    assert!(!session_is_reapable(Some(&waiting), stale, false));
-
-    let mut failed = AgentSession::new(project_id, ProviderKind::Codex);
-    failed.begin_turn("failed turn");
-    failed.finish_active_turn(TurnStatus::Failed);
-    failed.status = SessionStatus::Failed;
-    assert!(session_is_reapable(Some(&failed), stale, false));
-
-    // A runtime whose session is already gone is pure leak.
-    assert!(session_is_reapable(None, stale, false));
 }
 
 #[test]
@@ -1005,7 +724,7 @@ fn splicing_one_row_in_place_preserves_the_list() {
 #[test]
 fn row_kinds_and_row_count_describe_the_same_rows() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let mut session = test_session(project_id, ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1057,7 +776,7 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
 
 #[test]
 fn changed_files_attach_to_the_response_footer() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     let first_turn = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -1089,7 +808,7 @@ fn changed_files_attach_to_the_response_footer() {
 
 #[test]
 fn response_hover_owns_every_response_row_but_not_the_prompt() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1120,7 +839,7 @@ fn response_hover_owns_every_response_row_but_not_the_prompt() {
 
 #[test]
 fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Make the change");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1163,7 +882,7 @@ fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
 
 #[test]
 fn changed_files_surface_appears_only_for_a_ready_nonempty_checkpoint() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -1199,7 +918,7 @@ fn changed_files_surface_appears_only_for_a_ready_nonempty_checkpoint() {
 
 #[test]
 fn checkpoint_completion_invalidates_the_cached_transcript_rows() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -1244,130 +963,10 @@ fn an_inline_checkpoint_keeps_followup_row_identity() {
     );
 }
 
-/// `refresh_transcript_row_kinds` skips the fold while this fingerprint holds
-/// still, so anything that moves the rows has to move the fingerprint too.
-/// Missing one leaves the transcript rendering stale rows, which drops every
-/// reasoning block and tool activity from the session.
-#[test]
-fn the_row_fingerprint_moves_whenever_the_fold_does() {
-    let mut base = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-    let turn_id = base.begin_turn("Build it");
-    base.transcript_blocks.push(TranscriptBlock {
-        after_message: 1,
-        turn_id: Some(turn_id),
-        activities: vec![ActivityItem::from_reasoning(
-            ReasoningBlock {
-                content: "Looking around".into(),
-                started_at_ms: 1_000,
-                finished_at_ms: 2_000,
-            },
-            true,
-        )],
-    });
-    base.push_message(MessageRole::Assistant, "I found the relevant code.");
-    base.transcript_blocks.push(TranscriptBlock {
-        after_message: 2,
-        turn_id: Some(turn_id),
-        activities: vec![ActivityItem::new(
-            None,
-            ActivityKind::Command,
-            "Ran tests",
-            None,
-            true,
-        )],
-    });
-    base.push_message(MessageRole::Assistant, "Done. The change is ready.");
-    base.finish_active_turn(TurnStatus::Completed);
-
-    let settled = HashSet::new();
-    // Both states, because a mutation inside the fold only moves rows once the
-    // reader opens it — and those rows have to be right when they do.
-    let rows = |session: &AgentSession| {
-        (
-            folded_transcript_row_kinds(session, &settled),
-            folded_transcript_row_kinds(session, &HashSet::from([turn_id])),
-        )
-    };
-    let baseline_rows = rows(&base);
-    let baseline_fingerprint = transcript_rows_fingerprint(&base, &settled);
-
-    // Expansion lives outside the session, so check it against the same base.
-    assert_ne!(
-        transcript_rows_fingerprint(&base, &HashSet::from([turn_id])),
-        baseline_fingerprint,
-        "expanding a turn fold"
-    );
-
-    let mutations: Vec<(&str, fn(&mut AgentSession))> = vec![
-        ("a new message", |session| {
-            session.push_message(MessageRole::User, "One more thing");
-        }),
-        ("a new transcript block", |session| {
-            session.transcript_blocks.push(TranscriptBlock {
-                after_message: session.messages.len(),
-                turn_id: session.turns.first().map(|turn| turn.id),
-                activities: vec![ActivityItem::new(
-                    None,
-                    ActivityKind::Command,
-                    "Ran tests",
-                    None,
-                    true,
-                )],
-            });
-        }),
-        // `update_activity` re-anchors the block it is still appending to, so
-        // the anchor cannot be treated as fixed at insertion.
-        ("an existing block re-anchored", |session| {
-            session.transcript_blocks.make_mut(0).after_message = 2;
-        }),
-        ("a turn returning to running", |session| {
-            session.turns[0].status = TurnStatus::Running;
-        }),
-        ("a message reassigned to no turn", |session| {
-            session.messages.make_mut(1).turn_id = None;
-        }),
-        // A blank part is work, not answer, so where the answer starts — and
-        // with it everything the fold swallows — turns on the content itself.
-        ("the final text part left blank", |session| {
-            session.messages.make_mut(2).content.clear();
-        }),
-    ];
-
-    for (description, mutate) in mutations {
-        let mut session = base.clone();
-        mutate(&mut session);
-        assert_ne!(
-            rows(&session),
-            baseline_rows,
-            "{description} should change the rows — the case no longer proves anything"
-        );
-        assert_ne!(
-            transcript_rows_fingerprint(&session, &settled),
-            baseline_fingerprint,
-            "{description} changed the rows but not the fingerprint, so the \
-             cached rows would go stale"
-        );
-    }
-
-    // The point of the guard: streamed text lands in an existing message
-    // without moving a single row, and must not trigger a refold.
-    let mut streamed = base.clone();
-    streamed
-        .messages
-        .make_mut(2)
-        .content
-        .push_str(" Let me know.");
-    assert_eq!(
-        transcript_rows_fingerprint(&streamed, &settled),
-        baseline_fingerprint,
-        "appending to a message leaves the rows exactly where they were"
-    );
-}
-
 #[test]
 fn a_settled_turn_folds_all_of_its_work_above_the_answer() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let mut session = test_session(project_id, ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1428,7 +1027,7 @@ fn a_settled_turn_folds_all_of_its_work_above_the_answer() {
 /// work between them, so they are all answer and none of them folds.
 #[test]
 fn consecutive_trailing_text_parts_all_stay_out_of_the_fold() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1462,7 +1061,7 @@ fn consecutive_trailing_text_parts_all_stay_out_of_the_fold() {
 /// so the whole turn folds behind its summary rather than spilling raw work.
 #[test]
 fn a_turn_without_an_answer_folds_completely() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1492,7 +1091,7 @@ fn a_turn_without_an_answer_folds_completely() {
 #[test]
 fn assistant_response_footer_is_owned_by_the_terminal_part_and_copies_the_visible_answer() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let mut session = test_session(project_id, ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1544,7 +1143,7 @@ fn assistant_response_footer_is_owned_by_the_terminal_part_and_copies_the_visibl
 
 #[test]
 fn response_footer_follows_trailing_tool_activity() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Inspect it");
     session.push_message(MessageRole::Assistant, "I’ll inspect the implementation.");
     session.transcript_blocks.push(TranscriptBlock {
@@ -1575,7 +1174,7 @@ fn response_footer_follows_trailing_tool_activity() {
 /// the text before it, so the copied message must leave that text out too.
 #[test]
 fn assistant_response_footer_treats_a_blank_part_as_work() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "First text part.");
     session.push_message(MessageRole::Assistant, "  ");
@@ -1600,7 +1199,7 @@ fn assistant_response_footer_treats_a_blank_part_as_work() {
 #[test]
 fn running_assistant_response_withholds_its_footer() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let mut session = test_session(project_id, ProviderKind::Codex);
     session.begin_turn("Keep going");
     session.push_message(MessageRole::Assistant, "Interim text.");
 
@@ -1611,7 +1210,7 @@ fn running_assistant_response_withholds_its_footer() {
 #[test]
 fn unkeyed_assistant_message_keeps_a_standalone_footer() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let mut session = test_session(project_id, ProviderKind::Codex);
     session
         .messages
         .push(Message::new(MessageRole::Assistant, "Standalone response."));
@@ -1656,7 +1255,7 @@ fn turn_fold_visibility_splice_preserves_surrounding_message_rows() {
 #[test]
 fn running_turn_keeps_its_ordered_work_visible() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let mut session = test_session(project_id, ProviderKind::Codex);
     let turn_id = session.begin_turn("Keep going");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1681,7 +1280,7 @@ fn running_turn_keeps_its_ordered_work_visible() {
 #[test]
 fn plain_settled_response_does_not_add_an_empty_work_fold() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let mut session = test_session(project_id, ProviderKind::Codex);
     let turn_id = session.begin_turn("Answer directly");
     session.push_message(MessageRole::Assistant, "The answer.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -1712,7 +1311,7 @@ fn sidebar_time_labels_prefer_the_live_turn_over_the_last_reply() {
     assert_eq!(format_time_ago(420 * 86_400), "420d");
 
     // Never replied, nothing running: the row stays quiet.
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     assert_eq!(session_time_label(&session, 1_000), None);
 
     // A live turn counts up instead of showing the previous reply's age.
@@ -1742,7 +1341,7 @@ fn time_label_wakes_land_exactly_on_label_boundaries() {
 
     // Nothing on the clock: no sessions, or none that ever replied.
     assert_eq!(next_time_label_change(&[], 1_000), None);
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     assert_eq!(
         next_time_label_change(std::slice::from_ref(&session), 1_000),
         None
@@ -1766,7 +1365,7 @@ fn time_label_wakes_land_exactly_on_label_boundaries() {
     );
 
     // The earliest boundary across sessions wins.
-    let mut fresher = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut fresher = test_session(Uuid::new_v4(), ProviderKind::Codex);
     fresher.last_reply_at = Some(1_000 + 2 * 86_400 + 3_550);
     let sessions = [&sessions[0], &fresher]
         .into_iter()
@@ -1778,7 +1377,7 @@ fn time_label_wakes_land_exactly_on_label_boundaries() {
     );
 
     // A live turn pins the chain to seconds for its elapsed counter.
-    let mut busy = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut busy = test_session(Uuid::new_v4(), ProviderKind::Codex);
     busy.begin_turn("go");
     busy.status = SessionStatus::Working;
     let sessions = [busy];
@@ -1801,7 +1400,7 @@ fn working_elapsed_stays_compact() {
 /// permission pause — and gone the moment the session stops being busy.
 #[test]
 fn a_busy_turn_pins_the_working_indicator_after_the_last_row() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let mut session = test_session(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.status = SessionStatus::Working;
 
@@ -1887,6 +1486,7 @@ fn settings_search_filters_pages_for_arrow_cycling() {
         SettingsPage::Providers,
         SettingsPage::Skills,
         SettingsPage::Usage,
+        SettingsPage::Storage,
         SettingsPage::Daemon,
     ];
     if cfg!(debug_assertions) {
@@ -2157,4 +1757,124 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
         Some(ProviderKind::Claude),
         ProviderKind::Claude
     ));
+}
+
+/// `refresh_transcript_row_kinds` skips the fold while this fingerprint holds
+/// still, so anything that moves the rows has to move the fingerprint too.
+/// Missing one leaves the transcript rendering stale rows, which drops every
+/// reasoning block and tool activity from the session.
+#[test]
+fn the_row_fingerprint_moves_whenever_the_fold_does() {
+    let mut base = test_session(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = base.begin_turn("Build it");
+    base.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        activities: vec![ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Looking around".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            true,
+        )],
+    });
+    base.push_message(MessageRole::Assistant, "I found the relevant code.");
+    base.transcript_blocks.push(TranscriptBlock {
+        after_message: 2,
+        turn_id: Some(turn_id),
+        activities: vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )],
+    });
+    base.push_message(MessageRole::Assistant, "Done. The change is ready.");
+    base.finish_active_turn(TurnStatus::Completed);
+
+    let settled = HashSet::new();
+    // Both states, because a mutation inside the fold only moves rows once the
+    // reader opens it — and those rows have to be right when they do.
+    let rows = |session: &ThreadView| {
+        (
+            folded_transcript_row_kinds(session, &settled),
+            folded_transcript_row_kinds(session, &HashSet::from([turn_id])),
+        )
+    };
+    let baseline_rows = rows(&base);
+    let baseline_fingerprint = transcript_rows_fingerprint(&base, &settled);
+
+    // Expansion lives outside the session, so check it against the same base.
+    assert_ne!(
+        transcript_rows_fingerprint(&base, &HashSet::from([turn_id])),
+        baseline_fingerprint,
+        "expanding a turn fold"
+    );
+
+    let mutations: Vec<(&str, fn(&mut ThreadView))> = vec![
+        ("a new message", |session| {
+            session.push_message(MessageRole::User, "One more thing");
+        }),
+        ("a new transcript block", |session| {
+            session.transcript_blocks.push(TranscriptBlock {
+                after_message: session.messages.len(),
+                turn_id: session.turns.first().map(|turn| turn.id),
+                activities: vec![ActivityItem::new(
+                    None,
+                    ActivityKind::Command,
+                    "Ran tests",
+                    None,
+                    true,
+                )],
+            });
+        }),
+        // `update_activity` re-anchors the block it is still appending to, so
+        // the anchor cannot be treated as fixed at insertion.
+        ("an existing block re-anchored", |session| {
+            session.transcript_blocks.make_mut(0).after_message = 2;
+        }),
+        ("a turn returning to running", |session| {
+            session.turns[0].status = TurnStatus::Running;
+        }),
+        ("a message reassigned to no turn", |session| {
+            session.messages.make_mut(1).turn_id = None;
+        }),
+        // A blank part is work, not answer, so where the answer starts — and
+        // with it everything the fold swallows — turns on the content itself.
+        ("the final text part left blank", |session| {
+            session.messages.make_mut(2).content.clear();
+        }),
+    ];
+
+    for (description, mutate) in mutations {
+        let mut session = base.clone();
+        mutate(&mut session);
+        assert_ne!(
+            rows(&session),
+            baseline_rows,
+            "{description} should change the rows — the case no longer proves anything"
+        );
+        assert_ne!(
+            transcript_rows_fingerprint(&session, &settled),
+            baseline_fingerprint,
+            "{description} changed the rows but not the fingerprint, so the \
+             cached rows would go stale"
+        );
+    }
+
+    // The point of the guard: streamed text lands in an existing message
+    // without moving a single row, and must not trigger a refold.
+    let mut streamed = base.clone();
+    streamed
+        .messages
+        .make_mut(2)
+        .content
+        .push_str(" Let me know.");
+    assert_eq!(
+        transcript_rows_fingerprint(&streamed, &settled),
+        baseline_fingerprint,
+        "appending to a message leaves the rows exactly where they were"
+    );
 }

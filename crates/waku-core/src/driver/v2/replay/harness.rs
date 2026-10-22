@@ -1,0 +1,1046 @@
+//! `ReplayHarness`: the real orchestrator, `EventSink`, projections,
+//! effect workers, checkpoint capture and `ProviderSessionManager` around
+//! one driver, with only the transport replaced (RFC 0002 "Harness API").
+//!
+//! Everything that could vary between runs is pinned: the orchestrator's
+//! clock is a `ManualClock` starting at 2026-01-01T00:00:00Z that only moves
+//! when a step (or a transcript's `afterMs`) moves it, app ids come from
+//! counters (`SequentialIds`, `SeqIdAllocator`), and native ids bind through
+//! UUIDv5. Every run ends by checking that rebuilding the projections from
+//! the event log equals the live projections.
+//!
+//! `restart_daemon` (#59) is a `kill -9` of the daemon: the effect workers
+//! and the orchestrator stop without a graceful shutdown, every provider
+//! process is killed, and a new orchestrator, session manager and worker
+//! pool open the same `state.sqlite` and run the startup sequence
+//! (effect reconciliation, then `recover_after_restart`). The transcript
+//! continues with the processes the new daemon spawns.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
+use serde::Deserialize;
+use tempfile::TempDir;
+use uuid::Uuid;
+use waku_orchestrator::fakes::FakePorts;
+use waku_orchestrator::recovery::{RecoveryReport, recover_after_restart};
+use waku_orchestrator::{
+    ClaimedEffect, DefaultExecutor, DispatchError, EffectContext, EffectError, EffectExecutor,
+    EffectWorkerPool, ManualClock, Orchestrator, OrchestratorConfig, SequentialIds,
+    ThreadProjection, WorkerConfig,
+};
+use waku_protocol::orchestration::*;
+
+use super::transport::seed_home;
+use super::{ReplayError, ReplayProfile, ReplayTranscript, ReplayTransportFactory};
+use crate::driver::v2::manager::{
+    DriverRegistry, ForkResult, ManagerDeps, ManagerExecutor, ProviderSessionManager,
+    SessionManagerConfig,
+};
+use crate::driver::v2::{
+    AdapterEvent, DriverV2, InstanceConfig, NullOutput, NullRawLog, SeqIdAllocator,
+    TransportFactory,
+};
+
+/// 2026-01-01T00:00:00Z.
+pub const REPLAY_EPOCH_MS: Timestamp = 1_767_225_600_000;
+
+/// A scenario's provider-neutral steps (`<scenario>/input.json`).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioInput {
+    /// Merged into the instance's `extra` (driver profile switches).
+    #[serde(default)]
+    pub instance: Option<serde_json::Value>,
+    pub steps: Vec<ScenarioStep>,
+}
+
+impl ScenarioInput {
+    /// `<dir>/input.<provider>.json` when a provider needs its own steps
+    /// (native option ids, prompts its recording used), else the shared
+    /// `<dir>/input.json`.
+    pub fn load(dir: &std::path::Path, provider: &str) -> Result<Self, ReplayError> {
+        let own = dir.join(format!("input.{provider}.json"));
+        let path = if own.exists() {
+            own
+        } else {
+            dir.join("input.json")
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| ReplayError::Io(format!("{}: {error}", path.display())))?;
+        serde_json::from_str(&text)
+            .map_err(|error| ReplayError::Harness(format!("{}: {error}", path.display())))
+    }
+}
+
+/// A model-selection change.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionInput {
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ScenarioStep {
+    /// `mode`: `auto` (default), `queue`, `steer`, `restart`.
+    Message {
+        text: String,
+        #[serde(default)]
+        thread: Option<String>,
+        #[serde(default)]
+        mode: Option<String>,
+    },
+    /// `until`: `idle`, `running`, `turn_terminal`, `request_pending`,
+    /// `tool_started`, or `ms:<n>` (moves the clock).
+    Wait {
+        until: String,
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    Steer {
+        text: String,
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    Interrupt {
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    Respond {
+        request: String,
+        option: String,
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    Answer {
+        request: String,
+        answers: Vec<UserInputAnswer>,
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    /// Rolls back the last `runs` runs to the checkpoint before them.
+    Rollback {
+        runs: u32,
+        #[serde(default)]
+        restore_files: bool,
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    /// Forks into a new thread named `as`, after run `atRun` (or the tip).
+    Fork {
+        #[serde(default)]
+        at_run: Option<u32>,
+        #[serde(rename = "as")]
+        name: String,
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    Select {
+        selection: SelectionInput,
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    Compact {
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    /// Sets the thread's runtime mode (threads start in Full Access; `ask`
+    /// for a supervised approval). The one runtime-mode mechanism: a
+    /// scenario that needs it from the start makes it the first step.
+    RuntimeMode {
+        mode: RuntimeMode,
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    /// Releases sessions idle past the manager's limits.
+    ReleaseIdle,
+    /// Unloads a thread's session.
+    Unload {
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    /// Kills the daemon and starts it again on the same database (#59).
+    RestartDaemon,
+}
+
+pub struct ScenarioResult {
+    /// The main thread, after rebuild-from-log equality was checked.
+    pub projection: ThreadProjection,
+    /// Every thread by scenario name (`main`, fork names).
+    pub threads: BTreeMap<String, ThreadProjection>,
+    pub events: Vec<DomainEvent>,
+    pub adapter_events: Vec<AdapterEvent>,
+    pub checkpoints: Vec<Checkpoint>,
+    pub capabilities: Capabilities,
+    pub forks: Vec<ForkResult>,
+    /// Calls the fake checkpoint port saw (`capture <ref>`, `restore <ref>`).
+    pub checkpoint_calls: Vec<String>,
+    /// Threads whose sessions `release_idle` steps released.
+    pub released: Vec<ThreadId>,
+    /// The harness workspace (`<workspace>` in transcripts).
+    pub workspace: PathBuf,
+    /// What each `restart_daemon` step's recovery did, in order.
+    pub recoveries: Vec<RecoveryReport>,
+}
+
+pub struct ReplayHarness {
+    runtime: tokio::runtime::Runtime,
+    _dir: TempDir,
+    pub workspace: PathBuf,
+    pub home: PathBuf,
+    clock: Arc<ManualClock>,
+    orchestrator: Arc<Orchestrator>,
+    manager: Arc<ProviderSessionManager>,
+    pool: Option<EffectWorkerPool>,
+    stopping: Arc<AtomicBool>,
+    patience: Duration,
+    ports: FakePorts,
+    instance: InstanceConfig,
+    project: ProjectId,
+    threads: BTreeMap<String, ThreadId>,
+    adapter_events: Arc<Mutex<Vec<AdapterEvent>>>,
+    replay: Option<Arc<ReplayTransportFactory>>,
+    counter: u128,
+    released: Vec<ThreadId>,
+    /// What a restarted daemon is built from.
+    database: PathBuf,
+    registry: DriverRegistry,
+    factory: Arc<dyn TransportFactory>,
+    native_ids: Arc<SeqIdAllocator>,
+    boots: u64,
+    recoveries: Vec<RecoveryReport>,
+}
+
+/// One daemon's orchestrator, session manager and effect workers.
+struct Daemon {
+    orchestrator: Arc<Orchestrator>,
+    manager: Arc<ProviderSessionManager>,
+    pool: EffectWorkerPool,
+    /// Set before the pool is shut down (see [`QuietExecutor`]).
+    stopping: Arc<AtomicBool>,
+    recovery: Option<RecoveryReport>,
+}
+
+struct DaemonParts<'a> {
+    database: &'a std::path::Path,
+    clock: &'a Arc<ManualClock>,
+    registry: &'a DriverRegistry,
+    factory: &'a Arc<dyn TransportFactory>,
+    native_ids: &'a Arc<SeqIdAllocator>,
+    ports: &'a FakePorts,
+    runtime: tokio::runtime::Handle,
+    adapter_events: &'a Arc<Mutex<Vec<AdapterEvent>>>,
+}
+
+/// Runs an effect only once the session manager has gone quiet. An effect
+/// worker and the adapter-event pump commit to the same thread
+/// concurrently; either order is valid, but a replay must commit in the same
+/// order every time, so the worker waits until the pump has ingested what
+/// the replayed frames produced (bounded, so a waiting driver cannot stall
+/// it). Once its daemon is stopping it runs nothing: a worker that outlived
+/// the pool's shutdown must not drive the abandoned session manager into the
+/// next boot's replay channels.
+struct QuietExecutor {
+    inner: DefaultExecutor,
+    manager: Arc<ProviderSessionManager>,
+    adapter_events: Arc<Mutex<Vec<AdapterEvent>>>,
+    stopping: Arc<AtomicBool>,
+}
+
+impl EffectExecutor for QuietExecutor {
+    fn execute(&self, effect: &ClaimedEffect, cx: &EffectContext<'_>) -> Result<(), EffectError> {
+        // Inside the 200 ms the harness gives the pool to shut down.
+        let deadline = Instant::now() + Duration::from_millis(150);
+        let mut last = None;
+        let mut stable = 0;
+        while Instant::now() < deadline && !self.stopping.load(Ordering::Acquire) {
+            let now = (self.manager.is_idle(), self.adapter_events.lock().len());
+            if now.0 && last == Some(now) {
+                stable += 1;
+                if stable >= 5 {
+                    break;
+                }
+            } else {
+                stable = 0;
+            }
+            last = Some(now);
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(EffectError::Retryable("the daemon is stopping".to_owned()));
+        }
+        self.inner.execute(effect, cx)
+    }
+}
+
+/// Opens the orchestrator on `database` and starts a session manager and
+/// effect workers on it. Boot 0 is the first start; a later boot runs the
+/// startup recovery first and takes fresh app ids from its own counter.
+fn start_daemon(parts: DaemonParts<'_>, boot: u64) -> Result<Daemon, ReplayError> {
+    let mut config = OrchestratorConfig::new(parts.database);
+    config.read_connections = 2;
+    let orchestrator = Orchestrator::open(
+        config,
+        waku_orchestrator::Dependencies {
+            clock: parts.clock.clone(),
+            ids: Box::new(SequentialIds::new(0x5eed + boot)),
+            capabilities: Arc::new(parts.registry.clone()),
+        },
+    )
+    .map_err(harness_error)?;
+    let recovery = if boot == 0 {
+        None
+    } else {
+        EffectWorkerPool::reconcile_after_process_loss(&orchestrator).map_err(harness_error)?;
+        Some(
+            recover_after_restart(&orchestrator, Uuid::from_u128(u128::from(boot)))
+                .map_err(harness_error)?,
+        )
+    };
+    let manager = ProviderSessionManager::new(
+        ManagerDeps {
+            orchestrator: orchestrator.clone(),
+            registry: parts.registry.clone(),
+            transports: parts.factory.clone(),
+            ids: parts.native_ids.clone(),
+            clock: parts.clock.clone(),
+            output: Arc::new(NullOutput),
+            deltas: None,
+            raw_log: Arc::new(NullRawLog),
+            checkpoints: Some(parts.ports.checkpoints.clone()),
+            runtime: parts.runtime.clone(),
+        },
+        SessionManagerConfig::default(),
+    );
+    let stopping = Arc::new(AtomicBool::new(false));
+    let executor = Arc::new(QuietExecutor {
+        inner: DefaultExecutor {
+            provider: Arc::new(ManagerExecutor(manager.clone())),
+            ports: parts.ports.ports(),
+        },
+        manager: manager.clone(),
+        adapter_events: parts.adapter_events.clone(),
+        stopping: stopping.clone(),
+    });
+    let pool = EffectWorkerPool::start(orchestrator.clone(), executor, WorkerConfig::default());
+    let mut live = manager.subscribe();
+    let sink = parts.adapter_events.clone();
+    parts.runtime.spawn(async move {
+        while let Ok(event) = live.recv().await {
+            sink.lock().push(event.event);
+        }
+    });
+    Ok(Daemon {
+        orchestrator,
+        manager,
+        pool,
+        stopping,
+        recovery,
+    })
+}
+
+fn harness_error(error: impl std::fmt::Display) -> ReplayError {
+    ReplayError::Harness(error.to_string())
+}
+
+/// Where a harness's provider frames go.
+pub enum Transports {
+    /// A transcript to replay, plus the fixture directory for a home seed.
+    Replay {
+        transcript: ReplayTranscript,
+        fixture_dir: Option<PathBuf>,
+        profile: ReplayProfile,
+    },
+    /// Live transports (the recorder wraps the real ones).
+    Live(Arc<dyn TransportFactory>),
+}
+
+impl ReplayHarness {
+    /// A harness over a transcript.
+    pub fn replay(
+        driver: Arc<dyn DriverV2>,
+        instance: InstanceConfig,
+        transcript: ReplayTranscript,
+        fixture_dir: Option<PathBuf>,
+        profile: ReplayProfile,
+    ) -> Result<Self, ReplayError> {
+        Self::new(
+            driver,
+            instance,
+            Transports::Replay {
+                transcript,
+                fixture_dir,
+                profile,
+            },
+        )
+    }
+
+    pub fn new(
+        driver: Arc<dyn DriverV2>,
+        instance: InstanceConfig,
+        transports: Transports,
+    ) -> Result<Self, ReplayError> {
+        let dir = tempfile::tempdir().map_err(harness_error)?;
+        // Canonical paths: drivers see symlink-free cwds (macOS /private/var),
+        // without Windows' `\\?\` prefix, which CLIs and Git reject.
+        let root = dunce::canonicalize(dir.path()).map_err(harness_error)?;
+        let workspace = root.join("workspace");
+        let home = root.join("home");
+        std::fs::create_dir_all(&workspace).map_err(harness_error)?;
+        std::fs::create_dir_all(&home).map_err(harness_error)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(harness_error)?;
+        let clock = Arc::new(ManualClock::new(REPLAY_EPOCH_MS));
+        let (factory, replay): (Arc<dyn TransportFactory>, _) = match transports {
+            Transports::Replay {
+                transcript,
+                fixture_dir,
+                profile,
+            } => {
+                if let Some(fixture_dir) = &fixture_dir {
+                    seed_home(fixture_dir, &transcript.header.provider, &home)
+                        .map_err(harness_error)?;
+                }
+                let replay = ReplayTransportFactory::new(
+                    transcript,
+                    workspace.clone(),
+                    home.clone(),
+                    profile,
+                );
+                let advance_clock = clock.clone();
+                replay.set_clock_advance(Arc::new(move |ms| {
+                    advance_clock.advance(ms as i64);
+                }));
+                (
+                    Arc::new(replay.clone()) as Arc<dyn TransportFactory>,
+                    Some(replay),
+                )
+            }
+            Transports::Live(factory) => (factory, None),
+        };
+        let registry = DriverRegistry::new();
+        registry.register(driver, instance.clone());
+        let database = root.join("state.sqlite");
+        let ports = FakePorts::default();
+        let native_ids = Arc::new(SeqIdAllocator::new());
+        let adapter_events = Arc::new(Mutex::new(Vec::new()));
+        let daemon = start_daemon(
+            DaemonParts {
+                database: &database,
+                clock: &clock,
+                registry: &registry,
+                factory: &factory,
+                native_ids: &native_ids,
+                ports: &ports,
+                runtime: runtime.handle().clone(),
+                adapter_events: &adapter_events,
+            },
+            0,
+        )?;
+        let mut harness = Self {
+            runtime,
+            _dir: dir,
+            workspace,
+            home,
+            clock,
+            orchestrator: daemon.orchestrator,
+            manager: daemon.manager,
+            pool: Some(daemon.pool),
+            stopping: daemon.stopping,
+            patience: Duration::from_secs(20),
+            ports,
+            instance,
+            project: ProjectId(Uuid::nil()),
+            threads: BTreeMap::new(),
+            adapter_events,
+            replay,
+            counter: 0,
+            released: Vec::new(),
+            database,
+            registry,
+            factory,
+            native_ids,
+            boots: 0,
+            recoveries: Vec::new(),
+        };
+        harness.project = ProjectId(harness.next_id(0xa));
+        let project = harness.project;
+        let workspace = harness.workspace.clone();
+        harness.dispatch(Command::ProjectCreate {
+            project_id: project,
+            name: "Replay".to_owned(),
+            path: workspace,
+            order_key: None,
+        })?;
+        harness.create_thread("main")?;
+        Ok(harness)
+    }
+
+    pub fn manager(&self) -> &Arc<ProviderSessionManager> {
+        &self.manager
+    }
+
+    pub fn orchestrator(&self) -> &Arc<Orchestrator> {
+        &self.orchestrator
+    }
+
+    pub fn clock(&self) -> &Arc<ManualClock> {
+        &self.clock
+    }
+
+    pub fn thread_id(&self, name: &str) -> Option<ThreadId> {
+        self.threads.get(name).copied()
+    }
+
+    fn next_id(&mut self, kind: u128) -> Uuid {
+        self.counter += 1;
+        Uuid::from_u128((kind << 96) | self.counter)
+    }
+
+    fn dispatch(&mut self, command: Command) -> Result<(), ReplayError> {
+        self.clock.advance(1);
+        let command_id =
+            CommandId::new(format!("replay:{}", self.next_id(0xc))).expect("valid command id");
+        let kind = command.command_type();
+        self.orchestrator
+            .dispatch(CommandEnvelope {
+                command_id,
+                issued_by: Actor::User,
+                source: CreationSource::Desktop,
+                command,
+            })
+            .map(|_| ())
+            .map_err(|error: DispatchError| ReplayError::Harness(format!("{kind}: {error}")))
+    }
+
+    fn create_thread(&mut self, name: &str) -> Result<ThreadId, ReplayError> {
+        let thread_id = ThreadId(self.next_id(0xb));
+        self.dispatch(Command::ThreadCreate {
+            thread_id,
+            project_id: self.project,
+            title: Some(name.to_owned()),
+            model_selection: ModelSelection::new(self.instance.instance_id.as_str()),
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
+            workspace: WorkspaceStrategy::Root { branch: None },
+            imported_native_thread: None,
+        })?;
+        self.threads.insert(name.to_owned(), thread_id);
+        Ok(thread_id)
+    }
+
+    fn thread(&self, name: &Option<String>) -> Result<ThreadId, ReplayError> {
+        let name = name.as_deref().unwrap_or("main");
+        self.threads
+            .get(name)
+            .copied()
+            .ok_or_else(|| ReplayError::Harness(format!("no thread named {name}")))
+    }
+
+    fn projection(&self, thread_id: ThreadId) -> Result<Arc<ThreadProjection>, ReplayError> {
+        self.orchestrator
+            .thread(thread_id)
+            .map_err(|error| ReplayError::Harness(error.to_string()))
+    }
+
+    fn active_run(&self, thread_id: ThreadId) -> Result<RunId, ReplayError> {
+        self.projection(thread_id)?
+            .active_run()
+            .map(|run| run.id)
+            .ok_or_else(|| ReplayError::Harness("no active run".to_owned()))
+    }
+
+    fn unsettled_effects(&self) -> i64 {
+        self.orchestrator.reader().with(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM effect_outbox WHERE status IN ('pending', 'running')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0)
+        })
+    }
+
+    /// The unsettled effects, for a failure message.
+    fn unsettled_effect_details(&self) -> String {
+        self.orchestrator.reader().with(|connection| {
+            let mut statement = match connection.prepare(
+                "SELECT effect_type, status, attempt_count, available_at, last_error
+                 FROM effect_outbox WHERE status IN ('pending', 'running') ORDER BY effect_id",
+            ) {
+                Ok(statement) => statement,
+                Err(error) => return error.to_string(),
+            };
+            let rows = statement.query_map([], |row| {
+                Ok(format!(
+                    "{} {} (attempts {}, due {}, last error {:?})",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            });
+            match rows {
+                Ok(rows) => rows.filter_map(Result::ok).collect::<Vec<_>>().join("; "),
+                Err(error) => error.to_string(),
+            }
+        })
+    }
+
+    fn replay_failed(&self) -> Result<(), ReplayError> {
+        match self.replay.as_ref().and_then(|replay| replay.error()) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Waits until nothing moves: no unsettled effect, no event in flight,
+    /// no new commit and no replay progress for several polls.
+    pub fn settle(&self) -> Result<(), ReplayError> {
+        let deadline = Instant::now() + self.patience();
+        let mut last = None;
+        let mut stable = 0;
+        loop {
+            self.replay_failed()?;
+            let snapshot = (
+                self.orchestrator.last_sequence(),
+                self.unsettled_effects(),
+                self.manager.is_idle(),
+                self.replay.as_ref().map_or(0, |replay| replay.progress()),
+                self.adapter_events.lock().len(),
+            );
+            let quiet = snapshot.1 == 0 && snapshot.2;
+            if quiet && last == Some(snapshot) {
+                stable += 1;
+                if stable >= 6 {
+                    return Ok(());
+                }
+            } else {
+                stable = 0;
+            }
+            last = Some(snapshot);
+            if Instant::now() > deadline {
+                return Err(ReplayError::Harness(format!(
+                    "the scenario did not settle (unsettled effects: {}, manager idle: {}, \
+                     clock: {}): {}; {}",
+                    snapshot.1,
+                    snapshot.2,
+                    waku_orchestrator::Clock::now(&*self.clock),
+                    self.unsettled_effect_details(),
+                    self.replay
+                        .as_ref()
+                        .map_or_else(|| "live".to_owned(), |replay| replay.describe_position())
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// How long a wait may take: a replay answers at once, a live model
+    /// can think for minutes.
+    fn patience(&self) -> Duration {
+        self.patience
+    }
+
+    /// How long a wait may take: 20 s by default, which a replay or the
+    /// in-process fake agent never needs; a live model can think for
+    /// minutes (the recorder raises it).
+    pub fn set_patience(&mut self, patience: Duration) {
+        self.patience = patience;
+    }
+
+    /// Waits until the thread has no active and no queued run. `settle`
+    /// alone cannot tell a finished turn from a live model that is still
+    /// thinking, and steps such as rollback and fork need the turn over.
+    fn wait_at_rest(&self, thread_id: ThreadId) -> Result<(), ReplayError> {
+        let deadline = Instant::now() + self.patience();
+        loop {
+            self.settle()?;
+            let projection = self.projection(thread_id)?;
+            if projection.active_run().is_none() && projection.queued_runs().is_empty() {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                return Err(ReplayError::Harness(
+                    "timed out waiting for the thread to come to rest".to_owned(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn wait_until(&self, thread_id: ThreadId, until: &str) -> Result<(), ReplayError> {
+        if let Some(ms) = until.strip_prefix("ms:") {
+            let ms = ms
+                .parse::<i64>()
+                .map_err(|_| ReplayError::Harness(format!("bad wait {until}")))?;
+            self.clock.advance(ms);
+            return self.settle();
+        }
+        let deadline = Instant::now() + self.patience();
+        loop {
+            self.replay_failed()?;
+            let projection = self.projection(thread_id)?;
+            let done = match until {
+                "idle" => true,
+                "running" => projection
+                    .active_run()
+                    .is_some_and(|run| run.status == RunStatus::Running),
+                "turn_terminal" => projection.active_run().is_none(),
+                "request_pending" => projection
+                    .runtime_requests
+                    .values()
+                    .any(|request| request.status == RequestStatus::Pending),
+                "tool_started" => projection
+                    .hot_items
+                    .values()
+                    .any(|item| matches!(item.kind, TurnItemKind::CommandExecution { .. })),
+                other => return Err(ReplayError::Harness(format!("unknown wait {other}"))),
+            };
+            if done {
+                return self.settle();
+            }
+            if Instant::now() > deadline {
+                return Err(ReplayError::Harness(format!(
+                    "timed out waiting for {until}"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn step(
+        &mut self,
+        step: &ScenarioStep,
+        forks: &mut Vec<ForkResult>,
+    ) -> Result<(), ReplayError> {
+        match step {
+            ScenarioStep::Message { text, thread, mode } => {
+                let thread_id = self.thread(thread)?;
+                let mode = match mode.as_deref().unwrap_or("auto") {
+                    "auto" => DispatchMode::Auto,
+                    "queue" => DispatchMode::QueueAfterActive,
+                    "steer" => DispatchMode::SteerActive {
+                        target_run_id: self.active_run(thread_id)?,
+                    },
+                    "restart" => DispatchMode::RestartActive {
+                        target_run_id: self.active_run(thread_id)?,
+                    },
+                    other => return Err(ReplayError::Harness(format!("unknown mode {other}"))),
+                };
+                let message_id = MessageId(self.next_id(0xd));
+                self.dispatch(Command::MessageDispatch {
+                    thread_id,
+                    message_id,
+                    text: text.clone(),
+                    display_text: None,
+                    attachments: Vec::new(),
+                    context: Vec::new(),
+                    model_selection: None,
+                    mode,
+                    title_seed: None,
+                    source_plan: None,
+                })?;
+            }
+            ScenarioStep::Steer { text, thread } => {
+                return self.step(
+                    &ScenarioStep::Message {
+                        text: text.clone(),
+                        thread: thread.clone(),
+                        mode: Some("steer".to_owned()),
+                    },
+                    forks,
+                );
+            }
+            ScenarioStep::Wait { until, thread } => {
+                let thread_id = self.thread(thread)?;
+                return self.wait_until(thread_id, until);
+            }
+            ScenarioStep::Interrupt { thread } => {
+                let thread_id = self.thread(thread)?;
+                let run_id = self.active_run(thread_id)?;
+                self.dispatch(Command::RunInterrupt {
+                    thread_id,
+                    run_id,
+                    reason: None,
+                    hold_queue: false,
+                })?;
+            }
+            ScenarioStep::Respond {
+                request,
+                option,
+                thread,
+            } => {
+                let thread_id = self.thread(thread)?;
+                let request_id = self.pending_request(thread_id, request)?;
+                self.dispatch(Command::RuntimeRequestRespond {
+                    thread_id,
+                    request_id,
+                    response: RuntimeResponse::Approval {
+                        option_id: option.clone(),
+                    },
+                })?;
+            }
+            ScenarioStep::Answer {
+                request,
+                answers,
+                thread,
+            } => {
+                let thread_id = self.thread(thread)?;
+                let request_id = self.pending_request(thread_id, request)?;
+                self.dispatch(Command::RuntimeRequestRespond {
+                    thread_id,
+                    request_id,
+                    response: RuntimeResponse::UserInput {
+                        answers: answers.clone(),
+                    },
+                })?;
+            }
+            ScenarioStep::Rollback {
+                runs,
+                restore_files,
+                thread,
+            } => {
+                let thread_id = self.thread(thread)?;
+                self.wait_at_rest(thread_id)?;
+                let projection = self.projection(thread_id)?;
+                let latest = projection.latest_ordinal();
+                let target = latest.saturating_sub(*runs);
+                let checkpoint = projection
+                    .checkpoints
+                    .values()
+                    .filter(|checkpoint| checkpoint.app_run_ordinal == Some(target))
+                    .max_by_key(|checkpoint| checkpoint.ordinal_within_scope)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ReplayError::Harness(format!("no checkpoint after run {target}"))
+                    })?;
+                self.dispatch(Command::CheckpointRollback {
+                    thread_id,
+                    scope_id: checkpoint.scope_id,
+                    checkpoint_id: checkpoint.id,
+                    restore_files: *restore_files,
+                })?;
+            }
+            ScenarioStep::Fork {
+                at_run,
+                name,
+                thread,
+            } => {
+                let source = self.thread(thread)?;
+                self.wait_at_rest(source)?;
+                let after_run = match at_run {
+                    Some(ordinal) => Some(
+                        self.projection(source)?
+                            .runs
+                            .values()
+                            .find(|run| run.ordinal == Some(*ordinal))
+                            .map(|run| run.id)
+                            .ok_or_else(|| ReplayError::Harness(format!("no run {ordinal}")))?,
+                    ),
+                    None => None,
+                };
+                let target = self.create_thread(name)?;
+                let manager = self.manager.clone();
+                let result = self
+                    .runtime
+                    .block_on(manager.fork_thread(source, after_run, target))
+                    .map_err(harness_error)?;
+                forks.push(result);
+            }
+            ScenarioStep::Select { selection, thread } => {
+                let thread_id = self.thread(thread)?;
+                self.wait_at_rest(thread_id)?;
+                let mut model_selection = ModelSelection::new(self.instance.instance_id.as_str());
+                model_selection.model = selection.model.clone();
+                model_selection.reasoning_effort = selection.reasoning_effort.clone();
+                self.dispatch(Command::ThreadSetModelSelection {
+                    thread_id,
+                    model_selection,
+                })?;
+            }
+            ScenarioStep::RuntimeMode { mode, thread } => {
+                let thread_id = self.thread(thread)?;
+                self.dispatch(Command::ThreadSetRuntimeMode {
+                    thread_id,
+                    runtime_mode: *mode,
+                })?;
+            }
+            ScenarioStep::Compact { thread } => {
+                let thread_id = self.thread(thread)?;
+                self.wait_at_rest(thread_id)?;
+                let manager = self.manager.clone();
+                self.runtime
+                    .block_on(manager.compact(thread_id))
+                    .map_err(harness_error)?;
+            }
+            ScenarioStep::ReleaseIdle => {
+                let manager = self.manager.clone();
+                let released = self.runtime.block_on(manager.release_idle());
+                self.released.extend(released);
+            }
+            ScenarioStep::Unload { thread } => {
+                let thread_id = self.thread(thread)?;
+                self.wait_at_rest(thread_id)?;
+                let manager = self.manager.clone();
+                self.runtime
+                    .block_on(manager.unload_thread(thread_id))
+                    .map_err(harness_error)?;
+            }
+            ScenarioStep::RestartDaemon => self.restart_daemon()?,
+        }
+        self.settle()
+    }
+
+    /// `kill -9` and a fresh start on the same database (see the module
+    /// documentation). The old session manager is abandoned, not shut down:
+    /// its sessions only see their processes die, and whatever they still
+    /// try to commit is refused by the stopped orchestrator.
+    pub fn restart_daemon(&mut self) -> Result<(), ReplayError> {
+        self.stopping.store(true, Ordering::Release);
+        if let Some(pool) = self.pool.take() {
+            pool.shutdown(Duration::from_millis(200));
+        }
+        self.orchestrator.shutdown();
+        match &self.replay {
+            Some(replay) => replay.restart_daemon()?,
+            None => self.factory.kill_all(),
+        }
+        self.boots += 1;
+        let daemon = start_daemon(
+            DaemonParts {
+                database: &self.database,
+                clock: &self.clock,
+                registry: &self.registry,
+                factory: &self.factory,
+                native_ids: &self.native_ids,
+                ports: &self.ports,
+                runtime: self.runtime.handle().clone(),
+                adapter_events: &self.adapter_events,
+            },
+            self.boots,
+        )?;
+        self.orchestrator = daemon.orchestrator;
+        self.manager = daemon.manager;
+        self.pool = Some(daemon.pool);
+        self.stopping = daemon.stopping;
+        self.recoveries.extend(daemon.recovery);
+        Ok(())
+    }
+
+    fn pending_request(
+        &self,
+        thread_id: ThreadId,
+        which: &str,
+    ) -> Result<RuntimeRequestId, ReplayError> {
+        if which != "first_pending" {
+            return Err(ReplayError::Harness(format!(
+                "unknown request selector {which}"
+            )));
+        }
+        self.projection(thread_id)?
+            .runtime_requests
+            .values()
+            .filter(|request| request.status == RequestStatus::Pending)
+            .min_by_key(|request| (request.created_at, request.id))
+            .map(|request| request.id)
+            .ok_or_else(|| ReplayError::Harness("no pending request".to_owned()))
+    }
+
+    /// Runs every step, closes the sessions, and checks the transcript was
+    /// fully consumed and the projections rebuild from the log.
+    pub fn run(&mut self, input: &ScenarioInput) -> Result<ScenarioResult, ReplayError> {
+        let mut forks = Vec::new();
+        self.settle()?;
+        for step in &input.steps {
+            self.step(step, &mut forks)?;
+        }
+        if self.replay.is_none() {
+            // A live recording lets the last turns finish instead of
+            // shutting them down mid-answer.
+            let threads: Vec<ThreadId> = self.threads.values().copied().collect();
+            for thread_id in threads {
+                self.wait_at_rest(thread_id)?;
+            }
+        }
+        let manager = self.manager.clone();
+        self.runtime.block_on(manager.shutdown());
+        self.settle()?;
+        if let Some(replay) = &self.replay {
+            replay.assert_exhausted()?;
+        }
+        let report = self.orchestrator.verify().map_err(harness_error)?;
+        if !report.is_clean() {
+            return Err(ReplayError::Harness(format!(
+                "rebuilding the projections from the log differs from the live state: {report:#?}"
+            )));
+        }
+        let main = self.thread(&None)?;
+        let mut threads = BTreeMap::new();
+        for (name, id) in &self.threads {
+            threads.insert(name.clone(), (*self.projection(*id)?).clone());
+        }
+        let events = self.orchestrator.reader().with(|connection| {
+            let mut statement = connection
+                .prepare("SELECT event_type, payload_json FROM events ORDER BY sequence")
+                .map_err(harness_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(harness_error)?
+                .filter_map(Result::ok)
+                .filter_map(|(kind, payload)| DomainEvent::from_parts(&kind, &payload).ok())
+                .collect::<Vec<_>>();
+            Ok::<_, ReplayError>(rows)
+        })?;
+        let projection = self.projection(main)?;
+        let mut checkpoints = projection.checkpoints.values().cloned().collect::<Vec<_>>();
+        checkpoints.sort_by_key(|checkpoint| {
+            (checkpoint.app_run_ordinal, checkpoint.ordinal_within_scope)
+        });
+        let capabilities = self
+            .manager
+            .registry()
+            .get(&self.instance.instance_id)
+            .map(|entry| entry.driver.capabilities(&entry.config))
+            .unwrap_or_default();
+        Ok(ScenarioResult {
+            projection: (*projection).clone(),
+            threads,
+            events,
+            adapter_events: self.adapter_events.lock().clone(),
+            checkpoints,
+            capabilities,
+            forks,
+            checkpoint_calls: self.ports.checkpoints.calls.lock().clone(),
+            released: self.released.clone(),
+            workspace: self.workspace.clone(),
+            recoveries: self.recoveries.clone(),
+        })
+    }
+}
+
+impl Drop for ReplayHarness {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.take() {
+            pool.shutdown(Duration::from_secs(1));
+        }
+        self.orchestrator.shutdown();
+    }
+}

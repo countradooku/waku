@@ -27,6 +27,10 @@ use super::{
 };
 use crate::timeline::TimedEvent;
 
+/// What `system/init` reports as the session's slash commands, as Claude
+/// Code lists its built-in and project commands.
+pub const SLASH_COMMANDS: [&str; 3] = ["compact", "context", "fake-review"];
+
 /// Above T3's supported floor (2.1.280) and every manifest `minVersion`.
 pub const VERSION: &str = "2.1.300";
 
@@ -232,6 +236,9 @@ pub fn serve(config: FakeConfig, flags: Flags, input: Receiver<Value>, output: O
                     let _ = output.send(&echo);
                 }
                 num_turns += 1;
+                if let Ok(cwd) = std::env::current_dir() {
+                    super::scripted::apply_writes(&prompt, &cwd);
+                }
                 let timeline = config.timeline_for(&prompt);
                 output.log("note", &json!({"replay": timeline.name}));
                 let mut mapper = ClaudeTurn::new(
@@ -246,7 +253,7 @@ pub fn serve(config: FakeConfig, flags: Flags, input: Receiver<Value>, output: O
                     "cwd": std::env::current_dir().map(|cwd| cwd.display().to_string()).unwrap_or_default(),
                     "tools": ["Bash", "Read", "Edit", "Grep", "Glob"], "mcp_servers": [],
                     "model": model, "permissionMode": permission_mode,
-                    "slash_commands": [], "apiKeySource": "ANTHROPIC_API_KEY",
+                    "slash_commands": SLASH_COMMANDS, "apiKeySource": "ANTHROPIC_API_KEY",
                     "claude_code_version": VERSION, "output_style": "default",
                     "agents": [], "skills": [], "plugins": [],
                     "uuid": Uuid::new_v4().to_string(),
@@ -282,6 +289,14 @@ pub fn serve(config: FakeConfig, flags: Flags, input: Receiver<Value>, output: O
     }
     // End of input: let the turn in flight finish, as the CLI does.
     turns.join();
+}
+
+/// Distinguishes this process's message ids from an earlier one's. The
+/// CLI's ids are unique; a conversation resumed by a new process (after a
+/// daemon restart) must not reuse the ids of its first turns.
+fn process_nonce() -> &'static str {
+    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NONCE.get_or_init(|| Uuid::new_v4().simple().to_string()[..8].to_owned())
 }
 
 fn prompt_text(message: &Value) -> String {
@@ -373,7 +388,12 @@ impl ClaudeTurn {
             return Ok(id.clone());
         }
         self.messages += 1;
-        let id = format!("msg_bench_{}_{}", self.num_turns, self.messages);
+        let id = format!(
+            "msg_bench_{}_{}_{}",
+            process_nonce(),
+            self.num_turns,
+            self.messages
+        );
         self.message_id = Some(id.clone());
         self.index = 0;
         self.stream(json!({

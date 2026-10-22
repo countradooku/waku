@@ -2,10 +2,13 @@
 """Waku baseline performance harness (issue #9).
 
 Drives the release desktop app (built with `--features perf-counters`)
-against `waku-bench-daemon`, and the real `waku-daemon` for RPC latency, and
-records per-process CPU, wakeups and memory from outside plus the app's own
-perf counters from inside. `scripts/bench/baseline.sh` builds the binaries and
-calls this script; run it directly to repeat one scenario.
+against `waku-bench-daemon` (the real daemon composition over protocol v8,
+with `fake-codex` / `fake-claude` as its provider CLIs), and records
+per-process CPU, wakeups and memory from outside plus the app's own perf
+counters from inside. The daemon's process tree is split into the daemon
+itself and the provider CLIs it runs (`daemon` and `providers`).
+`scripts/bench/baseline.sh` builds the binaries and calls this script; run it
+directly to repeat one scenario.
 
     harness.py run --out DIR [--rounds N] [--scenarios a,b,...]
     harness.py summarize --out DIR [--raw FILE] [--markdown FILE]
@@ -15,10 +18,10 @@ Scenarios: start, idle, prose, burst, reasoning-fast, code-wall, tool-storm,
 memory-1, memory-5, memory-20, rpc.
 
 Isolation: every app and daemon process gets HOME set to a directory under
---out, so the app's `~/.waku-fork/app.json`, its
-`~/Library/Application Support/Waku Fork/state.json` and the real daemon's
-database all land there. Only processes this script spawned are ever
-signalled. macOS-only (proc_pid_rusage, footprint).
+--out, so the app's `~/.waku-fork/app.json` and its
+`~/Library/Application Support/Waku Fork/state.json` land there; the bench
+daemon keeps its data in the run's `daemon-state`. Only processes this script
+spawned are ever signalled. macOS-only (proc_pid_rusage, footprint).
 """
 
 from __future__ import annotations
@@ -30,7 +33,6 @@ import json
 import os
 import platform
 import re
-import secrets
 import shutil
 import signal
 import statistics
@@ -146,10 +148,11 @@ def process_table() -> tuple[dict[int, list[int]], dict[int, str]]:
     return children, names
 
 
-def split_tree(root: int) -> tuple[list[int], list[int]]:
+def split_tree(root: int, table=None) -> tuple[list[int], list[int]]:
     """A process tree split into the shell (root and everything that is not
-    a provider CLI) and provider CLI subtrees (codex/claude, real or fake)."""
-    children, names = process_table()
+    a provider CLI) and provider CLI subtrees (codex/claude, real or fake).
+    `table` is a `process_table()` to reuse."""
+    children, names = table or process_table()
     shell, providers = [root], []
     stack = [(root, False)]
     while stack:
@@ -174,14 +177,26 @@ def sum_samples(pids: list[int]) -> dict:
     return total
 
 
-def tree_sample(root: int) -> dict | None:
-    """Sum of `rusage` over a process and its live descendants."""
+def tree_sample(root: int, part: str = "all", table=None) -> dict | None:
+    """Sum of `rusage` over a process and its live descendants.
+
+    `part` is "all" (the whole tree), "shell" (without the provider CLI
+    subtrees) or "providers" (only those), as `split_tree` divides it.
+    `table` is a `process_table()` to reuse across samples of one instant."""
     base = rusage(root)
     if base is None:
         return None
+    if part != "all":
+        shell, providers = split_tree(root, table)
+        return sum_samples(shell if part == "shell" else providers)
     total = dict(base)
     total["processes"] = 1
-    for pid in descendants(root):
+    if table:
+        shell, providers = split_tree(root, table)
+        pids = shell[1:] + providers  # shell[0] is the root
+    else:
+        pids = descendants(root)
+    for pid in pids:
         sample = rusage(pid)
         if sample is None:
             continue
@@ -245,10 +260,27 @@ def visible_fraction(pid: int) -> float | None:
     return 1 - covered / (steps * steps)
 
 
-class Sampler(threading.Thread):
-    """Polls process-tree samples every SAMPLE_INTERVAL for peak memory."""
+def bench_sample(app_pid: int, daemon_pid: int) -> dict:
+    """The app's tree, the daemon without its provider CLIs, and those CLIs."""
+    table = process_table()
+    return {
+        "app": tree_sample(app_pid, "all", table),
+        "daemon": tree_sample(daemon_pid, "shell", table),
+        "providers": tree_sample(daemon_pid, "providers", table),
+    }
 
-    def __init__(self, roles: dict[str, int]):
+
+def bench_roles(app_pid: int, daemon_pid: int) -> dict[str, tuple[int, str]]:
+    return {"app": (app_pid, "all"), "daemon": (daemon_pid, "shell"),
+            "providers": (daemon_pid, "providers")}
+
+
+class Sampler(threading.Thread):
+    """Polls process-tree samples every SAMPLE_INTERVAL for peak memory.
+
+    `roles` maps a role to `(root pid, part)` (see `tree_sample`)."""
+
+    def __init__(self, roles: dict[str, tuple[int, str]]):
         super().__init__(daemon=True)
         self.roles = roles
         self.samples: dict[str, list[dict]] = {role: [] for role in roles}
@@ -258,12 +290,13 @@ class Sampler(threading.Thread):
     def run(self) -> None:
         tick = 0
         while not self._halt.is_set():
-            for role, pid in self.roles.items():
-                sample = tree_sample(pid)
+            table = process_table()
+            for role, (pid, part) in self.roles.items():
+                sample = tree_sample(pid, part, table)
                 if sample:
                     self.samples[role].append(sample)
             if "app" in self.roles and tick % 2 == 0:
-                fraction = visible_fraction(self.roles["app"])
+                fraction = visible_fraction(self.roles["app"][0])
                 if fraction is not None:
                     self.visibility.append((time.monotonic(), fraction))
             tick += 1
@@ -357,6 +390,7 @@ class BenchDaemon:
                 str(bins / "waku-bench-daemon"), *args,
                 "--state-dir", str(run_dir / "daemon-state"),
                 "--project", str(project),
+                "--fakes", str(bins),
             ],
             stdout=subprocess.PIPE,
             stderr=open(self.log_path, "w"),
@@ -366,7 +400,7 @@ class BenchDaemon:
         self.ids: dict[str, str] = {}
         assert self.process.stdout is not None
         while "WAKU_DAEMON_ADDRESS" not in self.ids or "WAKU_DAEMON_TOKEN" not in self.ids \
-                or "WAKU_BENCH_SESSION_ID" not in self.ids:
+                or "WAKU_BENCH_THREAD_ID" not in self.ids:
             line = self.process.stdout.readline()
             if not line:
                 raise RuntimeError(f"bench daemon exited; see {self.log_path}")
@@ -420,15 +454,37 @@ def provider_dirs(home: Path) -> list[str]:
     return [name for name in (".codex", ".claude", ".claude.json") if (home / name).exists()]
 
 
-def write_app_state(home: Path, project_id: str, session_id: str) -> None:
-    """Preselect a session the way a returning user's state.json would."""
+def write_app_state(home: Path, project_id: str, thread_id: str) -> None:
+    """Preselect a thread the way a returning user's state.json would.
+
+    The desktop keeps its selection in its own UI state
+    (`AppState` in crates/waku-client/src/persistence.rs, written to
+    `state.json` beside its data directory): `selected_project` is the
+    orchestration project id and `selected_session` the thread id, which
+    the launch opens first (`threads.open_thread`, src/startup.rs) and so
+    subscribes to its `thread` stream; that subscription is what
+    `--autoplay` waits for."""
     directory = home / "Library" / "Application Support" / DATA_DIRECTORY_NAME
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "state.json"
     state = read_json(path) or {"app_state_version": APP_STATE_VERSION}
     state["selected_project"] = project_id
-    state["selected_session"] = session_id
+    state["selected_session"] = thread_id
     path.write_text(json.dumps(state))
+
+
+def bring_to_front(pid: int) -> None:
+    """Raise the app's window: a covered GPUI window draws nothing, and the
+    run is then discarded. Best effort (macOS only, needs Automation access
+    to System Events)."""
+    if sys.platform != "darwin":
+        return
+    subprocess.run(
+        ["osascript", "-e",
+         f'tell application "System Events" to set frontmost of '
+         f'(first process whose unix id is {pid}) to true'],
+        capture_output=True, timeout=10, check=False,
+    )
 
 
 class App:
@@ -462,7 +518,9 @@ class App:
             report = self.counters()
             return report if report and report.get("startup", {}).get(key) is not None else None
 
-        return wait_for(ready, timeout, what=f"app {key}")
+        report = wait_for(ready, timeout, what=f"app {key}")
+        bring_to_front(self.pid)
+        return report
 
     def fresh_counters(self, after: float) -> dict:
         """The first report written after monotonic time `after`."""
@@ -499,8 +557,12 @@ def process_window(a: dict, b: dict) -> dict:
     }
 
 
-def memory(sampler: Sampler, role: str, final: dict, pid: int, since: float = 0.0) -> dict:
-    root = rusage(pid) or {}
+def memory(sampler: Sampler, role: str, final: dict, pid: int | None,
+           since: float = 0.0) -> dict:
+    """Peak and final memory of a role. `pid` is the role's root process
+    (its lifetime peak and `footprint -p`); None for the provider CLIs,
+    which have no single root."""
+    root = (rusage(pid) if pid else None) or {}
     return {
         "rss_peak_mb": round(max(sampler.peak(role, "rss", since), final["rss"]) / MB, 1),
         "rss_final_mb": round(final["rss"] / MB, 1),
@@ -508,7 +570,7 @@ def memory(sampler: Sampler, role: str, final: dict, pid: int, since: float = 0.
             max(sampler.peak(role, "footprint", since), final["footprint"],
                 root.get("lifetime_max_footprint", 0)) / MB, 1),
         "footprint_final_mb": round(final["footprint"] / MB, 1),
-        "footprint_tool_mb": footprint_tool(pid),
+        "footprint_tool_mb": footprint_tool(pid) if pid else None,
     }
 
 
@@ -606,10 +668,10 @@ def scenario_start(ctx: Context, round_index: int, kind: str) -> dict:
                          ["--timeline", "prose", "--history-turns", "10",
                           "--history-sessions", "200"])
     try:
-        wait_for(lambda: "WAKU_BENCH_HISTORY_SESSION_ID" in daemon.ids or None, 5,
-                 what="history session id")
+        wait_for(lambda: "WAKU_BENCH_HISTORY_THREAD_ID" in daemon.ids or None, 5,
+                 what="history thread id")
         write_app_state(home, daemon.ids["WAKU_BENCH_PROJECT_ID"],
-                        daemon.ids["WAKU_BENCH_HISTORY_SESSION_ID"])
+                        daemon.ids["WAKU_BENCH_HISTORY_THREAD_ID"])
         app = App(ctx.bins, directory, home, daemon)
         report = app.wait_started("first_content_ms", timeout=60)
         time.sleep(1.0)
@@ -637,17 +699,17 @@ def scenario_idle(ctx: Context, round_index: int, settle: float = 10, window: fl
     daemon = BenchDaemon(ctx.bins, directory, home, ["--timeline", "prose"])
     try:
         write_app_state(home, daemon.ids["WAKU_BENCH_PROJECT_ID"],
-                        daemon.ids["WAKU_BENCH_SESSION_ID"])
+                        daemon.ids["WAKU_BENCH_THREAD_ID"])
         app = App(ctx.bins, directory, home, daemon)
-        sampler = Sampler({"app": app.pid, "daemon": daemon.pid})
+        sampler = Sampler(bench_roles(app.pid, daemon.pid))
         sampler.start()
         app.wait_started()
         time.sleep(settle)
-        a = {"app": tree_sample(app.pid), "daemon": tree_sample(daemon.pid)}
+        a = bench_sample(app.pid, daemon.pid)
         counters_a = app.fresh_counters(time.monotonic())
         time.sleep(window)
         counters_b = app.fresh_counters(time.monotonic())
-        b = {"app": tree_sample(app.pid), "daemon": tree_sample(daemon.pid)}
+        b = bench_sample(app.pid, daemon.pid)
         sampler.stop()
         visible = sampler.visible(a["app"]["t"], b["app"]["t"])
         result = {
@@ -659,6 +721,8 @@ def scenario_idle(ctx: Context, round_index: int, settle: float = 10, window: fl
                     **memory(sampler, "app", b["app"], app.pid)},
             "daemon": {**process_window(a["daemon"], b["daemon"]),
                        **memory(sampler, "daemon", b["daemon"], daemon.pid)},
+            "providers": {**process_window(a["providers"], b["providers"]),
+                          **memory(sampler, "providers", b["providers"], None)},
             "counters": counters_window(counters_a, counters_b),
             "counters_report": compact_counters(counters_b),
         }
@@ -675,22 +739,23 @@ def scenario_stream(ctx: Context, round_index: int, timeline: str) -> dict:
                          ["--timeline", timeline, "--rate", "1", "--autoplay=1500"])
     try:
         write_app_state(home, daemon.ids["WAKU_BENCH_PROJECT_ID"],
-                        daemon.ids["WAKU_BENCH_SESSION_ID"])
+                        daemon.ids["WAKU_BENCH_THREAD_ID"])
         app = App(ctx.bins, directory, home, daemon)
-        sampler = Sampler({"app": app.pid, "daemon": daemon.pid})
+        sampler = Sampler(bench_roles(app.pid, daemon.pid))
         sampler.start()
         app.wait_started()
         daemon.wait_log("autoplay prompt sent", timeout=60)
-        a = {"app": tree_sample(app.pid), "daemon": tree_sample(daemon.pid)}
+        a = bench_sample(app.pid, daemon.pid)
         counters_a = app.counters()
         started = time.monotonic()
+        # The daemon logs the replay line when the run that played it ends.
         wait_for(lambda: daemon.replay_line() or None, 900, interval=0.05,
                  what=f"{timeline} replay to finish")
-        b = {"app": tree_sample(app.pid), "daemon": tree_sample(daemon.pid)}
+        b = bench_sample(app.pid, daemon.pid)
         counters_b = app.fresh_counters(time.monotonic())
         # Let the last commit land and the turn settle before the final memory.
         time.sleep(3)
-        final = {"app": tree_sample(app.pid), "daemon": tree_sample(daemon.pid)}
+        final = bench_sample(app.pid, daemon.pid)
         counters_final = app.counters()
         sampler.stop()
         visible = sampler.visible(a["app"]["t"], b["app"]["t"])
@@ -706,6 +771,9 @@ def scenario_stream(ctx: Context, round_index: int, timeline: str) -> dict:
                     **memory(sampler, "app", final["app"], app.pid, since=started)},
             "daemon": {**process_window(a["daemon"], b["daemon"]),
                        **memory(sampler, "daemon", final["daemon"], daemon.pid, since=started)},
+            "providers": {**process_window(a["providers"], b["providers"]),
+                          **memory(sampler, "providers", final["providers"], None,
+                                   since=started)},
             "counters": counters_window(counters_a, counters_b),
             "counters_report": compact_counters(counters_final or counters_b),
         }
@@ -728,17 +796,17 @@ def scenario_memory(ctx: Context, round_index: int, sessions: int,
                          ["--timeline", "prose", "--history-turns", str(turns),
                           "--history-sessions", str(sessions)])
     try:
-        wait_for(lambda: "WAKU_BENCH_HISTORY_SESSION_ID" in daemon.ids or None, 5,
-                 what="history session id")
+        wait_for(lambda: "WAKU_BENCH_HISTORY_THREAD_ID" in daemon.ids or None, 5,
+                 what="history thread id")
         write_app_state(home, daemon.ids["WAKU_BENCH_PROJECT_ID"],
-                        daemon.ids["WAKU_BENCH_HISTORY_SESSION_ID"])
+                        daemon.ids["WAKU_BENCH_HISTORY_THREAD_ID"])
         app = App(ctx.bins, directory, home, daemon,
                   {"WAKU_PERF_VISIT_SESSIONS_MS": str(visit_ms)})
-        sampler = Sampler({"app": app.pid, "daemon": daemon.pid})
+        sampler = Sampler(bench_roles(app.pid, daemon.pid))
         sampler.start()
         app.wait_started("first_content_ms")
         launched = tree_sample(app.pid)
-        # Six timeline sessions plus the history sessions are visited.
+        # Six timeline threads plus the history threads are visited.
         expected = len(STREAM_TIMELINES) + 1 + sessions
 
         def visited():
@@ -747,7 +815,7 @@ def scenario_memory(ctx: Context, round_index: int, sessions: int,
 
         wait_for(visited, expected * visit_ms / 1000 + 60, interval=0.5, what="session visits")
         time.sleep(settle)
-        final = {"app": tree_sample(app.pid), "daemon": tree_sample(daemon.pid)}
+        final = bench_sample(app.pid, daemon.pid)
         report = app.counters()
         sampler.stop()
         result = {
@@ -772,31 +840,27 @@ def scenario_memory(ctx: Context, round_index: int, sessions: int,
 
 
 def scenario_rpc(ctx: Context, round_index: int, count: int = 1000) -> dict:
+    """Protocol v8 round trips against the bench daemon (the real daemon
+    composition); `threads.snapshot` reads the prose thread, one settled
+    two-message turn."""
     directory = run_dir(ctx, "rpc", round_index)
     home = fresh_home(directory)
-    token = secrets.token_hex(16)
-    daemon = spawn(
-        [str(ctx.bins / "waku-daemon")],
-        stdout=subprocess.PIPE,
-        stderr=open(directory / "daemon.log", "w"),
-        text=True,
-        env=clean_env(home, {"WAKU_DAEMON_TOKEN": token}),
-    )
+    daemon = BenchDaemon(ctx.bins, directory, home, ["--timeline", "prose"])
     try:
-        assert daemon.stdout is not None
-        ready = json.loads(daemon.stdout.readline())
         out = directory / "rpc.json"
         subprocess.run(
-            [str(ctx.bins / "rpc-latency"), "--address", ready["address"],
-             "--token", token, "--count", str(count), "--label", "waku-daemon",
-             "--out", str(out)],
+            [str(ctx.bins / "rpc-latency"), "--address", daemon.ids["WAKU_DAEMON_ADDRESS"],
+             "--token", daemon.ids["WAKU_DAEMON_TOKEN"],
+             "--thread", daemon.ids["WAKU_BENCH_THREAD_ID"],
+             "--count", str(count), "--label", "waku-bench-daemon",
+             "--project", str(daemon.project / "rpc-project"), "--out", str(out)],
             check=True,
             env=clean_env(home, {}),
         )
         report = json.loads(out.read_text())
         return {"scenario": "rpc", "round": round_index, **report}
     finally:
-        stop(daemon)
+        stop(daemon.process)
 
 
 def run_scenario(ctx: Context, scenario: str, round_index: int) -> dict:
@@ -891,7 +955,9 @@ def headline(result: dict) -> str:
     if scenario.startswith("memory"):
         return f'app footprint {result["app"]["footprint_final_mb"]} MB (peak {result["app"]["footprint_peak_mb"]})'
     app, daemon, counters = result["app"], result["daemon"], result.get("counters", {})
-    return (f'app {app["cpu_pct"]}% daemon {daemon["cpu_pct"]}% · '
+    providers = result.get("providers", {})
+    return (f'app {app["cpu_pct"]}% daemon {daemon["cpu_pct"]}% '
+            f'providers {providers.get("cpu_pct")}% · '
             f'{counters.get("frames_per_s")} fps · {counters.get("commits_per_s")} commits/s · '
             f'app wakeups {app["intr_wakeups_per_s"]}/s · footprint {app["footprint_final_mb"]} MB')
 
@@ -921,22 +987,25 @@ SUMMARY_FIELDS = {
     "start": ["startup.init_ms", "startup.first_frame_ms", "startup.first_content_ms",
               "app.rss_mb", "app.footprint_mb"],
     "idle": ["app.cpu_pct", "app.intr_wakeups_per_s", "app.idle_wakeups_per_s",
-             "daemon.cpu_pct", "daemon.intr_wakeups_per_s", "counters.frames_per_s",
+             "daemon.cpu_pct", "daemon.intr_wakeups_per_s", "providers.cpu_pct",
+             "counters.frames_per_s",
              "counters.renders_per_s.transcript", "counters.renders_per_s.sidebar",
              "app.footprint_final_mb", "app.rss_final_mb", "daemon.footprint_final_mb"],
-    "stream": ["replay.elapsed_s", "app.cpu_pct", "daemon.cpu_pct", "app.cpu_s", "daemon.cpu_s",
+    "stream": ["replay.elapsed_s", "app.cpu_pct", "daemon.cpu_pct", "providers.cpu_pct",
+               "app.cpu_s", "daemon.cpu_s", "providers.cpu_s",
                "app.intr_wakeups_per_s", "daemon.intr_wakeups_per_s",
                "counters.frames_per_s", "counters.commits_per_s", "counters.peak_commits_per_s",
                "counters.transcript_renders_per_commit", "counters.rows_per_commit_frame",
                "counters.ui_alloc_kb_per_commit", "counters.renders.sidebar",
                "counters.renders.right_panel", "counters.save_ui_ms",
                "app.rss_peak_mb", "app.footprint_peak_mb", "app.footprint_final_mb",
-               "daemon.footprint_final_mb", "replay.max_lag_ms"],
+               "daemon.footprint_final_mb", "providers.footprint_final_mb",
+               "replay.max_lag_ms"],
     "memory": ["app_after_launch.footprint_mb", "app.footprint_final_mb", "app.footprint_peak_mb",
                "app.rss_final_mb", "app.rss_peak_mb", "daemon.footprint_final_mb", "visits"],
     "rpc": [f"requests.{name}.{stat}"
-            for name in ("get_settings", "hydrate_session", "list_project_files",
-                         "search_session_messages")
+            for name in ("settings_get", "threads_snapshot", "files_search_entries",
+                         "threads_search")
             for stat in ("p50_us", "p95_us", "p99_us")],
 }
 

@@ -68,7 +68,7 @@ tampered download cannot install anything. The preference itself lives in
 
 | What | Path |
 | --- | --- |
-| Tasks, sessions, transcripts | `%LOCALAPPDATA%\Waku\app.db` |
+| Projects, threads, transcripts | `%LOCALAPPDATA%\Waku\state.sqlite` |
 | Attachments and blobs | `%LOCALAPPDATA%\Waku\blobs` |
 | Settings | `%USERPROFILE%\.waku\app.json` |
 
@@ -93,6 +93,10 @@ If a CLI is installed but not detected, set its path explicitly in
 The built-in terminal opens PowerShell 7 (`pwsh.exe`) when it is installed,
 then Windows PowerShell, then whatever `COMSPEC` names. Ctrl+Shift+C and
 Ctrl+Shift+V copy and paste so Ctrl+C stays available to the shell.
+
+The shell runs in the daemon on a ConPTY, the same terminal the desktop or a
+browser attaches to, so it also works against a Windows daemon from another
+machine.
 
 ## Browser
 
@@ -125,11 +129,6 @@ Debug builds expose Computer Use for supported providers through the bundled
 Cua Driver SDK. It operates within the current interactive Windows desktop;
 elevated apps and secure desktops retain Windows restrictions. See
 [Computer Use](computer-use.md) for the runtime, packaging, and validation.
-
-## What is not available yet
-
-- **Terminals over the daemon's browser client.** The desktop terminal works;
-  a remote browser client connected to a Windows daemon cannot open one.
 
 ## Troubleshooting
 

@@ -1,15 +1,13 @@
 //! Provider-neutral projects, sessions, transcript items, and driver events.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use crate::shared::SharedVec;
-use crate::ts::TS;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
     Amp,
@@ -163,7 +161,7 @@ impl ProviderKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -289,7 +287,7 @@ impl ProviderResumeCursor {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeMode {
     /// Older state files used `plan` as a combined read-only mode. Keep those
@@ -355,7 +353,7 @@ impl RuntimeMode {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderModelOption {
     pub id: String,
     pub label: String,
@@ -381,7 +379,7 @@ impl ProviderModelOption {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderModel {
     pub id: String,
     pub name: String,
@@ -406,7 +404,7 @@ pub struct ProviderModel {
     pub default_context_window: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FavoriteModel {
     pub provider: ProviderKind,
     pub model: String,
@@ -416,7 +414,7 @@ pub struct FavoriteModel {
 ///
 /// DeepSeek Harness calls these agent presets. A preset chooses the tools and
 /// prompt composition for a session.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderAgentPreset {
     pub id: String,
     pub name: String,
@@ -539,7 +537,7 @@ impl ProviderModel {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProviderProbe {
     pub provider: ProviderKind,
     pub installed: bool,
@@ -596,7 +594,7 @@ pub fn parse_cli_version(output: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Project {
     pub id: Uuid,
     pub name: String,
@@ -611,7 +609,7 @@ pub struct Project {
 /// Drafts may carry [`Self::NewWorktree`] until their first prompt. Waku then
 /// creates the Git worktree and replaces it with [`Self::Worktree`] before any
 /// checkpoint or provider process can observe the task.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -681,7 +679,7 @@ impl Project {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionStatus {
     #[default]
@@ -710,7 +708,7 @@ impl SessionStatus {
 
 /// A follow-up message queued while the agent is busy. It becomes its own
 /// turn once the current turn settles successfully.
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct QueuedMessage {
     pub id: Uuid,
     pub content: String,
@@ -751,7 +749,7 @@ impl QueuedMessage {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TurnStatus {
     Running,
@@ -760,7 +758,7 @@ pub enum TurnStatus {
     Interrupted,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CheckpointStatus {
     Ready,
@@ -768,14 +766,14 @@ pub enum CheckpointStatus {
     Error,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CheckpointFile {
     pub path: String,
     pub additions: u64,
     pub deletions: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Checkpoint {
     pub turn_count: usize,
     pub git_ref: String,
@@ -803,7 +801,7 @@ impl Checkpoint {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentTurn {
     pub id: Uuid,
     pub turn_count: usize,
@@ -823,7 +821,7 @@ pub struct AgentTurn {
 /// the model's context size, which the provider only reports once a turn
 /// settles — `None` means "not known yet", and the meter degrades to a bare
 /// token count.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct ContextUsage {
     pub tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -833,7 +831,7 @@ pub struct ContextUsage {
 /// Where Codex stands on a thread goal. Mirrors the app-server's
 /// `ThreadGoalStatus` vocabulary; the serialized names are Codex's own so a
 /// status can round-trip through `thread/goal/set` unchanged.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ThreadGoalStatus {
     Active,
@@ -858,7 +856,7 @@ impl ThreadGoalStatus {
 /// This is deliberately lightweight: the command palette can list hundreds of
 /// native sessions without moving their transcripts over the daemon protocol.
 /// [`ProviderSessionHistory`] is fetched only after the user chooses one.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderSessionSummary {
     pub cursor: ProviderResumeCursor,
     pub title: String,
@@ -877,7 +875,7 @@ impl ProviderSessionSummary {
 /// Waku task. Provider history remains authoritative; unsupported native
 /// items such as private reasoning or provider-only control records are
 /// intentionally absent.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ProviderSessionHistory {
     #[serde(default)]
     pub messages: Vec<Message>,
@@ -888,7 +886,7 @@ pub struct ProviderSessionHistory {
 /// A provider-persisted objective the agent keeps pursuing across turns.
 /// Field names follow the Codex app-server payload so its `goal` objects
 /// deserialize directly.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadGoal {
     pub objective: String,
@@ -904,7 +902,7 @@ pub struct ThreadGoal {
 /// A goal mutation the client asks the provider runtime to perform. Results
 /// come back asynchronously as [`DriverEvent::GoalUpdated`]; failures surface
 /// through [`DriverEvent::Error`].
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -924,738 +922,7 @@ pub enum GoalOperation {
     Clear,
 }
 
-/// Last daemon event incorporated into a session's persisted projection.
-///
-/// The daemon runtime and its replay journal can outlive any particular
-/// desktop or browser connection. Persisting this cursor with the transcript
-/// lets a newly attached client replay only the events the stored projection
-/// has not already applied.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
-pub struct RuntimeEventCursor {
-    pub runtime_id: Uuid,
-    pub epoch: Uuid,
-    pub sequence: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
-pub struct AgentSession {
-    pub id: Uuid,
-    /// A title explicitly chosen by the user. [`Self::DEFAULT_TITLE`] means
-    /// no explicit title has been set, so [`Self::auto_title`] may be shown.
-    pub title: String,
-    /// Best-effort title supplied by the provider, or derived locally from the
-    /// first prompt until the provider reports a better one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_title: Option<String>,
-    pub project_id: Uuid,
-    /// Local project checkout or an isolated Git worktree for this task.
-    #[serde(default, skip_serializing_if = "SessionWorkspace::is_local")]
-    pub workspace: SessionWorkspace,
-    pub provider: ProviderKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    pub runtime_mode: RuntimeMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<String>,
-    /// Selected context window, when the provider exposes more than one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<String>,
-    /// Provider-owned agent composition selected before the first turn.
-    /// Currently populated by DeepSeek Harness, which locks this value once
-    /// conversation history exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_preset: Option<String>,
-    pub status: SessionStatus,
-    pub created_at: u64,
-    /// Any mutation, including title edits and truncation. Use
-    /// [`Self::last_reply_at`] for conversation recency.
-    pub updated_at: u64,
-    /// Activity time of the newest turn. Set as soon as the user submits it,
-    /// then refreshed when the turn settles, whatever its outcome.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_reply_at: Option<u64>,
-    #[serde(default)]
-    pub provider_cursor: Option<ProviderResumeCursor>,
-    /// Slash commands the provider reported for this session's live process,
-    /// kept so a resumed session still completes them before its next
-    /// handshake.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub available_commands: Vec<ReportedCommand>,
-    /// The provider-persisted goal for this session's thread, kept so a
-    /// resumed session shows its goal before the runtime reconnects.
-    /// Currently populated by Codex.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_goal: Option<ThreadGoal>,
-    /// Context-window occupancy from the live stream, kept so a resumed
-    /// session's meter starts where the conversation left off.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_usage: Option<ContextUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_event_cursor: Option<RuntimeEventCursor>,
-    /// Read-only compatibility field for v1 state files. New saves omit it.
-    #[serde(default, skip_serializing)]
-    pub provider_session_id: Option<String>,
-    /// Not stored in the session JSON — these are rows in the `messages`
-    /// table, reattached when the session is hydrated.
-    // Each message is reference counted so a session snapshot (a save, a
-    // row builder) shares message bodies instead of copying them; write
-    // through `SharedVec`'s copy-on-write methods.
-    #[serde(default)]
-    #[ts(as = "Vec<Message>")]
-    pub messages: SharedVec<Message>,
-    #[serde(default)]
-    #[ts(as = "Vec<TranscriptBlock>")]
-    pub transcript_blocks: SharedVec<TranscriptBlock>,
-    #[serde(default)]
-    pub turns: Vec<AgentTurn>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub queued_messages: Vec<QueuedMessage>,
-    /// Whether the transcript has been read from the database.
-    ///
-    /// Startup loads only the columns the session list needs, so a session
-    /// begins as a skeleton with empty `messages`, `transcript_blocks` and
-    /// `turns`. Those are empty because nothing fetched them, not because the
-    /// session is empty — never persist a skeleton, and never conclude from one
-    /// that a session has no history.
-    #[serde(skip, default = "detail_loaded_default")]
-    pub detail_loaded: bool,
-}
-
-/// Anything deserialized from a `data` blob carries its full detail.
-fn detail_loaded_default() -> bool {
-    true
-}
-
-impl AgentSession {
-    pub const DEFAULT_TITLE: &'static str = "New task";
-
-    pub fn new(project_id: Uuid, provider: ProviderKind) -> Self {
-        let now = unix_time();
-        Self {
-            id: Uuid::new_v4(),
-            title: Self::DEFAULT_TITLE.to_owned(),
-            auto_title: None,
-            project_id,
-            workspace: SessionWorkspace::Local,
-            provider,
-            model: None,
-            runtime_mode: RuntimeMode::FullAccess,
-            reasoning_effort: None,
-            service_tier: None,
-            context_window: None,
-            agent_preset: None,
-            status: SessionStatus::Idle,
-            created_at: now,
-            updated_at: now,
-            last_reply_at: None,
-            detail_loaded: true,
-            provider_cursor: None,
-            available_commands: Vec::new(),
-            thread_goal: None,
-            context_usage: None,
-            runtime_event_cursor: None,
-            provider_session_id: None,
-            messages: SharedVec::new(),
-            transcript_blocks: SharedVec::new(),
-            turns: Vec::new(),
-            queued_messages: Vec::new(),
-        }
-    }
-
-    /// Returns the lightweight projection used by task lists.
-    ///
-    /// A daemon can hold hydrated sessions in memory, but catalog refreshes
-    /// must never clone or transmit their transcripts. Clients hydrate one
-    /// selected session explicitly when they need its detail.
-    pub fn list_projection(&self) -> Self {
-        Self {
-            id: self.id,
-            title: self.title.clone(),
-            auto_title: self.auto_title.clone(),
-            project_id: self.project_id,
-            workspace: SessionWorkspace::Local,
-            provider: self.provider,
-            model: self.model.clone(),
-            runtime_mode: RuntimeMode::default(),
-            reasoning_effort: None,
-            service_tier: None,
-            context_window: None,
-            agent_preset: None,
-            status: self.status,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-            last_reply_at: self.last_reply_at,
-            provider_cursor: None,
-            available_commands: Vec::new(),
-            thread_goal: None,
-            context_usage: None,
-            runtime_event_cursor: None,
-            provider_session_id: None,
-            messages: SharedVec::new(),
-            transcript_blocks: SharedVec::new(),
-            turns: Vec::new(),
-            queued_messages: Vec::new(),
-            detail_loaded: false,
-        }
-    }
-
-    pub fn is_busy(&self) -> bool {
-        self.status.is_busy()
-    }
-
-    /// Derives [`Self::last_reply_at`] from the turn history when it is not
-    /// already known, so a session stored before the field existed still sorts
-    /// and displays correctly.
-    pub fn backfill_last_reply_at(&mut self) {
-        if self.last_reply_at.is_some() {
-            return;
-        }
-        self.last_reply_at = self
-            .turns
-            .last()
-            .map(|turn| turn.completed_at.unwrap_or(turn.started_at))
-            .filter(|_| self.has_started());
-    }
-
-    pub fn has_started(&self) -> bool {
-        // A skeleton came from a stored row, and only started sessions are
-        // stored, so it has started even though its transcript is not loaded.
-        !self.detail_loaded
-            || !self.turns.is_empty()
-            || !self.messages.is_empty()
-            || self.provider_cursor.is_some()
-    }
-
-    /// Drops the loaded transcript so the session returns to its skeleton
-    /// state, releasing the heap its messages, blocks and turns occupied.
-    ///
-    /// A session must be fully persisted and unmodified before this runs —
-    /// callers check the store's dirty set — because the released fields are
-    /// gone until the next store `hydrate` reloads them. The session keeps
-    /// its list columns and cursors, and a later save of the skeleton only
-    /// touches those columns, never the untouched detail row.
-    pub fn release_transcript(&mut self) {
-        self.messages = SharedVec::new();
-        self.transcript_blocks = SharedVec::new();
-        self.turns = Vec::new();
-        self.queued_messages = Vec::new();
-        self.detail_loaded = false;
-    }
-
-    /// Identifier owned by the underlying agent CLI, once its native session
-    /// has been established.
-    pub fn provider_native_id(&self) -> Option<&str> {
-        self.provider_cursor
-            .as_ref()
-            .map(ProviderResumeCursor::native_id)
-            .filter(|id| !id.trim().is_empty())
-    }
-
-    pub fn display_title(&self) -> &str {
-        if self.title != Self::DEFAULT_TITLE && !self.title.trim().is_empty() {
-            &self.title
-        } else {
-            self.auto_title
-                .as_deref()
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or(Self::DEFAULT_TITLE)
-        }
-    }
-
-    /// Sets the user-owned title shown ahead of any provider fallback.
-    /// Empty names are rejected so a cancelled inline rename cannot hide the
-    /// existing title. Returns whether the stored title changed.
-    pub fn set_title(&mut self, title: impl AsRef<str>) -> bool {
-        let title = title.as_ref().trim();
-        if title.is_empty() || self.title == title {
-            return false;
-        }
-        self.title = title.to_owned();
-        self.updated_at = unix_time();
-        true
-    }
-
-    pub fn set_title_from_prompt(&mut self, prompt: &str) {
-        if self.messages.len() > 1 || self.title != Self::DEFAULT_TITLE || self.auto_title.is_some()
-        {
-            return;
-        }
-        let mut title = prompt
-            .split_whitespace()
-            .take(7)
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !title.is_empty() {
-            if title.chars().count() > 54 {
-                title = format!("{}…", title.chars().take(53).collect::<String>());
-            }
-            self.auto_title = Some(title);
-        }
-    }
-
-    /// Replaces the provider-owned title without disturbing an explicit user
-    /// title. Returns whether the stored fallback changed.
-    pub fn set_auto_title(&mut self, title: Option<String>) -> bool {
-        let title = title.and_then(|title| {
-            let title = title.trim();
-            (!title.is_empty()).then(|| title.to_owned())
-        });
-        if self.auto_title == title {
-            return false;
-        }
-        self.auto_title = title;
-        self.updated_at = unix_time();
-        true
-    }
-
-    pub fn can_choose_model(&self, provider: ProviderKind) -> bool {
-        !self.status.is_busy() && (self.messages.is_empty() || self.provider == provider)
-    }
-
-    pub fn migrate_legacy_state(&mut self) {
-        if self.provider_cursor.is_none()
-            && let Some(id) = self.provider_session_id.take()
-        {
-            self.provider_cursor = Some(ProviderResumeCursor::from_session_id(self.provider, id));
-        }
-        if self.provider == ProviderKind::Codex {
-            for index in 0..self.messages.len() {
-                let message = &self.messages[index];
-                if message.role == MessageRole::Assistant && message.content.contains('\u{e200}') {
-                    let content = strip_legacy_codex_citations(&message.content);
-                    self.messages.make_mut(index).content = content;
-                }
-            }
-        }
-        let mut merged_blocks: SharedVec<TranscriptBlock> =
-            SharedVec::with_capacity(self.transcript_blocks.len());
-        for block in std::mem::take(&mut self.transcript_blocks) {
-            let mut block = Arc::unwrap_or_clone(block);
-            if let Some(previous) = merged_blocks.last_mut()
-                && previous.after_message == block.after_message
-                && previous.turn_id == block.turn_id
-            {
-                previous.activities.append(&mut block.activities);
-            } else {
-                merged_blocks.push(block);
-            }
-        }
-        self.transcript_blocks = merged_blocks;
-
-        for block in &mut self.transcript_blocks {
-            for activity in &mut block.activities {
-                if activity.kind == ActivityKind::Search && activity.title.trim() == "Search for" {
-                    activity.title = tr!("activity.browsed_web");
-                }
-                let named_kind = ActivityKind::from_tool_name(&activity.title);
-                if named_kind != ActivityKind::Tool
-                    && matches!(
-                        activity.kind,
-                        ActivityKind::Search | ActivityKind::Tool | ActivityKind::FileChange
-                    )
-                {
-                    activity.kind = named_kind;
-                }
-                if activity.arguments.is_none()
-                    && activity.output.is_none()
-                    && !activity.failed
-                    && activity.detail.as_deref().is_some_and(|detail| {
-                        serde_json::from_str::<serde_json::Value>(detail).is_ok()
-                    })
-                {
-                    // Older provider transcripts stored input JSON in
-                    // `detail`. Promote it once so it stays expandable but no
-                    // longer floods the row preview.
-                    activity.arguments = activity.detail.take();
-                }
-                activity.refresh_activity_metadata();
-            }
-        }
-
-        // Checkpoints written before cached totals were added still have the
-        // complete file list. Backfill once on load rather than making every
-        // transcript frame rediscover the same totals.
-        for turn in &mut self.turns {
-            if let Some(checkpoint) = turn.checkpoint.as_mut() {
-                checkpoint.refresh_totals();
-            }
-        }
-
-        if !self.turns.is_empty()
-            || !self
-                .messages
-                .iter()
-                .any(|message| message.role == MessageRole::User)
-        {
-            return;
-        }
-
-        let user_indexes = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter_map(|(index, message)| (message.role == MessageRole::User).then_some(index))
-            .collect::<Vec<_>>();
-        for (offset, start) in user_indexes.iter().copied().enumerate() {
-            let end = user_indexes
-                .get(offset + 1)
-                .copied()
-                .unwrap_or(self.messages.len());
-            let id = Uuid::new_v4();
-            let started_at = self.messages[start].created_at;
-            let completed_at = self.messages[start..end]
-                .iter()
-                .map(|message| message.created_at)
-                .max()
-                .unwrap_or(started_at);
-            for message in self.messages.range_mut(start..end) {
-                message.turn_id = Some(id);
-            }
-            for block in &mut self.transcript_blocks {
-                if block.after_message > start && block.after_message <= end {
-                    block.turn_id = Some(id);
-                }
-            }
-            self.turns.push(AgentTurn {
-                id,
-                turn_count: offset + 1,
-                status: TurnStatus::Completed,
-                provider_turn_started: true,
-                provider_resume_at: None,
-                started_at,
-                completed_at: Some(completed_at),
-                checkpoint: None,
-            });
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn begin_turn(&mut self, prompt: impl Into<String>) -> Uuid {
-        self.begin_turn_with_presentation(prompt, None, Vec::new())
-    }
-
-    pub fn begin_turn_with_presentation(
-        &mut self,
-        prompt: impl Into<String>,
-        display_content: Option<String>,
-        attachments: Vec<MessageAttachment>,
-    ) -> Uuid {
-        let id = Uuid::new_v4();
-        let now = unix_time();
-        self.turns.push(AgentTurn {
-            id,
-            turn_count: self.turns.len() + 1,
-            status: TurnStatus::Running,
-            provider_turn_started: false,
-            provider_resume_at: None,
-            started_at: now,
-            completed_at: None,
-            checkpoint: None,
-        });
-        self.messages.push(
-            Message::new_for_turn(MessageRole::User, prompt, id)
-                .with_presentation(display_content, attachments),
-        );
-        self.last_reply_at = Some(now);
-        id
-    }
-
-    /// Begin a turn the provider runs on its own — Codex goal continuation
-    /// pursues an active goal whenever its thread is idle. There is no user
-    /// message; the turn exists so the streamed output has a transcript home.
-    /// Like a submission's turn it starts unconfirmed: the provider's own
-    /// start report marks it via [`Self::mark_active_turn_provider_started`],
-    /// and an unconfirmed one can be unwound if the pursuit never begins.
-    pub fn begin_provider_turn(&mut self) -> Uuid {
-        let id = Uuid::new_v4();
-        let now = unix_time();
-        self.turns.push(AgentTurn {
-            id,
-            turn_count: self.turns.len() + 1,
-            status: TurnStatus::Running,
-            provider_turn_started: false,
-            provider_resume_at: None,
-            started_at: now,
-            completed_at: None,
-            checkpoint: None,
-        });
-        self.last_reply_at = Some(now);
-        self.updated_at = now;
-        id
-    }
-
-    /// Mirror a prompt submitted to this session's runtime, possibly by
-    /// another client.
-    ///
-    /// The submitting client already holds the turn and its user message, so
-    /// a running turn that has a user message is left alone — that covers the
-    /// submitter's own echo and a client that hydrated after the submission
-    /// was saved. A running turn without one is a provider-started turn this
-    /// client was following; the submission becomes its prompt. With no
-    /// running turn the submission opens one here exactly as it did on the
-    /// submitting client, reusing that client's ids so the projections every
-    /// client saves agree on the rows. Returns whether the session changed.
-    pub fn adopt_submitted_prompt(
-        &mut self,
-        message: &str,
-        turn_id: Uuid,
-        message_id: Uuid,
-    ) -> bool {
-        let now = unix_time();
-        if let Some(active) = self.active_turn_id() {
-            let has_prompt = self.messages.iter().any(|candidate| {
-                candidate.turn_id == Some(active) && candidate.role == MessageRole::User
-            });
-            if has_prompt {
-                return false;
-            }
-            let mut prompt = Message::new_for_turn(MessageRole::User, message, active);
-            prompt.id = message_id;
-            self.messages.push(prompt);
-            self.updated_at = now;
-            return true;
-        }
-        self.set_title_from_prompt(message);
-        self.turns.push(AgentTurn {
-            id: turn_id,
-            turn_count: self.turns.len() + 1,
-            status: TurnStatus::Running,
-            provider_turn_started: false,
-            provider_resume_at: None,
-            started_at: now,
-            completed_at: None,
-            checkpoint: None,
-        });
-        let mut prompt = Message::new_for_turn(MessageRole::User, message, turn_id);
-        prompt.id = message_id;
-        self.messages.push(prompt);
-        self.status = SessionStatus::Connecting;
-        self.last_reply_at = Some(now);
-        self.updated_at = now;
-        true
-    }
-
-    /// Whether the running turn is a provider-initiated one whose pursuit has
-    /// not been confirmed — no user message belongs to it and the provider
-    /// has not reported its start. These are the optimistic turns a `/goal`
-    /// begins, and the only turns safe to unwind on failure.
-    pub fn active_turn_is_unconfirmed_pursuit(&self) -> bool {
-        let Some(turn) = self
-            .turns
-            .last()
-            .filter(|turn| turn.status == TurnStatus::Running && !turn.provider_turn_started)
-        else {
-            return false;
-        };
-        !self
-            .messages
-            .iter()
-            .any(|message| message.turn_id == Some(turn.id))
-    }
-
-    pub fn active_turn_id(&self) -> Option<Uuid> {
-        self.turns
-            .last()
-            .filter(|turn| turn.status == TurnStatus::Running)
-            .map(|turn| turn.id)
-    }
-
-    /// Undo [`Self::begin_turn`] for a turn whose provider never started —
-    /// the submission-preparation failure path, where the prompt returns to
-    /// the composer. The turn and its messages leave the transcript, and a
-    /// first-prompt unwind also gives back the default title that
-    /// [`Self::set_title_from_prompt`] replaced. Its submission timestamp stays
-    /// as the session's latest activity.
-    pub fn unwind_unstarted_turn(&mut self, turn_id: Uuid) {
-        let unstarted = self.turns.last().is_some_and(|turn| {
-            turn.id == turn_id && turn.status == TurnStatus::Running && !turn.provider_turn_started
-        });
-        if !unstarted {
-            return;
-        }
-        self.turns.pop();
-        self.messages
-            .retain(|message| message.turn_id != Some(turn_id));
-        if self.messages.is_empty() {
-            self.auto_title = None;
-        }
-    }
-
-    pub fn mark_active_turn_provider_started(&mut self) {
-        if let Some(turn) = self
-            .turns
-            .last_mut()
-            .filter(|turn| turn.status == TurnStatus::Running)
-        {
-            turn.provider_turn_started = true;
-        }
-    }
-
-    pub fn mark_active_turn_provider_resume_at(&mut self, message_id: String) {
-        if let Some(turn) = self
-            .turns
-            .last_mut()
-            .filter(|turn| turn.status == TurnStatus::Running)
-        {
-            turn.provider_resume_at = Some(message_id);
-        }
-    }
-
-    pub fn provider_turns_after(&self, turn_count: usize) -> usize {
-        self.turns
-            .iter()
-            .skip(turn_count)
-            .filter(|turn| turn.provider_turn_started)
-            .count()
-    }
-
-    pub fn finish_active_turn(&mut self, status: TurnStatus) -> Option<(Uuid, usize)> {
-        let turn = self
-            .turns
-            .last_mut()
-            .filter(|turn| turn.status == TurnStatus::Running)?;
-        let completed_at = unix_time();
-        turn.status = status;
-        turn.completed_at = Some(completed_at);
-        let result = (turn.id, turn.turn_count);
-        self.last_reply_at = Some(completed_at);
-        Some(result)
-    }
-
-    pub fn push_message(&mut self, role: MessageRole, content: impl Into<String>) -> Uuid {
-        let message = match self.active_turn_id() {
-            Some(turn_id) => Message::new_for_turn(role, content, turn_id),
-            None => Message::new(role, content),
-        };
-        let id = message.id;
-        self.messages.push(message);
-        id
-    }
-
-    pub fn push_user_message_with_presentation(
-        &mut self,
-        content: impl Into<String>,
-        display_content: Option<String>,
-        attachments: Vec<MessageAttachment>,
-    ) -> Uuid {
-        let message = match self.active_turn_id() {
-            Some(turn_id) => Message::new_for_turn(MessageRole::User, content, turn_id),
-            None => Message::new(MessageRole::User, content),
-        }
-        .with_presentation(display_content, attachments);
-        let id = message.id;
-        self.messages.push(message);
-        id
-    }
-
-    pub fn truncate_after_turn(&mut self, turn_count: usize) {
-        let retained = self
-            .turns
-            .iter()
-            .take(turn_count)
-            .map(|turn| turn.id)
-            .collect::<std::collections::HashSet<_>>();
-        self.turns.truncate(turn_count);
-        self.messages.retain(|message| {
-            message
-                .turn_id
-                .is_none_or(|turn_id| retained.contains(&turn_id))
-        });
-        self.transcript_blocks.retain(|block| {
-            block
-                .turn_id
-                .is_none_or(|turn_id| retained.contains(&turn_id))
-        });
-        let message_count = self.messages.len();
-        for block in &mut self.transcript_blocks {
-            block.after_message = block.after_message.min(message_count);
-        }
-        self.updated_at = unix_time();
-    }
-
-    pub fn fork_through_turn(
-        &self,
-        turn_count: usize,
-        provider_cursor: ProviderResumeCursor,
-        fork_title: &str,
-    ) -> Option<Self> {
-        if turn_count == 0 || turn_count > self.turns.len() {
-            return None;
-        }
-
-        let mut fork = self.clone();
-        fork.truncate_after_turn(turn_count);
-        let fork_id = Uuid::new_v4();
-        let turn_ids = fork
-            .turns
-            .iter()
-            .map(|turn| (turn.id, Uuid::new_v4()))
-            .collect::<std::collections::HashMap<_, _>>();
-
-        for turn in &mut fork.turns {
-            turn.id = turn_ids[&turn.id];
-        }
-        for message in &mut fork.messages {
-            message.id = Uuid::new_v4();
-            if let Some(turn_id) = message.turn_id {
-                message.turn_id = turn_ids.get(&turn_id).copied();
-            }
-            message.streaming = false;
-        }
-        for block in &mut fork.transcript_blocks {
-            if let Some(turn_id) = block.turn_id {
-                block.turn_id = turn_ids.get(&turn_id).copied();
-            }
-        }
-
-        let now = unix_time();
-        fork.id = fork_id;
-        fork.title = Self::DEFAULT_TITLE.to_owned();
-        fork.auto_title = Some(fork_title.to_owned());
-        fork.status = SessionStatus::Idle;
-        fork.created_at = now;
-        fork.updated_at = now;
-        fork.provider_cursor = Some(provider_cursor);
-        fork.provider_session_id = None;
-        // A fork snapshots the conversation, not the pending follow-ups its
-        // source session is still holding for the live agent.
-        fork.queued_messages.clear();
-        Some(fork)
-    }
-}
-
-fn strip_legacy_codex_citations(text: &str) -> String {
-    const START: char = '\u{e200}';
-    const END: char = '\u{e201}';
-    const SEPARATOR: char = '\u{e202}';
-
-    let mut remaining = text;
-    let mut output = String::with_capacity(text.len());
-    while let Some(start) = remaining.find(START) {
-        output.push_str(&remaining[..start]);
-        let marker_start = start + START.len_utf8();
-        let Some(end_offset) = remaining[marker_start..].find(END) else {
-            output.push_str(&remaining[start..]);
-            return output;
-        };
-        let marker_end = marker_start + end_offset;
-        let marker = &remaining[marker_start..marker_end];
-        if marker
-            .split(SEPARATOR)
-            .next()
-            .is_some_and(|prefix| prefix != "cite")
-        {
-            output.push_str(&remaining[start..marker_end + END.len_utf8()]);
-        }
-        remaining = &remaining[marker_end + END.len_utf8()..];
-    }
-    output.push_str(remaining);
-    output
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MessageRole {
     User,
@@ -1666,7 +933,7 @@ pub enum MessageRole {
 /// A file represented by a composer chip and retained with the sent message.
 ///
 /// Render paths consume only this cached metadata; they never stat the file.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MessageAttachment {
     /// Absolute path on the daemon host, handed to the provider. Clients must
     /// use `blob_reference` rather than opening this path themselves.
@@ -1682,7 +949,7 @@ pub struct MessageAttachment {
     pub blob_reference: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Message {
     pub id: Uuid,
     #[serde(default)]
@@ -1735,7 +1002,7 @@ impl Message {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ActivityKind {
     Reasoning,
@@ -1846,105 +1113,7 @@ impl ActivityKind {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum DriverEvent {
-    /// Client-only acknowledgement that every daemon event through this
-    /// sequence has been incorporated into the local session projection.
-    /// Providers never emit this and the daemon never serializes it.
-    RuntimeEventCursorAdvanced(RuntimeEventCursor),
-    Connected {
-        provider_cursor: Option<ProviderResumeCursor>,
-    },
-    /// The provider-owned agent composition this session actually runs. A
-    /// fresh Harness session may resolve its deployment default when Waku did
-    /// not name one explicitly, so the driver reports the resolved value.
-    AgentPresetSelected(Option<String>),
-    /// A provider-owned, automatically generated session title. `None`
-    /// clears that fallback but never overwrites a user-owned title.
-    AutoTitleUpdated(Option<String>),
-    /// The slash commands the live process itself reports — Claude's
-    /// stream-json init handshake and ACP's `available_commands_update`.
-    /// Authoritative over filesystem discovery, which cannot see plugin or
-    /// dynamically registered commands.
-    AvailableCommands(Vec<ReportedCommand>),
-    /// A client submitted a prompt to this runtime. The daemon publishes it
-    /// ahead of the provider's `TurnStarted` so every attached client — not
-    /// only the one that typed it — carries the user message and the turn it
-    /// opens. The projections those clients save then describe the same
-    /// transcript; see [`AgentSession::adopt_submitted_prompt`].
-    PromptSubmitted {
-        message: String,
-        turn_id: Uuid,
-        message_id: Uuid,
-    },
-    TurnStarted,
-    /// The provider's turn ended while detached work it will wake the
-    /// session for is still running. The turn stays open — the wake's
-    /// `TurnStarted` continues it — and the session shows it is waiting.
-    TurnParked,
-    TextDelta(String),
-    ReasoningDelta(String),
-    Activity {
-        id: Option<String>,
-        kind: ActivityKind,
-        title: String,
-        detail: Option<String>,
-        complete: bool,
-    },
-    RichActivity(ActivityItem),
-    /// Session-level work that can outlive the turn which created it. This is
-    /// deliberately separate from transcript activities: completing a turn
-    /// must not make a detached process or subagent look complete.
-    BackgroundWork(BackgroundWorkEvent),
-    Permission {
-        request_id: String,
-        title: String,
-        detail: String,
-        options: Vec<PermissionOption>,
-    },
-    /// Structured questions the provider needs answered before it can
-    /// continue the active turn. Unlike a permission, this is never
-    /// auto-approved: the content itself has to come from the user.
-    UserInputRequested {
-        request_id: String,
-        questions: Vec<UserInputQuestion>,
-    },
-    ComputerUseUpdated(crate::computer_use::ComputerUseState),
-    /// The provider accepted a steering message into the running turn.
-    SteerAccepted {
-        message: String,
-    },
-    /// The provider could not steer the running turn (for example it ended
-    /// before the request arrived). The app decides the fallback.
-    SteerRejected {
-        message: String,
-        reason: String,
-    },
-    /// Context-window occupancy reported by the live stream. Fields arrive at
-    /// different moments — token counts with each assistant message, the
-    /// window size with the settled turn — so each is optional and the app
-    /// merges them into [`ContextUsage`].
-    UsageUpdated {
-        context_tokens: Option<u64>,
-        context_window: Option<u64>,
-    },
-    /// Account-level rate-limit meters carried by the provider's own stream
-    /// (Codex's `account/rateLimits/updated`). Same shape the OAuth fetcher
-    /// produces for Claude, so the panel renders both identically.
-    PlanUsageUpdated(crate::usage::PlanUsage),
-    /// The provider-persisted thread goal changed — set, edited, progressed,
-    /// or (`None`) cleared. Carries the whole goal so late subscribers need
-    /// no earlier event.
-    GoalUpdated(Option<ThreadGoal>),
-    TurnFinished {
-        success: bool,
-        summary: Option<String>,
-    },
-    Error(String),
-    ProcessExited,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BackgroundWorkKind {
     Process,
@@ -1952,7 +1121,7 @@ pub enum BackgroundWorkKind {
     Subagent,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BackgroundWorkStatus {
     Starting,
@@ -1978,7 +1147,7 @@ impl BackgroundWorkStatus {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundWorkKey {
     pub kind: BackgroundWorkKind,
@@ -1994,7 +1163,7 @@ impl BackgroundWorkKey {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundWorkItem {
     pub key: BackgroundWorkKey,
@@ -2053,7 +1222,7 @@ impl BackgroundWorkItem {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BackgroundWorkEvent {
     Upsert(BackgroundWorkItem),
@@ -2082,7 +1251,7 @@ pub enum BackgroundWorkEvent {
 /// Claude's init handshake reports bare names; ACP agents report names with
 /// descriptions. Sessions persisted by earlier builds stored plain strings,
 /// which the untagged repr still accepts.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ReportedCommand {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2121,7 +1290,7 @@ impl<'de> Deserialize<'de> for ReportedCommand {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionOption {
     pub id: String,
@@ -2129,7 +1298,7 @@ pub struct PermissionOption {
     pub allow: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputOption {
     pub label: String,
@@ -2137,7 +1306,7 @@ pub struct UserInputOption {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQuestion {
     pub id: String,
@@ -2149,7 +1318,7 @@ pub struct UserInputQuestion {
     pub multi_select: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputAnswer {
     pub question_id: String,
@@ -2157,7 +1326,7 @@ pub struct UserInputAnswer {
 }
 
 /// What a provider says happened to a file, when it says anything at all.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ActivityFileChangeStatus {
     Added,
@@ -2165,7 +1334,7 @@ pub enum ActivityFileChangeStatus {
     Deleted,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActivityFileChange {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2196,7 +1365,7 @@ impl ActivityFileChange {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActivityItem {
     pub id: Uuid,
     #[serde(default)]
@@ -3404,14 +2573,14 @@ fn merge_file_change(changes: &mut Vec<ActivityFileChange>, change: ActivityFile
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReasoningBlock {
     pub content: String,
     pub started_at_ms: u64,
     pub finished_at_ms: u64,
 }
 
-#[derive(Clone, Debug, TS)]
+#[derive(Clone, Debug)]
 pub struct TranscriptBlock {
     /// Render this block immediately after this many persisted messages.
     pub after_message: usize,
@@ -3419,7 +2588,6 @@ pub struct TranscriptBlock {
     /// Ordered non-message work emitted at this point in the transcript.
     /// The persisted field keeps its historical tagged shape so existing
     /// sessions remain readable while the runtime model stays activity-only.
-    #[ts(rename = "content", as = "StoredTranscriptBlockContent")]
     pub activities: Vec<ActivityItem>,
 }
 
@@ -3429,7 +2597,7 @@ enum StoredTranscriptBlockContentRef<'a> {
     Activities(&'a [ActivityItem]),
 }
 
-#[derive(Deserialize, TS)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "data")]
 pub enum StoredTranscriptBlockContent {
     Reasoning(ReasoningBlock),
@@ -3554,31 +2722,6 @@ mod tests {
             panic!("unexpected background-work event");
         };
         assert_eq!(items.len(), 1);
-    }
-
-    #[test]
-    fn attachment_messages_keep_transport_and_visible_content_separate() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-        let attachment = MessageAttachment {
-            path: PathBuf::from("/tmp/reference.png"),
-            mention: "/tmp/reference.png".to_owned(),
-            name: "reference.png".to_owned(),
-            is_dir: false,
-            is_image: true,
-            blob_reference: Some("waku-blob:ab/reference.png".to_owned()),
-        };
-
-        session.begin_turn_with_presentation(
-            "compare this @/tmp/reference.png",
-            Some("compare this".to_owned()),
-            vec![attachment.clone()],
-        );
-
-        let message = &session.messages[0];
-        assert_eq!(message.content, "compare this @/tmp/reference.png");
-        assert_eq!(message.visible_content(), "compare this");
-        assert_eq!(message.attachments, vec![attachment]);
     }
 
     #[test]
@@ -4083,69 +3226,6 @@ mod tests {
     }
 
     #[test]
-    fn prompt_generates_a_short_session_title() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-        session.set_title_from_prompt("build a really polished local agent interface for rust");
-        assert_eq!(
-            session.auto_title.as_deref(),
-            Some("build a really polished local agent interface")
-        );
-        assert_eq!(
-            session.display_title(),
-            "build a really polished local agent interface"
-        );
-        assert_eq!(session.title, AgentSession::DEFAULT_TITLE);
-    }
-
-    #[test]
-    fn provider_title_replaces_prompt_fallback_but_not_an_explicit_title() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::OpenCode);
-        session.set_title_from_prompt("investigate the broken provider event");
-
-        assert!(session.set_auto_title(Some("Fix provider title events".into())));
-        assert_eq!(session.display_title(), "Fix provider title events");
-
-        assert!(session.set_title("  My title  "));
-        assert!(session.set_auto_title(Some("A newer provider title".into())));
-        assert_eq!(session.display_title(), "My title");
-        assert!(!session.set_title("   "));
-        assert_eq!(session.display_title(), "My title");
-    }
-
-    #[test]
-    fn model_selection_keeps_started_sessions_on_their_provider() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-
-        assert!(session.can_choose_model(ProviderKind::Claude));
-
-        session.push_message(MessageRole::User, "first turn");
-        assert!(session.can_choose_model(ProviderKind::Codex));
-        assert!(!session.can_choose_model(ProviderKind::Claude));
-    }
-
-    #[test]
-    fn model_selection_waits_for_the_active_turn_to_finish() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-        session.push_message(MessageRole::User, "first turn");
-
-        for status in [
-            SessionStatus::Connecting,
-            SessionStatus::Working,
-            SessionStatus::Waiting,
-        ] {
-            session.status = status;
-            assert!(!session.can_choose_model(ProviderKind::Codex));
-        }
-
-        session.status = SessionStatus::Idle;
-        assert!(session.can_choose_model(ProviderKind::Codex));
-    }
-
-    #[test]
     fn provider_ids_are_stable() {
         assert_eq!(ProviderKind::Amp.id(), "amp");
         assert_eq!(ProviderKind::Claude.id(), "claude");
@@ -4278,191 +3358,6 @@ mod tests {
     }
 
     #[test]
-    fn prompt_title_truncation_is_unicode_safe() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Claude);
-        let prompt = "界".repeat(70);
-        session.set_title_from_prompt(&prompt);
-        let title = session.auto_title.as_deref().unwrap();
-        assert_eq!(title.chars().count(), 54);
-        assert!(title.ends_with('…'));
-    }
-
-    #[test]
-    fn a_failed_preparation_unwinds_the_turn_it_eagerly_began() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-
-        // A first prompt: the unwind restores the default title because the
-        // prompt returns to the composer, but keeps the submission activity.
-        session.set_title_from_prompt("Build the thing");
-        let turn_id = session.begin_turn("Build the thing");
-        let submitted_at = session.last_reply_at;
-        session.unwind_unstarted_turn(turn_id);
-        assert!(session.turns.is_empty());
-        assert!(session.messages.is_empty());
-        assert_eq!(session.last_reply_at, submitted_at);
-        assert_eq!(session.title, AgentSession::DEFAULT_TITLE);
-        assert!(session.auto_title.is_none());
-
-        // A follow-up prompt unwinds only itself.
-        let first = session.begin_turn("first");
-        session.push_message(MessageRole::Assistant, "done");
-        session.finish_active_turn(TurnStatus::Completed);
-        session.set_title_from_prompt("first");
-        let follow_up = session.begin_turn("second");
-        let follow_up_submitted_at = session.last_reply_at;
-        session.unwind_unstarted_turn(follow_up);
-        assert_eq!(session.turns.len(), 1);
-        assert_eq!(session.turns[0].id, first);
-        assert_eq!(session.messages.len(), 2);
-        assert_eq!(session.last_reply_at, follow_up_submitted_at);
-
-        // A turn the provider has already started never unwinds — losing a
-        // live conversation turn would desync the provider transcript.
-        let started = session.begin_turn("third");
-        session.mark_active_turn_provider_started();
-        session.unwind_unstarted_turn(started);
-        assert_eq!(session.turns.len(), 2);
-        assert_eq!(session.messages.len(), 3);
-    }
-
-    #[test]
-    fn turn_truncation_removes_owned_messages_and_blocks() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-
-        let first_turn = session.begin_turn("first");
-        session.push_message(MessageRole::Assistant, "first answer");
-        session.transcript_blocks.push(TranscriptBlock {
-            after_message: 2,
-            turn_id: Some(first_turn),
-            activities: Vec::new(),
-        });
-        session.finish_active_turn(TurnStatus::Completed);
-
-        let second_turn = session.begin_turn("second");
-        session.push_message(MessageRole::Assistant, "second answer");
-        session.transcript_blocks.push(TranscriptBlock {
-            after_message: 4,
-            turn_id: Some(second_turn),
-            activities: Vec::new(),
-        });
-        session.finish_active_turn(TurnStatus::Completed);
-
-        session.truncate_after_turn(1);
-
-        assert_eq!(session.turns.len(), 1);
-        assert_eq!(session.turns[0].id, first_turn);
-        assert_eq!(session.messages.len(), 2);
-        assert!(
-            session
-                .messages
-                .iter()
-                .all(|message| message.turn_id == Some(first_turn))
-        );
-        assert_eq!(session.transcript_blocks.len(), 1);
-        assert_eq!(session.transcript_blocks[0].turn_id, Some(first_turn));
-        assert_eq!(session.transcript_blocks[0].after_message, 2);
-    }
-
-    #[test]
-    fn response_fork_is_a_distinct_idle_session_through_the_selected_turn() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-
-        let first_turn = session.begin_turn("first");
-        let first_message = session.push_message(MessageRole::Assistant, "first answer");
-        session.finish_active_turn(TurnStatus::Completed);
-        session.begin_turn("second");
-        session.push_message(MessageRole::Assistant, "second answer");
-        session.finish_active_turn(TurnStatus::Completed);
-
-        let fork = session
-            .fork_through_turn(
-                1,
-                ProviderResumeCursor::Codex {
-                    thread_id: "forked-thread".into(),
-                },
-                "New task (2)",
-            )
-            .unwrap();
-
-        assert_ne!(fork.id, session.id);
-        assert_eq!(fork.title, AgentSession::DEFAULT_TITLE);
-        assert_eq!(fork.auto_title.as_deref(), Some("New task (2)"));
-        assert_eq!(fork.status, SessionStatus::Idle);
-        assert_eq!(fork.turns.len(), 1);
-        assert_eq!(fork.messages.len(), 2);
-        assert_ne!(fork.turns[0].id, first_turn);
-        assert_ne!(fork.messages[1].id, first_message);
-        assert!(
-            fork.messages
-                .iter()
-                .all(|message| message.turn_id == Some(fork.turns[0].id))
-        );
-        assert!(matches!(
-            fork.provider_cursor,
-            Some(ProviderResumeCursor::Codex { ref thread_id }) if thread_id == "forked-thread"
-        ));
-    }
-
-    #[test]
-    fn queued_follow_ups_stay_with_the_source_session_not_the_fork() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-
-        session.begin_turn("first");
-        session.push_message(MessageRole::Assistant, "first answer");
-        session.finish_active_turn(TurnStatus::Completed);
-        session
-            .queued_messages
-            .push(QueuedMessage::new("after you finish, also…"));
-
-        let fork = session
-            .fork_through_turn(
-                1,
-                ProviderResumeCursor::Codex {
-                    thread_id: "forked-thread".into(),
-                },
-                "New task (2)",
-            )
-            .unwrap();
-
-        assert_eq!(session.queued_messages.len(), 1);
-        assert!(fork.queued_messages.is_empty());
-    }
-
-    #[test]
-    fn follow_up_queue_round_trips_through_serde() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-        session
-            .queued_messages
-            .push(QueuedMessage::new("first follow-up"));
-        session
-            .queued_messages
-            .push(QueuedMessage::new("second follow-up"));
-
-        let value = serde_json::to_value(&session).unwrap();
-        assert!(value["queued_messages"].is_array());
-        let restored: AgentSession = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.queued_messages.len(), 2);
-        assert_eq!(restored.queued_messages[0].content, "first follow-up");
-        assert_eq!(restored.queued_messages[1].content, "second follow-up");
-        assert_ne!(
-            restored.queued_messages[0].id,
-            restored.queued_messages[1].id
-        );
-
-        // Sessions without the field (older state files) deserialize as empty.
-        let mut legacy = serde_json::to_value(&session).unwrap();
-        legacy.as_object_mut().unwrap().remove("queued_messages");
-        let legacy_session: AgentSession = serde_json::from_value(legacy).unwrap();
-        assert!(legacy_session.queued_messages.is_empty());
-    }
-
-    #[test]
     fn planned_worktree_base_branch_is_optional_and_round_trips() {
         let legacy: SessionWorkspace =
             serde_json::from_value(serde_json::json!({ "kind": "newWorktree" })).unwrap();
@@ -4473,24 +3368,6 @@ mod tests {
         };
         let restored = serde_json::from_value(serde_json::to_value(&selected).unwrap()).unwrap();
         assert_eq!(selected, restored);
-    }
-
-    #[test]
-    fn busy_statuses_cover_connecting_working_and_waiting() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-        for status in [
-            SessionStatus::Connecting,
-            SessionStatus::Working,
-            SessionStatus::Waiting,
-        ] {
-            session.status = status;
-            assert!(session.is_busy());
-        }
-        for status in [SessionStatus::Idle, SessionStatus::Failed] {
-            session.status = status;
-            assert!(!session.is_busy());
-        }
     }
 
     #[test]
@@ -4512,47 +3389,6 @@ mod tests {
         assert_eq!(value["provider"], "cursor");
         assert_eq!(value["sessionId"], "");
         assert_eq!(value["forkContext"], "[]");
-    }
-
-    #[test]
-    fn native_rollback_count_ignores_turns_that_never_reached_the_provider() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-
-        session.begin_turn("first");
-        session.mark_active_turn_provider_started();
-        session.finish_active_turn(TurnStatus::Completed);
-        session.begin_turn("failed locally");
-        session.finish_active_turn(TurnStatus::Failed);
-        session.begin_turn("third");
-        session.mark_active_turn_provider_started();
-        session.finish_active_turn(TurnStatus::Completed);
-
-        assert_eq!(session.provider_turns_after(1), 1);
-        assert_eq!(session.provider_turns_after(2), 1);
-        assert_eq!(session.provider_turns_after(3), 0);
-    }
-
-    #[test]
-    fn legacy_empty_search_titles_are_repaired() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-        session.transcript_blocks.push(TranscriptBlock {
-            after_message: 0,
-            turn_id: None,
-            activities: vec![ActivityItem::new(
-                Some("search-1".into()),
-                ActivityKind::Search,
-                "Search for ",
-                None,
-                true,
-            )],
-        });
-
-        session.migrate_legacy_state();
-
-        let activities = &session.transcript_blocks[0].activities;
-        assert_eq!(activities[0].title, "Browsed the web");
     }
 
     #[test]
@@ -4589,287 +3425,5 @@ mod tests {
             stored["content"]["data"][0]["reasoning"]["content"],
             "Checking the source"
         );
-    }
-
-    #[test]
-    fn adjacent_legacy_work_blocks_merge_during_session_migration() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-        session.transcript_blocks.extend([
-            TranscriptBlock {
-                after_message: 1,
-                turn_id: None,
-                activities: vec![ActivityItem::from_reasoning(
-                    ReasoningBlock {
-                        content: "Looking around".into(),
-                        started_at_ms: 1_000,
-                        finished_at_ms: 2_000,
-                    },
-                    true,
-                )],
-            },
-            TranscriptBlock {
-                after_message: 1,
-                turn_id: None,
-                activities: vec![ActivityItem::new(
-                    None,
-                    ActivityKind::Command,
-                    "Ran tests",
-                    None,
-                    true,
-                )],
-            },
-        ]);
-
-        session.migrate_legacy_state();
-
-        assert_eq!(session.transcript_blocks.len(), 1);
-        assert_eq!(session.transcript_blocks[0].activities.len(), 2);
-        assert_eq!(
-            session.transcript_blocks[0]
-                .activities
-                .iter()
-                .map(|activity| activity.kind)
-                .collect::<Vec<_>>(),
-            [ActivityKind::Reasoning, ActivityKind::Command]
-        );
-    }
-
-    #[test]
-    fn legacy_file_edit_details_are_promoted_to_arguments_and_metadata() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::OpenCode);
-        session.transcript_blocks.push(TranscriptBlock {
-            after_message: 0,
-            turn_id: None,
-            activities: vec![ActivityItem::new(
-                None,
-                ActivityKind::FileChange,
-                "edit",
-                Some(
-                    serde_json::json!({
-                        "filePath": "/tmp/waku/README.md",
-                        "oldString": "old",
-                        "newString": "new\nmore"
-                    })
-                    .to_string(),
-                ),
-                true,
-            )],
-        });
-
-        session.migrate_legacy_state();
-
-        let activities = &session.transcript_blocks[0].activities;
-        assert!(activities[0].detail.is_none());
-        assert!(activities[0].arguments.is_some());
-        assert_eq!(activities[0].file_changes[0].path, "/tmp/waku/README.md");
-        assert_eq!(activities[0].file_changes[0].additions, Some(2));
-        assert_eq!(activities[0].file_changes[0].deletions, Some(1));
-    }
-
-    #[test]
-    fn legacy_file_tools_are_reclassified_and_gain_cached_targets() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::OpenCode);
-        let mut cached = ActivityItem::new(None, ActivityKind::FileRead, "read", None, true);
-        cached.display_target = Some("/tmp/waku/src/persisted.rs".into());
-        session.transcript_blocks.push(TranscriptBlock {
-            after_message: 0,
-            turn_id: None,
-            activities: vec![
-                ActivityItem::new(
-                    None,
-                    ActivityKind::Search,
-                    "read",
-                    Some(r#"{"filePath":"/tmp/waku/src/model.rs"}"#.into()),
-                    true,
-                ),
-                ActivityItem::new(
-                    None,
-                    ActivityKind::Tool,
-                    "glob",
-                    Some(r#"{"pattern":"src/**/*.rs"}"#.into()),
-                    true,
-                ),
-                cached,
-            ],
-        });
-
-        session.migrate_legacy_state();
-
-        let activities = &session.transcript_blocks[0].activities;
-        assert_eq!(activities[0].kind, ActivityKind::FileRead);
-        assert_eq!(
-            activities[0].display_target.as_deref(),
-            Some("/tmp/waku/src/model.rs")
-        );
-        assert_eq!(activities[1].kind, ActivityKind::FileSearch);
-        assert_eq!(activities[1].display_target.as_deref(), Some("src/**/*.rs"));
-        assert_eq!(
-            activities[2].display_target.as_deref(),
-            Some("/tmp/waku/src/persisted.rs")
-        );
-        assert!(
-            activities[..2]
-                .iter()
-                .all(|activity| activity.detail.is_none())
-        );
-        assert!(
-            activities[..2]
-                .iter()
-                .all(|activity| activity.arguments.is_some())
-        );
-    }
-
-    #[test]
-    fn legacy_codex_citation_markers_are_removed() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-        session.messages.push(Message::new(
-            MessageRole::Assistant,
-            "Claim.\u{e200}cite\u{e202}turn3view0\u{e202}turn2view2\u{e201}\nNext.",
-        ));
-
-        session.migrate_legacy_state();
-
-        assert_eq!(session.messages[0].content, "Claim.\nNext.");
-    }
-
-    #[test]
-    fn legacy_checkpoint_totals_are_backfilled_from_the_file_summary() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-        session.begin_turn("Build it");
-        session.finish_active_turn(TurnStatus::Completed);
-        let mut serialized = serde_json::to_value(Checkpoint {
-            turn_count: 1,
-            git_ref: "refs/waku/test".into(),
-            status: CheckpointStatus::Ready,
-            files: vec![
-                CheckpointFile {
-                    path: "src/app.rs".into(),
-                    additions: 7,
-                    deletions: 2,
-                },
-                CheckpointFile {
-                    path: "src/model.rs".into(),
-                    additions: 3,
-                    deletions: 5,
-                },
-            ],
-            additions: 10,
-            deletions: 7,
-            created_at: 1,
-        })
-        .unwrap();
-        let object = serialized.as_object_mut().unwrap();
-        object.remove("additions");
-        object.remove("deletions");
-        let checkpoint: Checkpoint = serde_json::from_value(serialized).unwrap();
-        assert_eq!((checkpoint.additions, checkpoint.deletions), (0, 0));
-        session.turns[0].checkpoint = Some(checkpoint);
-
-        session.migrate_legacy_state();
-
-        let checkpoint = session.turns[0].checkpoint.as_ref().unwrap();
-        assert_eq!((checkpoint.additions, checkpoint.deletions), (10, 7));
-        assert!(checkpoint.totals_are_current());
-    }
-
-    #[test]
-    fn a_follower_adopts_another_clients_submission_under_its_ids() {
-        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        session.begin_turn("first");
-        session.push_message(MessageRole::Assistant, "done");
-        session.finish_active_turn(TurnStatus::Completed);
-        session.status = SessionStatus::Idle;
-        let turn_id = Uuid::new_v4();
-        let message_id = Uuid::new_v4();
-
-        assert!(session.adopt_submitted_prompt("second", turn_id, message_id));
-
-        assert_eq!(session.status, SessionStatus::Connecting);
-        assert_eq!(session.active_turn_id(), Some(turn_id));
-        let turn = session.turns.last().unwrap();
-        assert_eq!(turn.turn_count, 2);
-        assert!(!turn.provider_turn_started);
-        let prompt = session.messages.last().unwrap();
-        assert_eq!(prompt.id, message_id);
-        assert_eq!(prompt.turn_id, Some(turn_id));
-        assert_eq!(prompt.role, MessageRole::User);
-        assert_eq!(prompt.content, "second");
-    }
-
-    #[test]
-    fn the_submitters_own_echo_changes_nothing() {
-        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        let turn_id = session.begin_turn("first");
-        session.status = SessionStatus::Connecting;
-        let message_id = session.messages[0].id;
-
-        assert!(!session.adopt_submitted_prompt("first", turn_id, message_id));
-
-        assert_eq!(session.turns.len(), 1);
-        assert_eq!(session.messages.len(), 1);
-        assert_eq!(session.status, SessionStatus::Connecting);
-    }
-
-    #[test]
-    fn a_provider_started_turn_takes_the_submitted_prompt_as_its_own() {
-        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
-        let provider_turn = session.begin_provider_turn();
-        session.mark_active_turn_provider_started();
-        session.status = SessionStatus::Working;
-        let message_id = Uuid::new_v4();
-
-        assert!(session.adopt_submitted_prompt("continue", Uuid::new_v4(), message_id));
-
-        assert_eq!(session.turns.len(), 1);
-        let prompt = session.messages.last().unwrap();
-        assert_eq!(prompt.id, message_id);
-        assert_eq!(prompt.turn_id, Some(provider_turn));
-        assert_eq!(prompt.role, MessageRole::User);
-        assert_eq!(session.status, SessionStatus::Working);
-    }
-
-    #[test]
-    fn list_projection_never_copies_session_detail() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
-        session.title = "Visible title".into();
-        session.model = Some("gpt-5".into());
-        session.status = SessionStatus::Working;
-        session.begin_turn("A large prompt");
-        session.messages.push(Message::new(
-            MessageRole::Assistant,
-            "A large streamed response",
-        ));
-        session.transcript_blocks.push(TranscriptBlock {
-            after_message: 1,
-            turn_id: None,
-            activities: vec![ActivityItem::new(
-                None,
-                ActivityKind::Tool,
-                "Inspect files",
-                None,
-                false,
-            )],
-        });
-        session
-            .queued_messages
-            .push(QueuedMessage::new("Follow up"));
-
-        let projection = session.list_projection();
-
-        assert_eq!(projection.id, session.id);
-        assert_eq!(projection.title, "Visible title");
-        assert_eq!(projection.model.as_deref(), Some("gpt-5"));
-        assert_eq!(projection.status, SessionStatus::Working);
-        assert!(!projection.detail_loaded);
-        assert!(projection.messages.is_empty());
-        assert!(projection.transcript_blocks.is_empty());
-        assert!(projection.turns.is_empty());
-        assert!(projection.queued_messages.is_empty());
     }
 }

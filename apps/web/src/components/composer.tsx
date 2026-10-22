@@ -1,17 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Popover } from '@base-ui/react/popover'
-import type {
-  AgentSession,
-  BranchSnapshot,
-  ComposerDraft,
-  GoalOperation,
-  MessageAttachment,
-  PlanUsage,
-  Project,
-  ProviderModel,
-  ProviderProbe,
-  ThreadGoalStatus,
-} from '@waku/client'
+import type * as T from '@waku/client/v8'
 import {
   useEffect,
   useRef,
@@ -33,17 +22,28 @@ import { FileTypeIcon, WakuIcon } from '@/components/waku-icon'
 import {
   useComposerCommands,
   useComposerFiles,
-  useDaemonSettings,
   useProviderProbe,
   useWorkspaceBranches,
 } from '@/hooks/use-daemon-data'
-import { importDaemonPathAttachment, importFiles, readAttachmentImage } from '@/lib/attachments'
+import { useProviderStatuses } from '@/hooks/use-daemon-stores'
+import {
+  draftAttachment,
+  importDaemonPathAttachment,
+  importFiles,
+  readAttachmentImage,
+} from '@/lib/attachments'
+import type { MessageInput } from '@/lib/commands'
+import type { ComposerDraftValue } from '@/lib/composer-drafts'
 import {
   checkoutWorkspaceBranch,
   daemonKeys,
   fetchPlanUsage,
+  projectRoot,
+  rootKey,
   selectableProjects,
-  sessionCwd,
+  taskCwd,
+  threadRoot,
+  type ProviderCatalog,
 } from '@/lib/daemon-api'
 import { useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
@@ -53,17 +53,18 @@ import {
   expandedComposerSubmission,
   isFastModeToggleSubmission,
   isResumeSubmission,
-  mergeComposerCommands,
   parseGoalSubmission,
   replaceComposerTrigger,
+  mergeSessionCommands,
+  sortComposerCommands,
   toggledFastServiceTier,
   type ComposerAutocompleteRow,
 } from '@/lib/composer-autocomplete'
 import {
   browserComposerPreferenceStorage,
   readComposerPreferences,
+  rememberComposerSelection,
   rememberedModelTraits,
-  rememberComposerSession,
   writeComposerPreferences,
 } from '@/lib/composer-preferences'
 import {
@@ -75,9 +76,14 @@ import {
 import { usePrimaryShortcut } from '@/lib/platform'
 import { agentPresetDescription, agentPresetLabel } from '@/lib/agent-preset-presentation'
 import { isProjectlessProject, projectDisplayName } from '@/lib/project-presentation'
-import type { PendingUserInput } from '@/lib/event-reducer'
-import { useRuntime } from '@/lib/runtime-context'
-import { sessionHasStarted } from '@/lib/sidebar-presentation'
+import { useTaskActions } from '@/lib/task-actions'
+import {
+  isBusy,
+  type NewTaskDraft,
+  type PendingUserInput,
+  type QueuedMessage,
+  type Task,
+} from '@/lib/thread-model'
 import { cn } from '@/lib/utils'
 
 type Translator = (key: string, params?: Record<string, string | number>) => string
@@ -114,11 +120,11 @@ function modelOptionLabel(id: string, fallback: string, t: Translator) {
 }
 
 export function Composer({
-  session,
+  task,
+  newTask,
   project,
   projects,
-  draft = false,
-  onDraftChange,
+  onNewTaskChange,
   onActivated,
   focusSignal,
   modelPickerSignal,
@@ -136,19 +142,21 @@ export function Composer({
   onUsagePanelSignalHandled,
   onPrefillSignalHandled,
 }: {
-  session: AgentSession
-  project: Project
-  projects: Project[]
-  draft?: boolean
-  onDraftChange?: (session: AgentSession) => void
-  onActivated?: (session: AgentSession) => void
+  /** An existing thread; exactly one of `task` and `newTask` is set. */
+  task?: Task
+  /** A task being composed; nothing exists on the daemon until it is sent. */
+  newTask?: NewTaskDraft
+  project: T.Project
+  projects: T.Project[]
+  onNewTaskChange?: (draft: NewTaskDraft) => void
+  onActivated?: (threadId: string) => void
   focusSignal?: number
   modelPickerSignal?: number
   usagePanelSignal?: number
   prefillSignal?: number
   prefillText?: string
-  initialComposerDraft?: ComposerDraft
-  onComposerDraftChange?: (draft: ComposerDraft) => void
+  initialComposerDraft?: ComposerDraftValue
+  onComposerDraftChange?: (draft: ComposerDraftValue) => void
   onComposerDraftSubmitted?: () => void
   onAddProject?: () => void
   onProjectless?: () => void
@@ -159,31 +167,26 @@ export function Composer({
   onPrefillSignalHandled?: () => void
 }) {
   const { t } = useI18n()
-  const { client, config } = useDaemon()
+  const { connection, config } = useDaemon()
   const queryClient = useQueryClient()
-  const {
-    sendPrompt,
-    sendGoalOperation,
-    steerPrompt,
-    cancel,
-    respond,
-    respondUserInput,
-    saveSession,
-    removeQueuedMessage,
-    permissions,
-    userInputs,
-    runtimes,
-  } = useRuntime()
-  const probe = useProviderProbe(session.provider)
-  const cwd = sessionCwd(session, project)
-  const branches = useWorkspaceBranches(cwd)
-  const composerFiles = useComposerFiles(cwd)
-  const composerCommands = useComposerCommands(session.provider, cwd)
+  const actions = useTaskActions()
+  const selection: T.ModelSelection = task?.selection ?? newTask?.selection ?? { instance: 'codex' }
+  const runtimeMode: T.RuntimeMode = task?.runtimeMode ?? newTask?.runtimeMode ?? 'full_access'
+  const interactionMode: T.InteractionMode = task?.interactionMode ?? newTask?.interactionMode ?? 'default'
+  const provider = selection.instance
+  const subjectId = task?.id ?? newTask?.id ?? project.id
+  const root: T.RootRef = task ? threadRoot(task.id) : projectRoot(project.id)
+  const rootId = rootKey(root)
+  const cwd = taskCwd(task, project)
+  const probe = useProviderProbe(provider)
+  const branches = useWorkspaceBranches(root)
+  const composerFiles = useComposerFiles(root)
+  const composerCommands = useComposerCommands(provider, root, task?.id)
   const [prompt, setPrompt] = useState(initialComposerDraft?.text ?? '')
   const [goalDialog, setGoalDialog] = useState<{ prefill: string | null; replace: boolean } | null>(
     null,
   )
-  const [attachments, setAttachments] = useState<MessageAttachment[]>(
+  const [attachments, setAttachments] = useState<T.Attachment[]>(
     () => initialComposerDraft?.attachments ?? [],
   )
   const [submitting, setSubmitting] = useState(false)
@@ -202,31 +205,31 @@ export function Composer({
   const mounted = useRef(true)
   const draftChange = useRef(onComposerDraftChange)
   draftChange.current = onComposerDraftChange
-  const busy = ['connecting', 'working', 'waiting', 'background'].includes(session.status)
-  const runningTurnId = [...session.turns].reverse().find((turn) => turn.status === 'running')?.id
-  const escapeStopTarget = `${session.id}:${runningTurnId ?? ''}`
+  const busy = task ? isBusy(task.status) : false
+  const escapeStopTarget = `${subjectId}:${task?.activeRun?.id ?? ''}`
   const escapeStopArmed = busy && isEscapeStopArmed(escapeStopArm, escapeStopTarget, Date.now())
-  const permission = permissions[session.id]
-  const userInput = userInputs[session.id]
-  const runtime = runtimes[session.id]
-  const selectedModel = probe.data?.models.find((model) => model.id === session.model)
-    ?? probe.data?.models.find((model) => model.is_default)
+  const approval = task?.approval
+  const userInput = task?.userInput
+  const goal = task?.goal ?? null
+  const selectedModel = probe.data?.models.find((model) => model.id === selection.model)
+    ?? probe.data?.models.find((model) => model.isDefault)
     ?? probe.data?.models[0]
   const hasDraft = Boolean(prompt.trim() || attachments.length)
-  const canSteer = busy && session.status !== 'connecting' && runtime?.supportsSteer
-  const workspace = session.workspace ?? { kind: 'local' as const }
+  const canSteer = Boolean(busy && task?.status !== 'preparing' && task?.supportsSteer)
+  // A thread's project and workspace are fixed once it exists.
+  const started = Boolean(task)
+  const plannedWorktree = Boolean(newTask?.isolated)
   const projectChoices = selectableProjects(projects, project)
   const projectless = isProjectlessProject(project)
   const projectName = projectDisplayName(project, t('project.no_project_name'))
-  const workspaceLocal = workspace.kind === 'local'
-  const workspaceLabel = workspace.kind === 'newWorktree'
-    ? t('workspace.new_worktree')
-    : workspace.kind === 'worktree'
-      ? workspace.branch
+  const workspaceLocal = newTask ? !newTask.isolated : !task?.worktreePath
+  const workspaceLabel = newTask
+    ? newTask.isolated ? t('workspace.new_worktree') : t('workspace.local')
+    : task?.worktreePath
+      ? task.branch ?? task.worktreePath.split('/').filter(Boolean).at(-1) ?? t('workspace.new_worktree')
       : t('workspace.local')
-  const availableCommands = mergeComposerCommands(
-    composerCommands.data ?? [],
-    session.available_commands ?? [],
+  const availableCommands = sortComposerCommands(
+    mergeSessionCommands(composerCommands.data ?? [], task?.sessionCommands ?? []),
   )
   const autocompleteTrigger = inputFocused ? detectComposerTrigger(prompt, cursor) : null
   const autocompleteKey = autocompleteTrigger
@@ -259,7 +262,8 @@ export function Composer({
 
   function stopTurn() {
     clearEscapeStop()
-    void cancel(session.id).catch((error) => toast.error(errorMessage(error)))
+    if (!task) return
+    void actions.interrupt(task).catch((error) => toast.error(errorMessage(error)))
   }
 
   useEffect(() => {
@@ -327,7 +331,7 @@ export function Composer({
     setFilePickerOpen(false)
     setDismissedAutocomplete(null)
     setAutocompleteSelection({ key: '', index: 0 })
-  }, [cwd, session.id])
+  }, [rootId, subjectId])
 
   useEffect(() => {
     const nextCursor = pendingCursor.current
@@ -346,28 +350,26 @@ export function Composer({
   }, [])
 
   useEffect(() => {
-    draftChange.current?.({ text: prompt, attachments })
+    draftChange.current?.({ text: prompt, attachments: attachments.map(draftAttachment) })
   }, [attachments, prompt])
 
-  async function activateDraft() {
-    if (!draft) return session
-    return saveSession(session, project)
-  }
-
-  function providerPromptOverride(
+  function messageInput(
     submittedPrompt: string,
-    submittedAttachments: MessageAttachment[],
-  ): string | undefined {
+    submittedAttachments: T.Attachment[],
+  ): MessageInput {
     const expanded = expandedComposerSubmission(
-      session.provider,
+      provider,
       submittedPrompt.trim(),
       availableCommands,
     )
-    if (expanded === null) return undefined
-    return [
-      expanded,
-      submittedAttachments.map((attachment) => `@${attachment.mention}`).join(' '),
-    ].filter(Boolean).join(' ')
+    const input: MessageInput = { text: submittedPrompt, attachments: submittedAttachments }
+    if (expanded !== null) {
+      input.providerText = [
+        expanded,
+        submittedAttachments.map((attachment) => `@${attachment.mention}`).join(' '),
+      ].filter(Boolean).join(' ')
+    }
+    return input
   }
 
   function executeLocalComposerCommand(submittedPrompt = prompt): boolean {
@@ -391,61 +393,42 @@ export function Composer({
   }
 
   function executeFastModeToggle(submittedPrompt: string): boolean {
-    if (!isFastModeToggleSubmission(session.provider, submittedPrompt, availableCommands)) return false
+    if (!isFastModeToggleSubmission(provider, submittedPrompt, availableCommands)) return false
     const nextTier = toggledFastServiceTier(
-      session.service_tier,
-      selectedModel?.service_tiers ?? [],
+      selection.serviceTier,
+      selectedModel?.serviceTiers ?? [],
     )
     if (!nextTier) return false
     const enabled = nextTier !== 'default'
     clearComposerDraft()
-    savePatch({ service_tier: nextTier })
+    applySelection({ ...selection, serviceTier: nextTier })
     toast.success(t(enabled ? 'commands.fast_enabled' : 'commands.fast_disabled'))
     return true
   }
 
-  function dispatchGoal(operation: GoalOperation) {
-    void sendGoalOperation(session, operation).catch((error) => toast.error(errorMessage(error)))
+  /** Protocol v8 has no goal command yet: goals are shown, not changed. */
+  function goalUnsupported() {
+    toast.error(t('goal.unsupported'))
   }
 
-  /** Codex's native `/goal` command, bridged to app-server without starting a
-   * turn. The runtime context starts the provider itself when none is live yet,
-   * so a goal can be set before the first message. */
+  /** Codex's native `/goal` command. Showing the goal works; changing it
+   * needs a daemon command v8 does not have yet. */
   function executeGoalCommand(submittedPrompt: string): boolean {
-    const command = parseGoalSubmission(session.provider, submittedPrompt, availableCommands)
+    const command = parseGoalSubmission(provider, submittedPrompt, availableCommands)
     if (!command) return false
-    const goal = session.thread_goal ?? null
-    switch (command.kind) {
-      case 'show':
-      case 'edit':
-        setGoalDialog({ prefill: null, replace: false })
-        break
-      case 'pause':
-        dispatchGoal({ kind: 'set', objective: null, status: 'paused', replace: false })
-        break
-      case 'resume':
-        dispatchGoal({ kind: 'set', objective: null, status: 'active', replace: false })
-        break
-      case 'clear':
-        dispatchGoal({ kind: 'clear' })
-        break
-      case 'set':
-        if (goal && goal.status !== 'complete' && goal.status !== 'budgetLimited') {
-          // Replacing unfinished work needs a look at what it replaces; the
-          // dialog carries the confirmation.
-          setGoalDialog({ prefill: command.objective, replace: true })
-        } else {
-          dispatchGoal({
-            kind: 'set',
-            objective: command.objective,
-            status: 'active',
-            replace: Boolean(goal),
-          })
-        }
-        break
+    if (command.kind === 'show' || command.kind === 'edit') {
+      setGoalDialog({ prefill: null, replace: false })
+    } else {
+      goalUnsupported()
     }
     clearComposerDraft()
     return true
+  }
+
+  function worktreeFrom(): string | undefined {
+    if (!newTask?.isolated) return undefined
+    const snapshot = branches.data
+    return newTask.baseRef ?? snapshot?.current ?? snapshot?.defaultBranch ?? 'HEAD'
   }
 
   async function submit() {
@@ -453,29 +436,30 @@ export function Composer({
     if (executeLocalComposerCommand()) return
     const submittedPrompt = prompt
     const submittedAttachments = attachments
+    const input = messageInput(submittedPrompt, submittedAttachments)
     let cleared = false
     setSubmitting(true)
     try {
-      const target = await activateDraft()
-      const pending = sendPrompt(
-        target,
-        submittedPrompt,
-        submittedAttachments,
-        providerPromptOverride(submittedPrompt, submittedAttachments),
-      )
+      const pending = newTask
+        ? actions.startTask({
+            projectId: newTask.projectId,
+            selection,
+            runtimeMode,
+            interactionMode,
+            worktreeFrom: worktreeFrom(),
+          }, input)
+        : task
+          ? actions.sendMessage(task, input, 'send').then(() => undefined)
+          : Promise.resolve(undefined)
       onComposerDraftSubmitted?.()
       setPrompt('')
       setCursor(0)
       setDismissedAutocomplete(null)
       setAttachments([])
       cleared = true
-      if (draft) {
-        const optimistic = config
-          ? queryClient.getQueryData<AgentSession>(daemonKeys.session(config.address, target.id))
-          : undefined
-        onActivated?.(optimistic ?? target)
-      }
-      await pending
+      const threadId = await pending
+      rememberSelection(selection)
+      if (newTask && typeof threadId === 'string') onActivated?.(threadId)
     } catch (error) {
       if (cleared && mounted.current) {
         setPrompt((current) => current || submittedPrompt)
@@ -488,19 +472,14 @@ export function Composer({
   }
 
   async function steer() {
-    if (!hasDraft || !canSteer) return
+    if (!hasDraft || !canSteer || !task) return
     if (executeLocalComposerCommand()) return
     const submittedPrompt = prompt
     const submittedAttachments = attachments
     let cleared = false
     setSubmitting(true)
     try {
-      const pending = steerPrompt(
-        session,
-        submittedPrompt,
-        submittedAttachments,
-        providerPromptOverride(submittedPrompt, submittedAttachments),
-      )
+      const pending = actions.sendMessage(task, messageInput(submittedPrompt, submittedAttachments), 'steer')
       onComposerDraftSubmitted?.()
       setPrompt('')
       setCursor(0)
@@ -520,10 +499,10 @@ export function Composer({
   }
 
   async function addFiles(files: File[]) {
-    if (!client || !files.length) return
+    if (!connection || !files.length) return
     setUploading(true)
     try {
-      const imported = await importFiles(client, files)
+      const imported = await importFiles(connection, files)
       if (!mounted.current) return
       setAttachments((current) => [...current, ...imported])
     } catch (error) {
@@ -534,11 +513,11 @@ export function Composer({
   }
 
   async function addDaemonFile(path: string): Promise<boolean> {
-    if (!client) return false
+    if (!connection) return false
     if (attachments.some((attachment) => attachment.mention === path)) return true
     setUploading(true)
     try {
-      const imported = await importDaemonPathAttachment(client, path)
+      const imported = await importDaemonPathAttachment(connection, path)
       if (!mounted.current) return false
       setAttachments((current) => current.some((attachment) => attachment.mention === imported.mention)
         ? current
@@ -552,18 +531,29 @@ export function Composer({
     }
   }
 
-  function savePatch(patch: Partial<AgentSession>) {
-    const next = { ...session, ...patch, updated_at: Math.floor(Date.now() / 1_000) }
-    if (config && next.model) {
-      const storage = browserComposerPreferenceStorage()
-      const preferences = rememberComposerSession(
-        readComposerPreferences(storage, config.address),
-        next,
-      )
-      writeComposerPreferences(storage, config.address, preferences)
+  function rememberSelection(next: T.ModelSelection) {
+    if (!config || !next.model) return
+    const storage = browserComposerPreferenceStorage()
+    writeComposerPreferences(
+      storage,
+      config.address,
+      rememberComposerSelection(readComposerPreferences(storage, config.address), next),
+    )
+  }
+
+  function applySelection(next: T.ModelSelection) {
+    rememberSelection(next)
+    if (newTask) onNewTaskChange?.({ ...newTask, selection: next })
+    else if (task) {
+      void actions.setSelection(task.id, next).catch((error) => toast.error(errorMessage(error)))
     }
-    if (draft) onDraftChange?.(next)
-    else void saveSession(next).catch((error) => toast.error(errorMessage(error)))
+  }
+
+  function applyRuntimeMode(mode: T.RuntimeMode) {
+    if (newTask) onNewTaskChange?.({ ...newTask, runtimeMode: mode })
+    else if (task) {
+      void actions.setRuntimeMode(task.id, mode).catch((error) => toast.error(errorMessage(error)))
+    }
   }
 
   function acceptAutocomplete(index = autocompleteHighlight) {
@@ -614,16 +604,16 @@ export function Composer({
   }
 
   async function switchBranch(branch: string, create = false) {
-    if (!client || !config || !branch || branchPending) return
-    if (!create && workspace.kind === 'newWorktree') {
-      savePatch({ workspace: { kind: 'newWorktree', baseBranch: branch } })
+    if (!connection || !config || !branch || branchPending) return
+    if (!create && newTask?.isolated) {
+      onNewTaskChange?.({ ...newTask, baseRef: branch })
       return
     }
     setBranchPending(true)
     try {
-      await checkoutWorkspaceBranch(client, cwd, branch, create)
+      await checkoutWorkspaceBranch(connection, root, branch, create)
       await queryClient.invalidateQueries({
-        queryKey: daemonKeys.workspace(config.address, cwd),
+        queryKey: daemonKeys.workspace(config.address, rootId),
       })
     } catch (error) {
       toast.error(errorMessage(error))
@@ -635,22 +625,22 @@ export function Composer({
   return (
     <div className="shrink-0 px-3 pb-2 sm:px-5">
       <div className="mx-auto w-full max-w-[720px]">
-        {permission && !userInput && (
+        {task && approval && !userInput && (
           <section className="mb-2 rounded-xl border border-[color:var(--warning)]/30 bg-card p-3 shadow-lg">
-            <div className="text-[13px] font-medium">{permission.title}</div>
-            {permission.detail && (
+            <div className="text-[13px] font-medium">{approval.title}</div>
+            {approval.detail && (
               <p className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap text-xs leading-5 text-[var(--text-tertiary)]">
-                {permission.detail}
+                {approval.detail}
               </p>
             )}
             <div className="mt-3 flex flex-wrap justify-end gap-2">
-              {permission.options.map((option) => (
+              {approval.options.map((option) => (
                 <Button
                   key={option.id}
                   size="sm"
                   variant={option.allow ? 'default' : 'outline'}
                   onClick={() => {
-                    void respond(session.id, permission.requestId, option.id).catch((error) =>
+                    void actions.respondApproval(task.id, approval.requestId, option.id).catch((error) =>
                       toast.error(errorMessage(error)),
                     )
                   }}
@@ -663,44 +653,50 @@ export function Composer({
           </section>
         )}
 
-        {userInput && (
+        {task && userInput && (
           <UserInputPanel
             input={userInput}
-            onSubmit={(answers) => respondUserInput(
-              session.id,
+            onDismiss={() => actions.dismissUserInput(task.id, userInput.requestId)}
+            onSubmit={(answers) => actions.respondUserInput(
+              task.id,
               userInput.requestId,
               answers,
             )}
           />
         )}
 
-        <QueuedMessages
-          canSteer={Boolean(canSteer)}
-          session={session}
-          onEdit={(message) => {
-            setPrompt(message.display_content ?? message.content)
-            setAttachments(message.attachments ?? [])
-            void removeQueuedMessage(session.id, message.id).catch((error) =>
-              toast.error(errorMessage(error)),
-            )
-          }}
-          onRemove={(messageId) =>
-            void removeQueuedMessage(session.id, messageId).catch((error) =>
-              toast.error(errorMessage(error)),
-            )
-          }
-          onSteer={(message) => {
-            void removeQueuedMessage(session.id, message.id).catch((error) =>
-              toast.error(errorMessage(error)),
-            )
-            void steerPrompt(
-              session,
-              message.display_content ?? message.content,
-              message.attachments ?? [],
-              message.content,
-            ).catch((error) => toast.error(errorMessage(error)))
-          }}
-        />
+        {task && (
+          <QueuedMessages
+            canSteer={canSteer}
+            messages={task.queued}
+            onEdit={(message) => {
+              // Queued runs cannot be edited in place yet; take it back into the composer.
+              setPrompt(message.displayText ?? message.text)
+              setAttachments(message.attachments)
+              void actions.cancelQueued(task.id, message.runId).catch((error) =>
+                toast.error(errorMessage(error)),
+              )
+            }}
+            onRemove={(runId) =>
+              void actions.cancelQueued(task.id, runId).catch((error) =>
+                toast.error(errorMessage(error)),
+              )
+            }
+            onSteer={(message) => {
+              void actions.cancelQueued(task.id, message.runId)
+                .then(() => actions.sendMessage(
+                  task,
+                  {
+                    text: message.displayText ?? message.text,
+                    attachments: message.attachments,
+                    providerText: message.text,
+                  },
+                  'steer',
+                ))
+                .catch((error) => toast.error(errorMessage(error)))
+            }}
+          />
+        )}
 
         <div className="relative">
           {autocompleteVisible && (
@@ -734,7 +730,7 @@ export function Composer({
               {attachments.map((attachment, index) => (
                 <ComposerAttachmentTile
                   attachment={attachment}
-                  key={attachment.blob_reference ?? `${attachment.mention}-${index}`}
+                  key={attachment.blobReference ?? `${attachment.mention}-${index}`}
                   t={t}
                   onRemove={() => setAttachments((current) => current.filter((_, item) => item !== index))}
                 />
@@ -770,48 +766,51 @@ export function Composer({
           >
             <ModelPicker
               currentProbe={probe.data}
+              disabled={busy}
+              locked={Boolean(task?.runs.length)}
+              modelId={selection.model}
               openSignal={modelPickerSignal}
+              provider={provider}
               onOpenSignalHandled={onModelPickerSignalHandled}
               returnFocus={composerInput}
-              session={session}
-              onChange={(provider, model) => {
+              onChange={(nextProvider, model) => {
                 const preferences = config
                   ? readComposerPreferences(browserComposerPreferenceStorage(), config.address)
                   : null
                 const remembered = preferences
-                  ? rememberedModelTraits(preferences, provider, model.id)
+                  ? rememberedModelTraits(preferences, nextProvider, model.id)
                   : undefined
-                savePatch({
-                  provider,
-                  model: model.id,
-                  reasoning_effort: remembered?.reasoningEffort
-                    ?? model.default_reasoning_effort
-                    ?? null,
-                  service_tier: remembered?.serviceTier
-                    ?? model.default_service_tier
-                    ?? null,
-                  agent_preset: provider === session.provider ? session.agent_preset : null,
-                })
+                const next: T.ModelSelection = { instance: nextProvider, model: model.id }
+                const reasoningEffort = remembered?.reasoningEffort ?? model.defaultReasoningEffort
+                const serviceTier = remembered?.serviceTier ?? model.defaultServiceTier
+                const contextWindow = remembered?.contextWindow ?? undefined
+                if (reasoningEffort) next.reasoningEffort = reasoningEffort
+                if (serviceTier) next.serviceTier = serviceTier
+                if (contextWindow) next.contextWindow = contextWindow
+                if (nextProvider === provider && selection.agentPreset) next.agentPreset = selection.agentPreset
+                applySelection(next)
               }}
             />
             {selectedModel && (
               <ModelTraitsControl
                 model={selectedModel}
                 returnFocus={composerInput}
-                session={session}
-                onPatch={savePatch}
+                selection={selection}
+                onSelection={applySelection}
               />
             )}
-            <AgentPresetControl
-              probe={probe.data}
-              returnFocus={composerInput}
-              session={session}
-              onPatch={savePatch}
-            />
-            <AccessControl returnFocus={composerInput} session={session} onPatch={savePatch} />
+            {newTask && (
+              <AgentPresetControl
+                probe={probe.data}
+                returnFocus={composerInput}
+                selection={selection}
+                onSelection={applySelection}
+              />
+            )}
+            <AccessControl mode={runtimeMode} returnFocus={composerInput} onMode={applyRuntimeMode} />
             <GoalControl
               busy={busy}
-              session={session}
+              goal={goal}
               onOpen={() => setGoalDialog({ prefill: null, replace: false })}
             />
             <div className="flex-1" />
@@ -834,7 +833,7 @@ export function Composer({
                 aria-haspopup="dialog"
                 aria-label={t('composer.attach_daemon')}
                 className="size-6 rounded-md text-[var(--text-secondary)]"
-                disabled={!client || uploading}
+                disabled={!connection || uploading}
                 size="icon-sm"
                 title={t('composer.attach_daemon_title')}
                 type="button"
@@ -873,7 +872,7 @@ export function Composer({
 
         {filePickerOpen && (
           <DaemonFilePicker
-            root={cwd}
+            root={cwd ?? null}
             returnFocus={composerInput}
             workspaceLabel={projectName}
             onClose={() => setFilePickerOpen(false)}
@@ -881,27 +880,17 @@ export function Composer({
           />
         )}
         <GoalDialog
+          goal={goal}
           open={goalDialog !== null}
           prefill={goalDialog?.prefill ?? null}
           replace={goalDialog?.replace ?? false}
           returnFocus={composerInput}
-          session={session}
-          onClear={() => dispatchGoal({ kind: 'clear' })}
+          onClear={goalUnsupported}
           onOpenChange={(open) => {
             if (!open) setGoalDialog(null)
           }}
-          onSetStatus={(status: ThreadGoalStatus) => dispatchGoal({
-            kind: 'set',
-            objective: null,
-            status,
-            replace: false,
-          })}
-          onSubmit={(objective, status, replace) => dispatchGoal({
-            kind: 'set',
-            objective,
-            status,
-            replace,
-          })}
+          onSetStatus={goalUnsupported}
+          onSubmit={goalUnsupported}
         />
 
         <div
@@ -910,7 +899,7 @@ export function Composer({
         >
           <ControlMenu
             caret={false}
-            disabled={busy || sessionHasStarted(session)}
+            disabled={busy || started}
             icon="folder"
             items={[
               ...projectChoices
@@ -918,8 +907,10 @@ export function Composer({
                 .map((item) => ({
                   id: item.id,
                   label: item.name,
-                  selected: item.id === session.project_id,
-                  onSelect: () => savePatch({ project_id: item.id, workspace: { kind: 'local' } }),
+                  selected: item.id === project.id,
+                  onSelect: () => {
+                    if (newTask) onNewTaskChange?.({ ...newTask, projectId: item.id, isolated: false, baseRef: undefined })
+                  },
                 })),
               ...(onAddProject ? [{
                 id: 'new-project',
@@ -942,11 +933,30 @@ export function Composer({
           />
           <ControlMenu
             caret={false}
-            disabled={busy || sessionHasStarted(session)}
+            disabled={busy || started}
             icon={workspaceLocal ? 'laptop' : 'fork'}
             items={[
-              { id: 'local', section: t('workspace.work_in'), label: t('workspace.local'), icon: 'laptop', selected: workspaceLocal, onSelect: () => savePatch({ workspace: { kind: 'local' } }) },
-              { id: 'newWorktree', section: t('workspace.work_in'), label: t('workspace.new_worktree'), icon: 'fork', disabled: projectless, selected: !workspaceLocal, onSelect: () => savePatch({ workspace: { kind: 'newWorktree' } }) },
+              {
+                id: 'local',
+                section: t('workspace.work_in'),
+                label: t('workspace.local'),
+                icon: 'laptop',
+                selected: workspaceLocal,
+                onSelect: () => {
+                  if (newTask) onNewTaskChange?.({ ...newTask, isolated: false, baseRef: undefined })
+                },
+              },
+              {
+                id: 'newWorktree',
+                section: t('workspace.work_in'),
+                label: t('workspace.new_worktree'),
+                icon: 'fork',
+                disabled: projectless,
+                selected: !workspaceLocal,
+                onSelect: () => {
+                  if (newTask) onNewTaskChange?.({ ...newTask, isolated: true })
+                },
+              },
             ]}
             label={workspaceLabel}
             returnFocus={composerInput}
@@ -956,21 +966,23 @@ export function Composer({
             <BranchPicker
               disabled={busy || branchPending}
               pending={branchPending}
+              plannedBase={newTask?.baseRef}
+              plannedWorktree={plannedWorktree}
               returnFocus={composerInput}
               snapshot={branches.data}
-              workspace={workspace}
+              worktreeBranch={task?.branch}
               onCreate={(branch) => void switchBranch(branch, true)}
               onRefresh={() => void branches.refetch()}
               onSelect={(branch) => void switchBranch(branch)}
             />
           )}
           <div className="flex-1" />
-          {runtime?.starting && <span>{t('composer.starting_agent')}</span>}
+          {task?.status === 'preparing' && <span>{t('composer.starting_agent')}</span>}
           <UsageMeter
+            contextUsage={task?.contextUsage}
             openSignal={usagePanelSignal}
-            providerVersion={probe.data?.version ?? null}
+            provider={provider}
             returnFocus={composerInput}
-            session={session}
             onOpenSignalHandled={onUsagePanelSignalHandled}
           />
         </div>
@@ -982,9 +994,11 @@ export function Composer({
 function UserInputPanel({
   input,
   onSubmit,
+  onDismiss,
 }: {
   input: PendingUserInput
   onSubmit: (answers: Array<{ questionId: string; answers: string[] }>) => Promise<void>
+  onDismiss: () => Promise<void>
 }) {
   const { t } = useI18n()
   const [questionIndex, setQuestionIndex] = useState(0)
@@ -1133,6 +1147,21 @@ function UserInputPanel({
         )}
         <div className="flex-1" />
         <Button
+          className="h-7 px-2 text-[11px]"
+          disabled={submitting}
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            setSubmitting(true)
+            void onDismiss().catch((error) => {
+              toast.error(errorMessage(error))
+              setSubmitting(false)
+            })
+          }}
+        >
+          {t('common.cancel')}
+        </Button>
+        <Button
           className="h-7 px-2.5 text-[11px]"
           disabled={!canContinue || submitting}
           size="sm"
@@ -1219,22 +1248,22 @@ function AutocompleteRowContents({ row }: { row: ComposerAutocompleteRow }) {
     const { command } = row
     return (
       <>
-        {command.scope === 'Skill'
+        {command.scope === 'skill'
           ? <WakuIcon className="size-3 text-[var(--text-tertiary)]" name="sparkle" />
           : <WakuIcon className="size-3 text-[var(--text-tertiary)]" name="command" />}
         <span className="max-w-[260px] shrink-0 truncate text-[12px] font-medium">
           /{command.name}
         </span>
-        {command.argument_hint && (
+        {command.argumentHint && (
           <span className="shrink-0 text-[11px] text-[var(--text-ghost)]">
-            {command.argument_hint}
+            {command.argumentHint}
           </span>
         )}
         <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-tertiary)]">
           {command.description}
         </span>
         <span className="flex h-4 shrink-0 items-center rounded border px-1.5 text-[9px] font-semibold text-[var(--text-tertiary)]">
-          {command.scope === 'Waku' ? 'waku' : command.scope}
+          {command.scope}
         </span>
       </>
     )
@@ -1246,7 +1275,7 @@ function AutocompleteRowContents({ row }: { row: ComposerAutocompleteRow }) {
   const parent = row.file.path.slice(0, Math.max(0, nameStart - 1))
   return (
     <>
-      {row.file.is_dir
+      {row.file.isDir
         ? <WakuIcon className="size-[13px] text-[var(--text-tertiary)]" name="folder" />
         : <FileTypeIcon className="size-[13px]" path={row.file.path} />}
       <span className="max-w-[300px] shrink-0 truncate text-[12px]">{name}</span>
@@ -1264,26 +1293,26 @@ function ComposerAttachmentTile({
   onRemove,
   t,
 }: {
-  attachment: MessageAttachment
+  attachment: T.Attachment
   onRemove: () => void
   t: Translator
 }) {
-  const { client, config, phase } = useDaemon()
+  const { connection, phase } = useDaemon()
   const [source, setSource] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!attachment.is_image || phase !== 'connected' || !client || !config) {
+    if (!attachment.isImage || phase !== 'connected' || !connection) {
       setSource(null)
       return
     }
     let active = true
-    void readAttachmentImage(client, attachment)
+    void readAttachmentImage(connection, attachment)
       .then((value) => active && setSource(value))
       .catch(() => active && setSource(null))
     return () => { active = false }
-  }, [attachment.blob_reference, attachment.is_image, attachment.name, attachment.path, client, config?.address, phase])
+  }, [attachment.blobReference, attachment.isImage, attachment.name, attachment.path, connection, phase])
 
-  const contents = attachment.is_image && source ? (
+  const contents = attachment.isImage && source ? (
     <PreviewableImage
       buttonClassName="size-full"
       imageClassName="size-full object-cover"
@@ -1292,10 +1321,10 @@ function ComposerAttachmentTile({
     />
   ) : (
     <div className="flex size-full flex-col items-center justify-center gap-[5px] px-[5px]">
-      {attachment.is_dir
+      {attachment.isDir
         ? <WakuIcon className="size-4 text-[var(--text-tertiary)]" name="folder" />
         : <FileTypeIcon className="size-4" path={attachment.mention || attachment.name} />}
-      {!attachment.is_image && (
+      {!attachment.isImage && (
         <span className="w-full truncate text-center text-[8.5px] text-[var(--text-tertiary)]">
           {attachment.name}
         </span>
@@ -1322,12 +1351,12 @@ function ComposerAttachmentTile({
   )
 }
 
-const GOAL_CHIP_KEYS: Record<ThreadGoalStatus, string> = {
+const GOAL_CHIP_KEYS: Record<string, string> = {
   active: 'goal.chip_active',
   paused: 'goal.chip_paused',
   blocked: 'goal.chip_stalled',
-  usageLimited: 'goal.chip_usage_limited',
-  budgetLimited: 'goal.chip_budget_limited',
+  usage_limited: 'goal.chip_usage_limited',
+  budget_limited: 'goal.chip_budget_limited',
   complete: 'goal.chip_complete',
 }
 
@@ -1336,16 +1365,15 @@ const GOAL_CHIP_KEYS: Record<ThreadGoalStatus, string> = {
  * when one bounds the goal, elapsed pursuit time otherwise (ticking live
  * while the task works, like the Codex CLI) — and opens the goal dialog. */
 function GoalControl({
-  session,
+  goal,
   busy,
   onOpen,
 }: {
-  session: AgentSession
+  goal: T.ThreadGoal | null
   busy: boolean
   onOpen: () => void
 }) {
   const { t } = useI18n()
-  const goal = session.thread_goal ?? null
   const observedAt = useRef(Date.now())
   const accountingKey = goal
     ? [goal.objective, goal.status, goal.timeUsedSeconds, goal.tokensUsed].join('\u0000')
@@ -1364,8 +1392,9 @@ function GoalControl({
   const liveElapsed = goal.status === 'active' && busy
     ? Math.floor((Date.now() - observedAt.current) / 1_000)
     : 0
-  const phrase = t(GOAL_CHIP_KEYS[goal.status])
-  const usage = ['active', 'complete', 'budgetLimited'].includes(goal.status)
+  const chipKey = GOAL_CHIP_KEYS[goal.status]
+  const phrase = chipKey ? t(chipKey) : goal.status
+  const usage = ['active', 'complete', 'budget_limited'].includes(goal.status)
     ? goalUsageReadout(goal, liveElapsed)
     : null
   return (
@@ -1387,80 +1416,83 @@ function GoalControl({
 }
 
 function ModelTraitsControl({
-  session,
+  selection,
   model,
-  onPatch,
+  onSelection,
   returnFocus,
 }: {
-  session: AgentSession
-  model: ProviderModel
-  onPatch: (patch: Partial<AgentSession>) => void
+  selection: T.ModelSelection
+  model: T.ProviderModel
+  onSelection: (selection: T.ModelSelection) => void
   returnFocus: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
-  if (!model.reasoning_efforts.length && !model.service_tiers.length && !model.context_windows.length) {
+  const reasoningEfforts = model.reasoningEfforts ?? []
+  const serviceTiers = model.serviceTiers ?? []
+  const contextWindows = model.contextWindows ?? []
+  if (!reasoningEfforts.length && !serviceTiers.length && !contextWindows.length) {
     return null
   }
-  const effort = session.reasoning_effort
-    && model.reasoning_efforts.some((option) => option.id === session.reasoning_effort)
-    ? session.reasoning_effort
-    : model.default_reasoning_effort ?? model.reasoning_efforts[0]?.id ?? null
-  const effortOption = model.reasoning_efforts.find((option) => option.id === effort)
+  const effort = selection.reasoningEffort
+    && reasoningEfforts.some((option) => option.id === selection.reasoningEffort)
+    ? selection.reasoningEffort
+    : model.defaultReasoningEffort ?? reasoningEfforts[0]?.id ?? null
+  const effortOption = reasoningEfforts.find((option) => option.id === effort)
   const effortLabel = effortOption && modelOptionLabel(effortOption.id, effortOption.label, t)
-  const tier = session.service_tier
-    && (session.service_tier === 'default' || model.service_tiers.some((option) => option.id === session.service_tier))
-    ? session.service_tier
-    : model.default_service_tier ?? 'default'
+  const tier = selection.serviceTier
+    && (selection.serviceTier === 'default' || serviceTiers.some((option) => option.id === selection.serviceTier))
+    ? selection.serviceTier
+    : model.defaultServiceTier ?? 'default'
   const tierLabel = tier === 'default'
     ? t('models.standard')
-    : modelOptionLabel(tier, model.service_tiers.find((option) => option.id === tier)?.label ?? tier, t)
+    : modelOptionLabel(tier, serviceTiers.find((option) => option.id === tier)?.label ?? tier, t)
   const fast = tier === 'fast' || tierLabel.toLowerCase() === 'fast'
-  const contextWindow = session.context_window
-    && model.context_windows.some((option) => option.id === session.context_window)
-    ? session.context_window
-    : model.default_context_window ?? model.context_windows[0]?.id ?? null
+  const contextWindow = selection.contextWindow
+    && contextWindows.some((option) => option.id === selection.contextWindow)
+    ? selection.contextWindow
+    : model.defaultContextWindow ?? contextWindows[0]?.id ?? null
   // A non-default window changes cost and capacity, so it reads on the trigger.
-  const windowOption = contextWindow && contextWindow !== model.default_context_window
-    ? model.context_windows.find((option) => option.id === contextWindow)
+  const windowOption = contextWindow && contextWindow !== model.defaultContextWindow
+    ? contextWindows.find((option) => option.id === contextWindow)
     : undefined
   const windowLabel = windowOption && modelOptionLabel(windowOption.id, windowOption.label, t)
   const items: ControlMenuItem[] = [
-    ...model.reasoning_efforts.map((option) => ({
+    ...reasoningEfforts.map((option) => ({
       id: `effort-${option.id}`,
       section: t('models.reasoning'),
       label: modelOptionLabel(option.id, option.label, t),
       description: option.description ?? undefined,
-      suffix: model.default_reasoning_effort === option.id ? t('common.default') : undefined,
+      suffix: model.defaultReasoningEffort === option.id ? t('common.default') : undefined,
       selected: effort === option.id,
-      onSelect: () => onPatch({ reasoning_effort: option.id }),
+      onSelect: () => onSelection({ ...selection, reasoningEffort: option.id }),
     })),
-    ...(model.service_tiers.length ? [
+    ...(serviceTiers.length ? [
       {
         id: 'tier-default',
         section: t('models.service_tier'),
         label: t('models.standard'),
-        suffix: (model.default_service_tier ?? 'default') === 'default' ? t('common.default') : undefined,
+        suffix: (model.defaultServiceTier ?? 'default') === 'default' ? t('common.default') : undefined,
         selected: tier === 'default',
-        onSelect: () => onPatch({ service_tier: 'default' }),
+        onSelect: () => onSelection({ ...selection, serviceTier: 'default' }),
       },
-      ...model.service_tiers.map((option) => ({
+      ...serviceTiers.map((option) => ({
         id: `tier-${option.id}`,
         section: t('models.service_tier'),
         label: modelOptionLabel(option.id, option.label, t),
         description: option.description ?? undefined,
-        suffix: model.default_service_tier === option.id ? t('common.default') : undefined,
+        suffix: model.defaultServiceTier === option.id ? t('common.default') : undefined,
         selected: tier === option.id,
-        onSelect: () => onPatch({ service_tier: option.id }),
+        onSelect: () => onSelection({ ...selection, serviceTier: option.id }),
       })),
     ] : []),
-    ...model.context_windows.map((option) => ({
+    ...contextWindows.map((option) => ({
       id: `context-${option.id}`,
       section: t('models.context_window'),
       label: modelOptionLabel(option.id, option.label, t),
       description: option.description ?? undefined,
-      suffix: model.default_context_window === option.id ? t('common.default') : undefined,
+      suffix: model.defaultContextWindow === option.id ? t('common.default') : undefined,
       selected: contextWindow === option.id,
-      onSelect: () => onPatch({ context_window: option.id }),
+      onSelect: () => onSelection({ ...selection, contextWindow: option.id }),
     })),
   ]
   return (
@@ -1476,36 +1508,32 @@ function ModelTraitsControl({
 }
 
 function AgentPresetControl({
-  session,
+  selection,
   probe,
-  onPatch,
+  onSelection,
   returnFocus,
 }: {
-  session: AgentSession
-  probe?: ProviderProbe
-  onPatch: (patch: Partial<AgentSession>) => void
+  selection: T.ModelSelection
+  probe?: ProviderCatalog
+  onSelection: (selection: T.ModelSelection) => void
   returnFocus: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
-  if (
-    session.provider !== 'deepSeek'
-      || sessionHasStarted(session)
-      || session.status !== 'idle'
-      || !probe?.agent_presets.length
-  ) return null
-  const selected = probe.agent_presets.find((preset) => preset.id === session.agent_preset)
-    ?? probe.agent_presets.find((preset) => preset.is_default)
-    ?? probe.agent_presets[0]
+  // Presets are chosen before the first message (DeepSeek Harness).
+  if (selection.instance !== 'deepseek' || !probe?.agentPresets.length) return null
+  const selected = probe.agentPresets.find((preset) => preset.id === selection.agentPreset)
+    ?? probe.agentPresets.find((preset) => preset.isDefault)
+    ?? probe.agentPresets[0]
   return (
     <ControlMenu
       caret={false}
       icon="bot"
-      items={probe.agent_presets.map((preset) => ({
+      items={probe.agentPresets.map((preset) => ({
         id: preset.id,
-        label: `${agentPresetLabel(preset, t)}${preset.is_custom ? ` · ${t('agent_preset.custom')}` : ''}`,
+        label: `${agentPresetLabel(preset, t)}${preset.isCustom ? ` · ${t('agent_preset.custom')}` : ''}`,
         description: agentPresetDescription(preset, t) ?? t('agent_preset.no_description'),
         selected: preset.id === selected?.id,
-        onSelect: () => onPatch({ agent_preset: preset.id }),
+        onSelect: () => onSelection({ ...selection, agentPreset: preset.id }),
       }))}
       label={selected ? agentPresetLabel(selected, t) : t('agent_preset.standard')}
       menuClassName="w-80"
@@ -1515,28 +1543,28 @@ function AgentPresetControl({
 }
 
 const ACCESS_MODES: Array<{
-  id: AgentSession['runtime_mode']
+  id: T.RuntimeMode
   labelKey: string
   descriptionKey: string
   icon: 'lock' | 'pencil' | 'sparkle' | 'lockOpen'
 }> = [
   { id: 'ask', labelKey: 'mode.supervised', descriptionKey: 'mode.supervised_description', icon: 'lock' },
-  { id: 'autoAcceptEdits', labelKey: 'mode.auto_accept_edits', descriptionKey: 'mode.auto_accept_edits_description', icon: 'pencil' },
+  { id: 'auto_accept_edits', labelKey: 'mode.auto_accept_edits', descriptionKey: 'mode.auto_accept_edits_description', icon: 'pencil' },
   { id: 'auto', labelKey: 'mode.auto', descriptionKey: 'mode.auto_description', icon: 'sparkle' },
-  { id: 'fullAccess', labelKey: 'mode.full_access', descriptionKey: 'mode.full_access_description', icon: 'lockOpen' },
+  { id: 'full_access', labelKey: 'mode.full_access', descriptionKey: 'mode.full_access_description', icon: 'lockOpen' },
 ]
 
 function AccessControl({
-  session,
-  onPatch,
+  mode: current,
+  onMode,
   returnFocus,
 }: {
-  session: AgentSession
-  onPatch: (patch: Partial<AgentSession>) => void
+  mode: T.RuntimeMode
+  onMode: (mode: T.RuntimeMode) => void
   returnFocus: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
-  const selected = ACCESS_MODES.find((mode) => mode.id === session.runtime_mode) ?? ACCESS_MODES[3]!
+  const selected = ACCESS_MODES.find((mode) => mode.id === current) ?? ACCESS_MODES[3]!
   return (
     <ControlMenu
       caret={false}
@@ -1547,7 +1575,7 @@ function AccessControl({
         label: t(mode.labelKey),
         description: t(mode.descriptionKey),
         selected: mode.id === selected.id,
-        onSelect: () => onPatch({ runtime_mode: mode.id }),
+        onSelect: () => onMode(mode.id),
       }))}
       label={t(selected.labelKey)}
       menuClassName="w-[304px]"
@@ -1557,20 +1585,19 @@ function AccessControl({
 }
 
 function QueuedMessages({
-  session,
+  messages,
   canSteer,
   onEdit,
   onSteer,
   onRemove,
 }: {
-  session: AgentSession
+  messages: QueuedMessage[]
   canSteer: boolean
-  onEdit: (message: NonNullable<AgentSession['queued_messages']>[number]) => void
-  onSteer: (message: NonNullable<AgentSession['queued_messages']>[number]) => void
-  onRemove: (messageId: string) => void
+  onEdit: (message: QueuedMessage) => void
+  onSteer: (message: QueuedMessage) => void
+  onRemove: (runId: string) => void
 }) {
   const { t } = useI18n()
-  const messages = session.queued_messages ?? []
   if (!messages.length) return null
   return (
     <div className="px-3.5">
@@ -1581,7 +1608,7 @@ function QueuedMessages({
         {messages.map((message) => (
           <div
             className="flex h-[30px] w-full items-center gap-2 pr-1.5 text-[12.5px] hover:bg-accent"
-            key={message.id}
+            key={message.runId}
           >
             <button
               className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
@@ -1591,7 +1618,7 @@ function QueuedMessages({
             >
               <WakuIcon className="size-3 shrink-0 text-[var(--text-tertiary)]" name="queue" />
               <span className="min-w-0 flex-1 truncate">
-                {message.display_content || message.content || message.attachments?.map((item) => item.name).join(', ')}
+                {message.displayText || message.text || message.attachments.map((item) => item.name).join(', ')}
               </span>
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
@@ -1610,7 +1637,7 @@ function QueuedMessages({
                 aria-label={t('composer.remove_followup')}
                 className="grid size-6 shrink-0 place-items-center rounded-md text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
                 type="button"
-                onClick={() => onRemove(message.id)}
+                onClick={() => onRemove(message.runId)}
               >
                 <WakuIcon className="size-3" name="trash" />
               </button>
@@ -1627,7 +1654,7 @@ function QueuedMessages({
                     id: 'remove',
                     label: t('composer.remove_followup'),
                     icon: 'trash',
-                    onSelect: () => onRemove(message.id),
+                    onSelect: () => onRemove(message.runId),
                   },
                 ]}
                 align="right"
@@ -1648,7 +1675,9 @@ function QueuedMessages({
 
 function BranchPicker({
   snapshot,
-  workspace,
+  plannedWorktree,
+  plannedBase,
+  worktreeBranch,
   disabled,
   pending,
   returnFocus,
@@ -1656,8 +1685,11 @@ function BranchPicker({
   onCreate,
   onRefresh,
 }: {
-  snapshot: BranchSnapshot
-  workspace: NonNullable<AgentSession['workspace']>
+  snapshot: T.BranchSnapshot
+  /** A new worktree will start from the chosen branch; nothing is checked out. */
+  plannedWorktree: boolean
+  plannedBase?: string
+  worktreeBranch?: string
   disabled: boolean
   pending: boolean
   returnFocus: RefObject<HTMLElement | null>
@@ -1672,12 +1704,9 @@ function BranchPicker({
   const [branchName, setBranchName] = useState('')
   const [active, setActive] = useState(0)
   const input = useRef<HTMLInputElement>(null)
-  const plannedWorktree = workspace.kind === 'newWorktree'
-  const selected = workspace.kind === 'newWorktree'
-    ? workspace.baseBranch ?? snapshot.default_branch ?? snapshot.current ?? snapshot.detached_head
-    : workspace.kind === 'worktree'
-      ? snapshot.current ?? workspace.branch ?? snapshot.detached_head
-      : snapshot.current ?? snapshot.detached_head
+  const selected = plannedWorktree
+    ? plannedBase ?? snapshot.current ?? snapshot.defaultBranch ?? snapshot.detachedHead
+    : snapshot.current ?? worktreeBranch ?? snapshot.detachedHead
   const normalized = query.trim().toLowerCase()
   const visible = [...snapshot.branches]
     .filter((branch) => normalized.split(/\s+/).filter(Boolean).every((part) => branch.name.toLowerCase().includes(part)))
@@ -1688,7 +1717,7 @@ function BranchPicker({
     })
   const actions = [
     ...visible
-      .filter((branch) => plannedWorktree || !branch.checked_out_elsewhere || branch.name === selected)
+      .filter((branch) => plannedWorktree || !branch.checkedOutElsewhere || branch.name === selected)
       .map((branch) => ({ kind: 'branch' as const, branch })),
     ...(!plannedWorktree ? [{ kind: 'create' as const }] : []),
   ]
@@ -1820,7 +1849,7 @@ function BranchPicker({
                     <div className="grid h-16 place-items-center text-[11.5px] text-[var(--text-ghost)]">{t('branches.none_found')}</div>
                   )}
                   {visible.map((branch) => {
-                    const disabledBranch = branch.checked_out_elsewhere && !plannedWorktree && branch.name !== selected
+                    const disabledBranch = branch.checkedOutElsewhere && !plannedWorktree && branch.name !== selected
                     const actionIndex = actions.findIndex((action) => action.kind === 'branch' && action.branch.name === branch.name)
                     return (
                       <button
@@ -1872,42 +1901,38 @@ function BranchPicker({
   )
 }
 
-const PLAN_USAGE_PROVIDERS: AgentSession['provider'][] = [
-  'claude',
-  'codex',
-  'openCode',
-  'grok',
-]
-
 function UsageMeter({
-  session,
-  providerVersion,
+  provider,
+  contextUsage,
   openSignal,
   onOpenSignalHandled,
   returnFocus,
 }: {
-  session: AgentSession
-  providerVersion: string | null
+  provider: string
+  contextUsage?: T.ContextUsage
   openSignal?: number
   onOpenSignalHandled?: () => void
   returnFocus: RefObject<HTMLElement | null>
 }) {
   const { locale, t } = useI18n()
-  const { client, config } = useDaemon()
-  const settings = useDaemonSettings()
+  const { connection, config, phase } = useDaemon()
+  const providers = useProviderStatuses()
   const [open, setOpen] = useState(false)
   const usageShortcut = usePrimaryShortcut('⌘U', 'Ctrl+U')
-  const context = session.context_usage
+  const context = contextUsage
   const contextPercent = context?.window
     ? context.tokens * 100 / context.window
     : null
-  const supportsPlanUsage = PLAN_USAGE_PROVIDERS.includes(session.provider)
+  const supportsPlanUsage = providers.byId.get(provider)?.planUsage ?? false
+  const pushed = providers.planUsage.get(provider)
   const plan = useQuery({
-    queryKey: daemonKeys.planUsage(config?.address ?? 'disconnected', session.provider),
-    queryFn: () => fetchPlanUsage(client!, session.provider, settings.data!, providerVersion),
-    enabled: open && Boolean(client && config && settings.data && supportsPlanUsage),
+    queryKey: daemonKeys.planUsage(config?.address ?? 'disconnected', provider),
+    queryFn: () => fetchPlanUsage(connection!, provider),
+    enabled: open && phase === 'connected' && Boolean(connection && config && supportsPlanUsage),
     staleTime: 30_000,
   })
+  // A fetch publishes `planUsageUpdated` to every client; prefer the newest push.
+  const planData = pushed !== undefined ? pushed : plan.data
 
   useEffect(() => {
     if (!openSignal) return
@@ -1956,9 +1981,9 @@ function UsageMeter({
                 ? `${formatTokens(context.tokens)} / ${formatTokens(context.window)} (${contextPercent.toFixed(0)}%)`
                 : formatTokens(context?.tokens ?? 0)}
             />
-            {(plan.data || plan.isFetching || error) && <div className="h-px bg-border" />}
-            {plan.data && <PlanUsageLanes locale={locale} plan={plan.data} provider={session.provider} t={t} />}
-            {plan.isFetching && supportsPlanUsage && <UsageSkeleton t={t} />}
+            {(planData || plan.isFetching || error) && <div className="h-px bg-border" />}
+            {planData && <PlanUsageLanes locale={locale} plan={planData} provider={provider} t={t} />}
+            {plan.isFetching && !planData && supportsPlanUsage && <UsageSkeleton t={t} />}
             {error && (
               <div className="space-y-1 text-[11px]">
                 <div className="text-[var(--text-tertiary)]">{t('usage.plan_limits')}</div>
@@ -2015,8 +2040,8 @@ function PlanUsageLanes({
   locale,
   t,
 }: {
-  plan: PlanUsage
-  provider: AgentSession['provider']
+  plan: T.PlanUsage
+  provider: string
   locale: string
   t: Translator
 }) {
@@ -2105,8 +2130,9 @@ function UsageSkeleton({ t }: { t: Translator }) {
   )
 }
 
+/** `resetsAt` is epoch milliseconds. */
 function resetLabel(resetsAt: number, locale: string, t: Translator) {
-  const seconds = resetsAt - Math.floor(Date.now() / 1_000)
+  const seconds = Math.floor((resetsAt - Date.now()) / 1_000)
   if (seconds <= 0) return t('usage.resets_soon')
   const minutes = Math.ceil(seconds / 60)
   if (minutes < 60) return t('usage.resets_in_minutes', { count: minutes })
@@ -2121,7 +2147,7 @@ function resetLabel(resetsAt: number, locale: string, t: Translator) {
     weekday: 'short',
     hour: 'numeric',
     minute: '2-digit',
-  }).format(new Date(resetsAt * 1_000)) })
+  }).format(new Date(resetsAt)) })
 }
 
 function formatTokens(tokens: number) {

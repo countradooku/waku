@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"one"},{"type":"message","text":"two"},{"type":"rollback","runs":1,"restoreFiles":true},{"type":"message","text":"three"}]}

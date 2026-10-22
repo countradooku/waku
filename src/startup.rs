@@ -8,7 +8,9 @@
 //!
 //! Now [`Bootstrap::spawn`] runs that whole sequence on the `waku-startup`
 //! thread from the first line of `waku::run`, while the main thread
-//! initializes GPUI and opens the window. The window's root is [`AppRoot`]:
+//! initializes GPUI and opens the window. Since #55 it also starts the
+//! projection store and waits (bounded) until the shell and the selected
+//! thread have their first views. The window's root is [`AppRoot`]:
 //!
 //! - When the bootstrap has already landed by the time the window opens, it
 //!   builds [`Waku`] at once and no other frame is ever drawn.
@@ -36,23 +38,39 @@ use gpui::{
 };
 
 use crate::app::Waku;
-use crate::persistence::{ComposerDraftStore, ComposerDrafts, PersistedState, StateStore};
+use crate::persistence::{ComposerDrafts, PersistedState, StateStore};
 use snapshot::SidebarSnapshot;
+use waku_client::store::{ProjectionStore, StoreConfig};
+use waku_client::surfaces::drafts::DraftStore;
+use waku_client::surfaces::settings::SettingsSync;
 
 /// How long [`after_first_frame`] waits for a frame before running anyway,
 /// so a window that launches hidden still gets its deferred work.
 const FIRST_FRAME_FALLBACK: Duration = Duration::from_millis(750);
 /// The longest the analytics worker holds its setup back for the first frame.
 const LAUNCH_SETTLED_TIMEOUT: Duration = Duration::from_secs(5);
+/// The longest launch waits for the shell and the selected thread to have
+/// their first views before showing the window without them.
+const FIRST_VIEWS_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Everything `Waku::new` used to fetch from the daemon on the main thread.
 pub struct Loaded {
     pub daemon: waku_client::DaemonSupervisor,
-    /// The store that performed the load, so its "task state was loaded"
-    /// guard carries over to every later save.
+    /// The protocol v8 connection of every non-session surface.
+    pub daemon_v8: crate::daemon_v8::DaemonV8,
+    /// The daemon's settings as it holds them.
+    pub daemon_settings: waku_client::DaemonSettings,
+    /// Writes the desktop's daemon settings and follows other clients'.
+    pub settings_sync: SettingsSync,
+    /// The desktop's own files (preferences, layout, selection).
     pub store: StateStore,
     pub state: PersistedState,
-    pub composer_draft_store: ComposerDraftStore,
+    /// Projects and threads, from the daemon's shell and thread streams
+    /// (#55), on the same v8 connection as `daemon_v8`.
+    pub threads: ProjectionStore,
+    /// The event pump's wake channel; the store rings it after a publish.
+    pub event_wake: (smol::channel::Sender<()>, smol::channel::Receiver<()>),
+    pub composer_draft_store: DraftStore,
     pub composer_drafts: ComposerDrafts,
 }
 
@@ -88,27 +106,86 @@ impl Bootstrap {
 
 fn load() -> anyhow::Result<Loaded> {
     let daemon = crate::daemon::start_process().context("failed to start the Waku daemon")?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let store = StateStore::remote(daemon.clone());
-    let composer_draft_store = ComposerDraftStore::remote(daemon.clone());
-    // The drafts do not depend on the task state; overlap the two round
-    // trips instead of paying them back to back.
-    let drafts = std::thread::Builder::new()
-        .name("waku-startup-drafts".into())
+    let store = StateStore::open();
+    let daemon_v8 = crate::daemon_v8::for_supervisor(&daemon);
+    let composer_draft_store = DraftStore::new(daemon_v8.clone());
+    // The drafts and settings do not depend on the task state; overlap
+    // their v8 round trips with its load instead of paying them back to
+    // back.
+    let v8_loads = std::thread::Builder::new()
+        .name("waku-startup-v8".into())
         .spawn({
+            let daemon_v8 = daemon_v8.clone();
             let store = composer_draft_store.clone();
-            move || store.load()
+            move || {
+                let settings = waku_client::surfaces::settings::get(&daemon_v8).map(|snapshot| {
+                    waku_client::surfaces::settings::settings_from_wire(&snapshot.settings)
+                });
+                let drafts = store
+                    .load()
+                    .map_err(|error| eprintln!("could not read the composer drafts: {error:#}"))
+                    .ok();
+                (settings, drafts)
+            }
         });
-    let state = store.load_or_fresh(cwd);
-    let composer_drafts = match drafts {
-        Ok(drafts) => drafts.join().ok().and_then(Result::ok),
-        Err(_) => composer_draft_store.load().ok(),
+    let state = store.load().unwrap_or_else(|error| {
+        eprintln!("could not read the desktop state: {error}");
+        PersistedState::empty()
+    });
+    // The session layer shares the surfaces' v8 connection: the store asks
+    // the handle for it, and again after the daemon restarts.
+    let client = daemon_v8
+        .client()
+        .context("could not connect to the Waku daemon over protocol v8")?;
+    if let Ok(info) =
+        client.call::<waku_client::v8::method::DaemonInfoGet>(waku_client::v8::NoParams {})
+    {
+        waku_protocol::projectless::set_workspace_root(info.projectless_root.map(PathBuf::from));
     }
-    .unwrap_or_default();
+    let event_wake = smol::channel::bounded(1);
+    let wake = event_wake.0.clone();
+    let reconnect = daemon_v8.clone();
+    let threads = ProjectionStore::start_connected(
+        client,
+        Box::new(move || reconnect.client()),
+        move || {
+            let _ = wake.try_send(());
+        },
+        StoreConfig::default(),
+    );
+    let selected = state.selected_session.into_iter().collect::<Vec<_>>();
+    for id in &selected {
+        threads.open_thread(*id);
+    }
+    if !threads.wait_ready(&selected, FIRST_VIEWS_TIMEOUT) {
+        eprintln!("the daemon's shell or the selected thread is still loading");
+    }
+    let (daemon_settings, composer_drafts) = match v8_loads {
+        Ok(loads) => loads
+            .join()
+            .map_err(|_| anyhow::anyhow!("the startup thread panicked"))?,
+        Err(_) => (
+            waku_client::surfaces::settings::get(&daemon_v8).map(|snapshot| {
+                waku_client::surfaces::settings::settings_from_wire(&snapshot.settings)
+            }),
+            composer_draft_store.load().ok(),
+        ),
+    };
+    // The desktop edits a copy of these; without them a save would write
+    // defaults over the daemon's settings.
+    let daemon_settings = daemon_settings.context("could not read the daemon settings")?;
+    let composer_drafts = composer_drafts.unwrap_or_default();
+    let settings_sync = SettingsSync::start(daemon_v8.clone(), Some(daemon_settings.clone()))
+        .context("could not start the daemon settings writer")?;
     Ok(Loaded {
         daemon,
+        daemon_v8,
+        daemon_settings,
+        settings_sync,
         store,
         state,
+        threads,
+        event_wake,
         composer_draft_store,
         composer_drafts,
     })

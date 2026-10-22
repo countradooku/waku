@@ -3,8 +3,8 @@
 //!
 //! The managed daemon listens here instead of on TCP when remote exposure is
 //! off, so the desktop reaches it without the TCP stack and without a port
-//! anyone else on the machine can connect to. The WebSocket protocol on top
-//! is unchanged (RFC 0003's binary framing for local streams is v8 work).
+//! anyone else on the machine can connect to. Clients open with protocol
+//! v8's `WAKU` preface and speak RFC 0003's binary framing.
 //!
 //! Unix: the socket lives in a 0700 directory owned by the daemon's user and
 //! is itself 0600. Every accepted peer must run as the same effective uid
@@ -175,7 +175,7 @@ pub(crate) async fn accept_local(
                 // Only this user's processes may talk to the daemon, checked
                 // before the handshake reads anything.
                 if stream.peer_cred().is_ok_and(|peer| peer.uid() == uid) {
-                    context.spawn_connection(stream);
+                    context.spawn_local_connection(stream);
                 }
             }
             Err(error) => crate::server::accept_failed(error).await?,
@@ -229,7 +229,7 @@ pub(crate) async fn accept_local(
             .create(&name)
             .context("could not create the next daemon pipe instance")?;
         let connected = std::mem::replace(&mut server, next);
-        context.spawn_connection(connected);
+        context.spawn_local_connection(connected);
     }
 }
 

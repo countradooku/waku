@@ -1,1 +1,112 @@
-export * from '@waku/client/provider-probe-cache'
+// A browser cache of `providers.probe` catalogs, so the model picker opens
+// with yesterday's models while a fresh probe (which spawns the CLI) runs.
+
+import type { ProviderCatalog } from './daemon-api'
+
+const CACHE_KEY = 'waku.provider-probes.v2'
+const CACHE_VERSION = 2
+const CACHE_MAX_AGE = 30 * 24 * 60 * 60 * 1_000
+const CACHE_MAX_ENTRIES = 32
+
+export const PROVIDER_PROBE_CACHE_STALE_TIME = 24 * 60 * 60 * 1_000
+
+export type ProviderProbeResult = ProviderCatalog
+
+export interface CachedProviderProbe {
+  binaryOverride: string | null
+  data: ProviderCatalog
+  updatedAt: number
+}
+
+interface ProviderProbeCacheState {
+  version: typeof CACHE_VERSION
+  entries: Record<string, CachedProviderProbe>
+}
+
+type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
+
+export function readProviderProbeCache(
+  storage: StorageLike | null,
+  address: string,
+  provider: string,
+  expectedBinaryOverride?: string | null,
+  now = Date.now(),
+): CachedProviderProbe | undefined {
+  const state = readState(storage)
+  const entry = state?.entries[entryKey(address, provider)]
+  if (!entry || now - entry.updatedAt > CACHE_MAX_AGE) return undefined
+  if (expectedBinaryOverride !== undefined && entry.binaryOverride !== expectedBinaryOverride) {
+    return undefined
+  }
+  return entry
+}
+
+export function writeProviderProbeCache(
+  storage: StorageLike | null,
+  address: string,
+  provider: string,
+  binaryOverride: string | null,
+  data: ProviderCatalog,
+  now = Date.now(),
+): void {
+  if (!storage) return
+  const state = readState(storage) ?? { version: CACHE_VERSION, entries: {} }
+  const entries = Object.fromEntries(
+    Object.entries(state.entries)
+      .filter(([, entry]) => now - entry.updatedAt <= CACHE_MAX_AGE)
+      .sort(([, left], [, right]) => right.updatedAt - left.updatedAt)
+      .slice(0, CACHE_MAX_ENTRIES - 1),
+  )
+  entries[entryKey(address, provider)] = { binaryOverride, data, updatedAt: now }
+  try {
+    storage.setItem(CACHE_KEY, JSON.stringify({ version: CACHE_VERSION, entries }))
+  } catch {
+    // A catalog cache is disposable; quota and privacy-mode failures are safe.
+  }
+}
+
+export function browserProviderProbeStorage(): StorageLike | null {
+  if (typeof window === 'undefined') return null
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
+}
+
+function readState(storage: StorageLike | null): ProviderProbeCacheState | undefined {
+  if (!storage) return undefined
+  try {
+    const parsed = JSON.parse(storage.getItem(CACHE_KEY) ?? 'null') as unknown
+    if (!isRecord(parsed) || parsed.version !== CACHE_VERSION || !isRecord(parsed.entries)) {
+      return undefined
+    }
+    const entries: Record<string, CachedProviderProbe> = {}
+    for (const [key, value] of Object.entries(parsed.entries)) {
+      if (isCachedProviderProbe(value)) entries[key] = value
+    }
+    return { version: CACHE_VERSION, entries }
+  } catch {
+    return undefined
+  }
+}
+
+function isCachedProviderProbe(value: unknown): value is CachedProviderProbe {
+  if (!isRecord(value) || typeof value.updatedAt !== 'number') return false
+  if (value.binaryOverride !== null && typeof value.binaryOverride !== 'string') return false
+  const data = value.data
+  return isRecord(data)
+    && typeof data.installed === 'boolean'
+    && (data.path === undefined || typeof data.path === 'string')
+    && Array.isArray(data.models)
+    && Array.isArray(data.agentPresets)
+    && (data.version === undefined || typeof data.version === 'string')
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function entryKey(address: string, provider: string): string {
+  return `${address}\u0000${provider}`
+}

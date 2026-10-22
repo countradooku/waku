@@ -19,7 +19,7 @@ const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > TextInput";
 
 /// The sidebar's rows in display order, each with the keyword haystack the
 /// search field filters against.
-const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 7] = [
+const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 8] = [
     (
         SettingsPage::General,
         "settings.general",
@@ -49,6 +49,12 @@ const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 7] = [
         "settings.usage",
         "icons/chart-column.svg",
         "settings.usage_keywords",
+    ),
+    (
+        SettingsPage::Storage,
+        "settings.storage",
+        "icons/folder.svg",
+        "settings.storage_keywords",
     ),
     (
         SettingsPage::Daemon,
@@ -362,6 +368,7 @@ impl Waku {
                         SettingsPage::Daemon => tr!("settings.daemon"),
                         SettingsPage::ComputerUse => tr!("settings.computer_use"),
                         SettingsPage::Appearance => tr!("settings.appearance"),
+                        SettingsPage::Storage => tr!("settings.storage"),
                     }),
             )
             .child(match page {
@@ -372,6 +379,7 @@ impl Waku {
                 SettingsPage::Daemon => self.render_daemon_settings(cx),
                 SettingsPage::ComputerUse => self.render_computer_use_settings(cx),
                 SettingsPage::Appearance => self.render_appearance_settings(cx),
+                SettingsPage::Storage => self.render_storage_settings(cx),
             });
 
         div()
@@ -675,6 +683,15 @@ impl Waku {
                         .text_color(theme.text_secondary)
                         .child(tr!("daemon.external_description")),
                 )
+                .when_some(self.daemon_version.clone(), |card, version| {
+                    card.child(
+                        div()
+                            .mt(px(5.0))
+                            .text_size(sp(12.5))
+                            .text_color(theme.text_tertiary)
+                            .child(tr!("daemon.version", version = version)),
+                    )
+                })
                 .into_any_element();
         }
 
@@ -964,7 +981,16 @@ impl Waku {
                                     .line_height(sp(18.0))
                                     .text_color(theme.text_secondary)
                                     .child(tr!("daemon.expose_description")),
-                            ),
+                            )
+                            .when_some(self.daemon_version.clone(), |column, version| {
+                                column.child(
+                                    div()
+                                        .mt(px(5.0))
+                                        .text_size(sp(12.5))
+                                        .text_color(theme.text_tertiary)
+                                        .child(tr!("daemon.version", version = version)),
+                                )
+                            }),
                     )
                     .child(exposure_toggle),
             )
@@ -1278,9 +1304,8 @@ impl Waku {
             return;
         }
         if self
-            .state
-            .sessions
-            .iter()
+            .threads
+            .listed()
             .any(|session| !matches!(session.status, SessionStatus::Idle | SessionStatus::Failed))
         {
             self.show_toast(tr!("daemon.stop_active_tasks"));
@@ -1308,7 +1333,6 @@ impl Waku {
                 match result {
                     Ok(()) => {
                         this.state.daemon_exposure = applied.clone();
-                        this.runtimes.clear();
                         this.daemon_port_input.update(cx, |input, cx| {
                             input.set_content(applied.port.to_string(), cx)
                         });
@@ -2090,16 +2114,15 @@ impl Waku {
                 self.state.last_service_tier = None;
                 self.state.last_context_window = None;
             }
-            let draft_ids = self
-                .state
-                .sessions
-                .iter()
+            for session in self
+                .threads
+                .drafts
+                .values_mut()
                 .filter(|session| session.provider == provider && !session.has_started())
-                .map(|session| session.id)
-                .collect::<Vec<_>>();
-            for id in draft_ids {
-                if let Some(session) = self.state.session_mut(id) {
+            {
+                {
                     session.provider = fallback;
+                    session.instance = waku_client::thread_view::instance_of(fallback);
                     session.model = None;
                     session.reasoning_effort = None;
                     session.service_tier = None;
@@ -2376,21 +2399,13 @@ impl Waku {
         self.computer_permission_request_pending = true;
         let tx = self.computer_permission_tx.clone();
         let event_wake = self.event_wake_tx.clone();
-        let daemon = self.daemon.client();
+        let daemon_v8 = self.daemon_v8.clone();
         std::thread::Builder::new()
             .name("waku-computer-permission-request".into())
             .spawn(move || {
-                let result = match daemon.request(
-                    Uuid::nil(),
-                    Uuid::nil(),
-                    waku_client::Command::ProbeComputerPermissions { prompt },
-                ) {
-                    Ok(waku_client::ResponsePayload::ComputerPermissions { permissions }) => {
-                        Ok(permissions)
-                    }
-                    Ok(_) => Err("the daemon returned an invalid permission response".into()),
-                    Err(error) => Err(error.to_string()),
-                };
+                let result =
+                    waku_client::surfaces::providers::computer_permissions(&daemon_v8, prompt)
+                        .map_err(|error| error.to_string());
                 if tx.send(result).is_ok() {
                     signal_event_pump(&event_wake);
                 }

@@ -1,133 +1,18 @@
-//! Computer Use helper process integration.
+//! Computer Use helper processes: their per-session registry directory and
+//! cleanup.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
 use uuid::Uuid;
 
-use crate::computer_use;
-use crate::driver::DriverEventSender;
 use crate::fs_ext;
-use crate::model::DriverEvent;
 
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
 #[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt as _;
-
-#[derive(Clone)]
-pub(super) struct ComputerUseConfig {
-    pub(super) server_path: PathBuf,
-    pub(super) repl_path: PathBuf,
-    pub(super) skill_path: PathBuf,
-    pub(super) process_directory: PathBuf,
-}
-
-pub(super) struct ComputerUseRuntime {
-    pub(super) config: ComputerUseConfig,
-    preview_monitor: Option<ComputerUsePreviewMonitor>,
-}
-
-impl ComputerUseRuntime {
-    pub(super) fn start(events: DriverEventSender) -> anyhow::Result<Self> {
-        let server_path = computer_use::mcp_server_command()?;
-        let repl_path = computer_use::js_repl_server_path()?;
-        let skill_path = computer_use::skill_root_path()?
-            .join("waku-computer-use")
-            .join("SKILL.md");
-        let process_directory = create_process_directory()?;
-        let preview_monitor =
-            match ComputerUsePreviewMonitor::start(process_directory.clone(), events) {
-                Ok(monitor) => monitor,
-                Err(error) => {
-                    let _ = fs::remove_dir_all(&process_directory);
-                    return Err(error);
-                }
-            };
-        Ok(Self {
-            config: ComputerUseConfig {
-                server_path,
-                repl_path,
-                skill_path,
-                process_directory,
-            },
-            preview_monitor: Some(preview_monitor),
-        })
-    }
-
-    pub(super) fn stop(&self) {
-        stop_registered_processes(&self.config.process_directory, &self.config.server_path);
-    }
-}
-
-impl Drop for ComputerUseRuntime {
-    fn drop(&mut self) {
-        self.stop();
-        drop(self.preview_monitor.take());
-        let _ = fs::remove_dir_all(&self.config.process_directory);
-    }
-}
-
-pub(super) struct ComputerUsePreviewMonitor {
-    running: Arc<AtomicBool>,
-}
-
-impl ComputerUsePreviewMonitor {
-    pub(super) fn start(directory: PathBuf, events: DriverEventSender) -> anyhow::Result<Self> {
-        let running = Arc::new(AtomicBool::new(true));
-        let thread_running = running.clone();
-        thread::Builder::new()
-            .name("waku-computer-use-preview".into())
-            .spawn(move || {
-                let mut seen = HashMap::<PathBuf, (SystemTime, u64)>::new();
-                while thread_running.load(Ordering::Acquire) {
-                    if let Ok(entries) = fs::read_dir(&directory) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                                continue;
-                            };
-                            if !name.starts_with("preview-") || !name.ends_with(".json") {
-                                continue;
-                            }
-                            let Ok(metadata) = entry.metadata() else {
-                                continue;
-                            };
-                            let Ok(modified) = metadata.modified() else {
-                                continue;
-                            };
-                            let revision = (modified, metadata.len());
-                            if seen.get(&path) == Some(&revision) {
-                                continue;
-                            }
-                            seen.insert(path.clone(), revision);
-                            let Ok(data) = fs::read(&path) else {
-                                continue;
-                            };
-                            if let Ok(state) = computer_use::decode_preview_update(&data) {
-                                let _ = events.send(DriverEvent::ComputerUseUpdated(state));
-                            }
-                        }
-                    }
-                    thread::sleep(Duration::from_millis(50));
-                }
-            })
-            .context("failed to start the Computer Use preview monitor")?;
-        Ok(Self { running })
-    }
-}
-
-impl Drop for ComputerUsePreviewMonitor {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Release);
-    }
-}
 
 pub(super) fn create_process_directory() -> anyhow::Result<PathBuf> {
     let directory = std::env::temp_dir()

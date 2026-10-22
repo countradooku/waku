@@ -1,9 +1,4 @@
-import type {
-  ActivityItem,
-  AgentSession,
-  MessageAttachment,
-  ReviewDiffSource,
-} from '@waku/client'
+import type * as T from '@waku/client/v8'
 import { ContextMenu } from '@base-ui/react/context-menu'
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { Virtuoso, type ListItem, type VirtuosoHandle } from 'react-virtuoso'
@@ -11,24 +6,31 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { PreviewableImage } from '@/components/image-preview'
 import { FileTypeIcon, WakuIcon, type WakuIconName } from '@/components/waku-icon'
+import { useTurnItem } from '@/hooks/use-daemon-data'
+import { useCommandOutput } from '@/hooks/use-daemon-stores'
 import { readAttachmentImage } from '@/lib/attachments'
 import { useDaemon } from '@/lib/daemon-context'
-import { activitiesForBlock } from '@/lib/event-reducer'
+import type { DiffSource } from '@/lib/daemon-api'
 import { useI18n, type AppLocale } from '@/lib/i18n'
 import {
   advanceMarkdownVeil,
   createMarkdownVeilState,
   markdownVeilPlugin,
 } from '@/lib/markdown-veil'
-import type {
-  BackgroundWorkItem,
-  BackgroundWorkKey,
-  BackgroundWorkStatus,
-} from '@/lib/runtime-context'
+import {
+  activityFromItem,
+  type ActivityView,
+  type BackgroundWorkItem,
+  type BackgroundWorkStatus,
+  type CheckpointView,
+  type RunView,
+  type Task,
+  type TranscriptEntry,
+  type TranscriptMessage,
+} from '@/lib/thread-model'
 import {
   activityActionLabel,
   activityDisclosureSections,
-  activityDisplayTitle,
   activityFileChangeStats,
   activityGroupIsLive,
   activityHeaderTitle,
@@ -37,14 +39,11 @@ import {
   activityTextRows,
   assistantResponseFooters,
   fencedCode,
-  formatDuration,
   formatMessageTime,
   formatWorkingElapsed,
-  reasoningTitle,
   shouldVirtualizeActivityText,
   turnAnswerStart,
   turnFoldLabel,
-  userMessageRewindTurnCount,
 } from '@/lib/transcript-presentation'
 import type { AssistantResponseFooter, Translator } from '@/lib/transcript-presentation'
 import {
@@ -56,6 +55,12 @@ import { cn } from '@/lib/utils'
 const NAVIGATION_RAIL_MIN_WIDTH = 872
 const NAVIGATION_RAIL_PITCH = 12
 const NAVIGATION_PREVIEW_HEIGHT = 126
+/** Gestures by which the reader scrolls away from the newest output. */
+const USER_SCROLL_EVENTS = ['wheel', 'touchmove', 'keydown', 'pointerdown'] as const
+const SCROLL_UP_KEYS = new Set(['ArrowUp', 'PageUp', 'Home'])
+
+/** Virtuoso's index of the first row; it shrinks as older pages are prepended. */
+const FIRST_ITEM_INDEX = 1_000_000
 const TranscriptLinkContext = createContext<(target: string) => boolean>(() => false)
 
 type NavigationTurn = {
@@ -65,83 +70,95 @@ type NavigationTurn = {
 }
 
 type ResponseForkAction = {
-  turnCount: number
+  runId: string
   pending: boolean
-  onFork: (turnCount: number) => void
+  onFork: (runId: string) => void
 }
 
 type MessageRewindAction = {
-  turnCount: number
+  runId: string
   pending: boolean
   onBegin: () => void
 }
 
 type MessageEdit = {
   messageId: string
-  turnCount: number
+  runId: string
   content: string
-  attachments: MessageAttachment[]
+  attachments: T.Attachment[]
 }
 
 export function Transcript({
-  session,
-  backgroundWork = [],
+  task,
+  onLoadOlder,
+  loadingOlder = false,
   onReviewChanges,
   onOpenLink,
   onOpenBackgroundWork,
   onCopyToComposer,
   onForkResponse,
   onRewindMessage,
-  forkingTurnCount,
-  rewindTurnCounts = [],
-  rewindingTurnCount,
+  forkingRunId,
+  rewindingRunId,
 }: {
-  session: AgentSession
-  backgroundWork?: BackgroundWorkItem[]
-  onReviewChanges?: (source: ReviewDiffSource) => void
+  task: Task
+  onLoadOlder?: () => void
+  loadingOlder?: boolean
+  onReviewChanges?: (source: DiffSource) => void
   onOpenLink?: (target: string) => boolean
-  onOpenBackgroundWork?: (key: BackgroundWorkKey) => void
+  onOpenBackgroundWork?: (id: string) => void
   onCopyToComposer?: (content: string) => void
-  onForkResponse?: (turnCount: number) => void
-  onRewindMessage?: (
-    turnCount: number,
-    prompt: string,
-    attachments: MessageAttachment[],
-  ) => Promise<void>
-  forkingTurnCount?: number
-  rewindTurnCounts?: readonly number[]
-  rewindingTurnCount?: number
+  onForkResponse?: (runId: string) => void
+  onRewindMessage?: (runId: string, prompt: string, attachments: T.Attachment[]) => Promise<void>
+  forkingRunId?: string
+  rewindingRunId?: string
 }) {
   const { locale, t } = useI18n()
   const root = useRef<HTMLDivElement>(null)
   const transcript = useRef<VirtuosoHandle>(null)
   const transcriptScroller = useRef<HTMLElement | null>(null)
   const renderedItems = useRef<ListItem<TranscriptRenderItem>[]>([])
-  const renderedItemsSession = useRef(session.id)
+  const renderedItemsTask = useRef(task.id)
   const navigationTurnsRef = useRef<Array<NavigationTurn & { itemIndex: number }>>([])
   const activeTurnFrame = useRef<number | null>(null)
   const wasNearBottom = useRef(true)
-  const expandedSession = useRef(session.id)
-  const [expandedTurns, setExpandedTurns] = useState<Set<string>>(new Set())
+  const expandedTask = useRef(task.id)
+  const firstItem = useRef({ taskId: task.id, key: undefined as string | undefined, index: FIRST_ITEM_INDEX })
+  const [expandedRuns, setExpandedRuns] = useState<Set<string>>(new Set())
   const [atTop, setAtTop] = useState(true)
   const [atBottom, setAtBottom] = useState(true)
   const [railFits, setRailFits] = useState(false)
-  const [activeTurnIndex, setActiveTurnIndex] = useState(() => Math.max(0, session.turns.length - 1))
+  const [activeTurnIndex, setActiveTurnIndex] = useState(0)
   const [messageEdit, setMessageEdit] = useState<MessageEdit | null>(null)
-  const items = buildTranscriptItems(session, expandedTurns, new Set(rewindTurnCounts))
+  const items = buildTranscriptItems(task, expandedRuns)
+
+  // Older pages are prepended: keep the rows on screen where they are by
+  // lowering Virtuoso's first index by the rows that appeared above them.
+  const anchor = firstItem.current
+  if (anchor.taskId !== task.id) {
+    firstItem.current = { taskId: task.id, key: items[0]?.key, index: FIRST_ITEM_INDEX }
+  } else {
+    if (anchor.key && items[0]?.key !== anchor.key) {
+      const shift = items.findIndex((item) => item.key === anchor.key)
+      if (shift > 0) anchor.index = Math.max(0, anchor.index - shift)
+    }
+    anchor.key = items[0]?.key
+  }
+  const firstItemIndex = firstItem.current.index
+
   const itemIndexesByMessage = new Map<string, number>()
   items.forEach((item, index) => {
     if (item.kind === 'message' && item.message.role === 'user') {
       itemIndexesByMessage.set(item.message.id, index)
     }
   })
-  const navigationTurns = transcriptNavigationTurns(session).flatMap((turn) => {
+  const navigationTurns = transcriptNavigationTurns(task).flatMap((turn) => {
     const itemIndex = itemIndexesByMessage.get(turn.messageId)
     return itemIndex === undefined ? [] : [{ ...turn, itemIndex }]
   })
   navigationTurnsRef.current = navigationTurns
-  if (renderedItemsSession.current !== session.id) {
-    renderedItemsSession.current = session.id
+  if (renderedItemsTask.current !== task.id) {
+    renderedItemsTask.current = task.id
     renderedItems.current = []
   }
 
@@ -165,29 +182,48 @@ export function Transcript({
     activeTurnFrame.current = requestAnimationFrame(updateActiveTurnFromViewport)
   }, [updateActiveTurnFromViewport])
 
+  // Only the reader leaves the bottom: a streaming answer that grows past
+  // the threshold must not stop the transcript from following it.
+  const leaveBottom = useCallback((event: Event) => {
+    if (event instanceof WheelEvent && event.deltaY >= 0) return
+    if (event instanceof KeyboardEvent && !SCROLL_UP_KEYS.has(event.key)) return
+    // A press counts only on the scrollbar, past the content box.
+    if (
+      event instanceof PointerEvent
+      && event.currentTarget instanceof HTMLElement
+      && event.offsetX < event.currentTarget.clientWidth
+    ) return
+    wasNearBottom.current = false
+  }, [])
+
   const setTranscriptScroller = useCallback((next: HTMLElement | Window | null) => {
     const element = next instanceof HTMLElement ? next : null
     if (transcriptScroller.current === element) return
     transcriptScroller.current?.removeEventListener('scroll', scheduleActiveTurnUpdate)
+    for (const type of USER_SCROLL_EVENTS) transcriptScroller.current?.removeEventListener(type, leaveBottom)
     transcriptScroller.current = element
     transcriptScroller.current?.addEventListener('scroll', scheduleActiveTurnUpdate, { passive: true })
+    for (const type of USER_SCROLL_EVENTS) {
+      transcriptScroller.current?.addEventListener(type, leaveBottom, { passive: true })
+    }
     scheduleActiveTurnUpdate()
-  }, [scheduleActiveTurnUpdate])
+  }, [leaveBottom, scheduleActiveTurnUpdate])
 
   useEffect(() => () => {
     transcriptScroller.current?.removeEventListener('scroll', scheduleActiveTurnUpdate)
+    for (const type of USER_SCROLL_EVENTS) transcriptScroller.current?.removeEventListener(type, leaveBottom)
     if (activeTurnFrame.current !== null) cancelAnimationFrame(activeTurnFrame.current)
-  }, [scheduleActiveTurnUpdate])
+  }, [leaveBottom, scheduleActiveTurnUpdate])
 
   useEffect(() => {
-    if (expandedSession.current === session.id) return
-    expandedSession.current = session.id
-    setExpandedTurns(new Set())
+    if (expandedTask.current === task.id) return
+    expandedTask.current = task.id
+    setExpandedRuns(new Set())
     setMessageEdit(null)
     wasNearBottom.current = true
     setAtBottom(true)
     setActiveTurnIndex(Math.max(0, navigationTurns.length - 1))
-  }, [session.id])
+  }, [task.id])
 
   useEffect(() => {
     const rootElement = root.current
@@ -200,12 +236,10 @@ export function Transcript({
     return () => resizeObserver.disconnect()
   }, [])
 
-  // Turns count as content even before any message or block exists: a
-  // provider-initiated turn (Codex goal continuation) reasons for a while
-  // before its first delta.
-  const empty = session.messages.length === 0
-    && session.transcript_blocks.length === 0
-    && session.turns.length === 0
+  // A run counts as content before its first item exists: a provider-started
+  // run (a goal continuation) reasons for a while before its first delta.
+  const empty = task.entries.length === 0 && !task.activeRun
+  const loadingOlderLabel = t('transcript.loading_earlier')
   return (
     <TranscriptLinkContext.Provider value={onOpenLink ?? (() => false)}>
       <div className="relative min-h-0 flex-1" ref={root}>
@@ -221,7 +255,7 @@ export function Transcript({
       ) : (
         <Virtuoso
           atBottomStateChange={(nextAtBottom) => {
-            wasNearBottom.current = nextAtBottom
+            if (nextAtBottom) wasNearBottom.current = true
             setAtBottom(nextAtBottom)
             if (nextAtBottom && navigationTurns.length) {
               setActiveTurnIndex(navigationTurns.length - 1)
@@ -230,66 +264,69 @@ export function Transcript({
           atBottomThreshold={100}
           atTopStateChange={setAtTop}
           className="absolute inset-0 overscroll-contain"
+          components={{ Header: TranscriptHeader }}
+          context={{ loadingOlder, label: loadingOlderLabel }}
           computeItemKey={(_, item) => item.key}
           data={items}
           defaultItemHeight={64}
+          firstItemIndex={firstItemIndex}
           followOutput={(isAtBottom) => isAtBottom || wasNearBottom.current ? 'auto' : false}
           increaseViewportBy={{ top: 800, bottom: 1_200 }}
           initialTopMostItemIndex={{ index: Math.max(0, items.length - 1), align: 'end' }}
           itemsRendered={(nextItems) => {
-            renderedItems.current = nextItems
+            // Rendered indexes carry the first index; navigation uses data indexes.
+            renderedItems.current = nextItems.map((item) => ({ ...item, index: item.index - firstItemIndex }))
             scheduleActiveTurnUpdate()
           }}
           itemContent={(_, item) => (
             <TranscriptItemView
-              backgroundWork={backgroundWork}
+              backgroundWork={task.backgroundWork}
               item={item}
               locale={locale}
-              sessionId={session.id}
+              taskId={task.id}
               t={t}
               onCopyToComposer={onCopyToComposer}
               onOpenBackgroundWork={onOpenBackgroundWork}
               onForkResponse={onForkResponse}
-              forkingTurnCount={forkingTurnCount}
+              forkingRunId={forkingRunId}
               messageEdit={messageEdit}
-              onBeginMessageEdit={(message, turnCount) => setMessageEdit({
+              onBeginMessageEdit={(message, runId) => setMessageEdit({
                 messageId: message.id,
-                turnCount,
-                content: message.display_content ?? message.content,
-                attachments: message.attachments ?? [],
+                runId,
+                content: message.displayText ?? message.text,
+                attachments: message.attachments,
               })}
               onCancelMessageEdit={() => {
-                if (messageEdit?.turnCount !== rewindingTurnCount) setMessageEdit(null)
+                if (messageEdit?.runId !== rewindingRunId) setMessageEdit(null)
               }}
               onSubmitMessageEdit={async (prompt) => {
                 if (!messageEdit || !onRewindMessage) return
                 const editing = messageEdit
                 try {
-                  await onRewindMessage(
-                    editing.turnCount,
-                    prompt,
-                    editing.attachments,
-                  )
+                  await onRewindMessage(editing.runId, prompt, editing.attachments)
                   setMessageEdit((current) => current?.messageId === editing.messageId ? null : current)
                 } catch {
                   // The app-level handler reports the failure. Keep the edit
                   // open so the user's replacement remains recoverable.
                 }
               }}
-              rewindingTurnCount={rewindingTurnCount}
+              rewindingRunId={rewindingRunId}
               onReviewChanges={onReviewChanges}
-              onToggleTurn={(turnId) => setExpandedTurns((current) => {
+              onToggleRun={(runId) => setExpandedRuns((current) => {
                 const next = new Set(current)
-                if (next.has(turnId)) next.delete(turnId)
-                else next.add(turnId)
+                if (next.has(runId)) next.delete(runId)
+                else next.add(runId)
                 return next
               })}
             />
           )}
-          key={session.id}
+          key={task.id}
           minOverscanItemCount={{ top: 2, bottom: 3 }}
           ref={transcript}
           scrollerRef={setTranscriptScroller}
+          startReached={() => {
+            if (task.hasMoreHistory && !loadingOlder) onLoadOlder?.()
+          }}
           totalListHeightChanged={() => {
             if (wasNearBottom.current) {
               transcript.current?.scrollToIndex({
@@ -336,28 +373,28 @@ export function Transcript({
   )
 }
 
-function transcriptNavigationTurns(session: AgentSession): NavigationTurn[] {
+function transcriptNavigationTurns(task: Task): NavigationTurn[] {
+  const runs = new Map(task.runs.map((run) => [run.id, run]))
+  const messages = task.entries.flatMap((entry) => entry.kind === 'message' ? [entry] : [])
   const userIndexes: number[] = []
-  session.messages.forEach((message, index) => {
-    if (message.role === 'user') userIndexes.push(index)
+  messages.forEach((entry, index) => {
+    if (entry.message.role === 'user') userIndexes.push(index)
   })
-  const turnsById = new Map(session.turns.map((turn) => [turn.id, turn]))
   return userIndexes.map((messageIndex, turnIndex) => {
-    const message = session.messages[messageIndex]!
-    const nextUserIndex = userIndexes[turnIndex + 1] ?? session.messages.length
-    const visible = message.display_content ?? message.content
+    const entry = messages[messageIndex]!
+    const message = entry.message
+    const nextUserIndex = userIndexes[turnIndex + 1] ?? messages.length
+    const visible = message.displayText ?? message.text
     const prompt = visible.trim()
       ? navigationPreviewSnippet(visible, 100)
-      : (message.attachments ?? []).map((attachment) => attachment.name).join(', ')
-    const running = message.turn_id
-      ? turnsById.get(message.turn_id)?.status === 'running'
-      : false
+      : message.attachments.map((attachment) => attachment.name).join(', ')
+    const running = entry.runId ? runs.get(entry.runId)?.live ?? false : false
     let response = ''
     if (!running) {
       for (let index = nextUserIndex - 1; index > messageIndex; index--) {
-        const candidate = session.messages[index]!
-        if (candidate.role === 'assistant' && candidate.content.trim()) {
-          response = navigationPreviewSnippet(candidate.content, 240)
+        const candidate = messages[index]!.message
+        if (candidate.role === 'assistant' && candidate.text.trim()) {
+          response = navigationPreviewSnippet(candidate.text, 240)
           break
         }
       }
@@ -529,36 +566,36 @@ function ConversationNavigationRail({
   )
 }
 
+
 type TranscriptRenderItem =
   | {
       kind: 'fold'
       key: string
-      turnId: string
-      turn: AgentSession['turns'][number]
+      runId: string
+      run: RunView
       expanded: boolean
     }
   | {
       kind: 'block'
       key: string
-      block: AgentSession['transcript_blocks'][number]
+      activities: ActivityView[]
       liveGroup: boolean
     }
   | {
       kind: 'message'
       key: string
-      message: AgentSession['messages'][number]
+      message: TranscriptMessage
       first: boolean
       followUp: boolean
       footer: AssistantResponseFooter | null
-      forkTurnCount: number | null
-      rewindTurnCount: number | null
-      checkpoint: AgentSession['turns'][number]['checkpoint'] | null
+      forkRunId: string | null
+      rewindRunId: string | null
+      checkpoint: CheckpointView | null
     }
   | {
       kind: 'changed'
       key: string
-      turnId: string
-      checkpoint: NonNullable<AgentSession['turns'][number]['checkpoint']>
+      checkpoint: CheckpointView
     }
   | {
       kind: 'working'
@@ -570,212 +607,215 @@ type TranscriptRenderItem =
       key: 'tail'
     }
 
-function buildTranscriptItems(
-  session: AgentSession,
-  expandedTurns: Set<string>,
-  availableRewindTurnCounts: ReadonlySet<number>,
-): TranscriptRenderItem[] {
-  const turns = new Map(session.turns.map((turn) => [turn.id, turn]))
-  const rawRows = transcriptRows(session)
-  const folds = turnFolds(session, rawRows)
-  const responseFooters = assistantResponseFooters(session)
-  const inlineCheckpoints = new Map<number, NonNullable<AgentSession['turns'][number]['checkpoint']>>()
-  const standaloneCheckpoints = new Map<string, NonNullable<AgentSession['turns'][number]['checkpoint']>>()
-  const lastAssistantIndexByTurn = new Map<string, number>()
-  session.messages.forEach((message, index) => {
-    if (message.role === 'assistant' && message.turn_id) {
-      lastAssistantIndexByTurn.set(message.turn_id, index)
-    }
-  })
-  for (const turn of session.turns) {
-    if (turn.status === 'running' || turn.checkpoint?.status !== 'ready' || !turn.checkpoint.files.length) {
-      continue
-    }
-    const messageIndex = lastAssistantIndexByTurn.get(turn.id)
-    if (messageIndex !== undefined && session.messages[messageIndex]!.content.trim()) {
-      inlineCheckpoints.set(messageIndex, turn.checkpoint)
+/** One transcript row before folding: a message, a block of activities, or changed files. */
+type TranscriptRow =
+  | { kind: 'message'; key: string; runId?: string; message: TranscriptMessage }
+  | { kind: 'block'; key: string; runId?: string; activities: ActivityView[] }
+  | { kind: 'checkpoint'; key: string; runId?: string; checkpoint: CheckpointView }
+
+/** Consecutive activities of one run share a block. */
+function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptRow[] {
+  const rows: TranscriptRow[] = []
+  for (const entry of entries) {
+    if (entry.kind === 'activity') {
+      const previous = rows.at(-1)
+      if (previous?.kind === 'block' && previous.runId === entry.runId) {
+        previous.activities.push(entry.activity)
+      } else {
+        rows.push({ kind: 'block', key: `block-${entry.key}`, runId: entry.runId, activities: [entry.activity] })
+      }
+    } else if (entry.kind === 'message') {
+      rows.push({ kind: 'message', key: entry.key, runId: entry.runId, message: entry.message })
     } else {
-      standaloneCheckpoints.set(turn.id, turn.checkpoint)
+      rows.push({ kind: 'checkpoint', key: entry.key, runId: entry.runId, checkpoint: entry.checkpoint })
     }
   }
+  return rows
+}
+
+/** The work of a settled run before its answer folds behind a "Worked for" line. */
+function runFolds(runs: ReadonlyMap<string, RunView>, rows: readonly TranscriptRow[]) {
+  const hidden = new Set<string>()
+  const anchors = new Map<string, RunView>()
+  const rowsByRun = new Map<string, TranscriptRow[]>()
+  for (const row of rows) {
+    if (!row.runId || row.kind === 'checkpoint' || (row.kind === 'message' && row.message.role !== 'assistant')) continue
+    const runRows = rowsByRun.get(row.runId) ?? []
+    runRows.push(row)
+    rowsByRun.set(row.runId, runRows)
+  }
+  for (const [runId, runRows] of rowsByRun) {
+    const run = runs.get(runId)
+    if (!run || run.live) continue
+    const answerStart = turnAnswerStart(runRows, (row) => (
+      row.kind === 'message' && Boolean(row.message.text.trim())
+    ))
+    const work = runRows.slice(0, answerStart)
+    if (!work.length) continue
+    anchors.set(work[0]!.key, run)
+    for (const row of work) hidden.add(row.key)
+  }
+  return { hidden, anchors }
+}
+
+function buildTranscriptItems(
+  task: Task,
+  expandedRuns: ReadonlySet<string>,
+): TranscriptRenderItem[] {
+  const runs = new Map(task.runs.map((run) => [run.id, run]))
+  const rows = transcriptRows(task.entries)
+  const folds = runFolds(runs, rows)
+  const footers = assistantResponseFooters(task.entries, runs)
+  const settled = task.status === 'idle' || task.status === 'failed'
+
+  // A settled run's changed files sit under its last assistant message when
+  // that message has text; otherwise they keep their own row.
+  const lastAssistantByRun = new Map<string, string>()
+  for (const row of rows) {
+    if (row.kind === 'message' && row.message.role === 'assistant' && row.runId) {
+      lastAssistantByRun.set(row.runId, row.key)
+    }
+  }
+  const inlineCheckpoints = new Map<string, CheckpointView>()
+  const inlined = new Set<string>()
+  for (const row of rows) {
+    if (row.kind !== 'checkpoint' || !row.runId || runs.get(row.runId)?.live) continue
+    const messageKey = lastAssistantByRun.get(row.runId)
+    const message = rows.find((candidate) => candidate.key === messageKey)
+    if (message?.kind === 'message' && message.message.text.trim()) {
+      inlineCheckpoints.set(message.key, row.checkpoint)
+      inlined.add(row.key)
+    }
+  }
+
   const items: TranscriptRenderItem[] = []
   let seenUserMessage = false
-  for (const row of rawRows) {
-    const fold = folds.anchors.get(row.key)
-    if (fold) {
+  let firstMessage = true
+  rows.forEach((row, index) => {
+    const foldRun = folds.anchors.get(row.key)
+    if (foldRun) {
       items.push({
         kind: 'fold',
-        key: `fold-${fold.turnId}`,
-        turnId: fold.turnId,
-        turn: fold.turn,
-        expanded: expandedTurns.has(fold.turnId),
+        key: `fold-${foldRun.id}`,
+        runId: foldRun.id,
+        run: foldRun,
+        expanded: expandedRuns.has(foldRun.id),
       })
     }
-    if (folds.hidden.has(row.key) && !expandedTurns.has(row.turnId ?? '')) continue
+    if (folds.hidden.has(row.key) && !expandedRuns.has(row.runId ?? '')) return
     if (row.kind === 'block') {
-      const liveTurn = Boolean(
-        row.block.turn_id
-        && turns.get(row.block.turn_id)?.status === 'running'
-      )
+      const run = row.runId ? runs.get(row.runId) : undefined
       items.push({
         kind: 'block',
         key: row.key,
-        block: row.block,
-        liveGroup: activityGroupIsLive(
-          liveTurn,
-          row.index + 1 === session.transcript_blocks.length,
-          row.block.after_message,
-          session.messages.length,
-        ),
+        activities: row.activities,
+        liveGroup: activityGroupIsLive(Boolean(run?.live), index === rows.length - 1),
       })
-      continue
+      return
     }
-    const { message, index } = row
+    if (row.kind === 'checkpoint') {
+      if (!inlined.has(row.key)) items.push({ kind: 'changed', key: row.key, checkpoint: row.checkpoint })
+      return
+    }
+    const { message } = row
     const startsFollowUp = message.role === 'user' && seenUserMessage
     if (message.role === 'user') seenUserMessage = true
-    const footer = responseFooters.get(index) ?? null
-    const turn = message.turn_id ? turns.get(message.turn_id) : undefined
+    const footer = footers.get(row.key) ?? null
+    const run = row.runId ? runs.get(row.runId) : undefined
     items.push({
       kind: 'message',
       key: row.key,
       message,
-      first: index === 0,
+      first: firstMessage,
       followUp: startsFollowUp,
       footer,
-      forkTurnCount: responseForkTurnCount(session, message, footer, turn),
-      rewindTurnCount: userMessageRewindTurnCount(
-        session,
-        message,
-        availableRewindTurnCounts,
-      ),
-      checkpoint: inlineCheckpoints.get(index) ?? null,
+      forkRunId: footer && message.role === 'assistant' && run && !run.live && settled ? run.id : null,
+      rewindRunId: message.role === 'user' && row.runId && settled && task.rewindTargets.has(row.runId)
+        ? row.runId
+        : null,
+      checkpoint: inlineCheckpoints.get(row.key) ?? null,
     })
-  }
+    firstMessage = false
+  })
 
-  if (standaloneCheckpoints.size) {
-    const lastItemByTurn = new Map<string, number>()
-    items.forEach((item, index) => {
-      const turnId = item.kind === 'fold' || item.kind === 'changed'
-        ? item.turnId
-        : item.kind === 'block'
-          ? item.block.turn_id
-          : item.kind === 'message'
-            ? item.message.turn_id
-            : null
-      if (turnId && standaloneCheckpoints.has(turnId)) lastItemByTurn.set(turnId, index)
-    })
-    const changedAfter = new Map<number, Array<{ turnId: string; checkpoint: NonNullable<AgentSession['turns'][number]['checkpoint']> }>>()
-    for (const [turnId, checkpoint] of standaloneCheckpoints) {
-      const index = lastItemByTurn.get(turnId)
-      if (index === undefined) continue
-      const entries = changedAfter.get(index) ?? []
-      entries.push({ turnId, checkpoint })
-      changedAfter.set(index, entries)
-    }
-    if (changedAfter.size) {
-      const withChanges: TranscriptRenderItem[] = []
-      items.forEach((item, index) => {
-        withChanges.push(item)
-        for (const entry of changedAfter.get(index) ?? []) {
-          withChanges.push({
-            kind: 'changed',
-            key: `changed-${entry.turnId}`,
-            turnId: entry.turnId,
-            checkpoint: entry.checkpoint,
-          })
-        }
-      })
-      items.splice(0, items.length, ...withChanges)
-    }
-  }
-
-  if (['connecting', 'working', 'waiting', 'background'].includes(session.status)) {
-    const runningIndex = lastIndexWhere(session.turns, (turn) => turn.status === 'running')
-    const running = runningIndex >= 0 ? session.turns[runningIndex] : null
-    if (running) {
+  if (task.activeRun) {
     items.push({
       kind: 'working',
       key: 'working',
-        startedAt: running.started_at,
+      startedAt: task.activeRun.startedAt ?? task.activeRun.requestedAt,
     })
-    }
   }
   items.push({ kind: 'tail', key: 'tail' })
   return items
 }
 
-function responseForkTurnCount(
-  session: AgentSession,
-  message: AgentSession['messages'][number],
-  footer: AssistantResponseFooter | null,
-  turn?: AgentSession['turns'][number],
-): number | null {
-  if (
-    !footer
-    || message.role !== 'assistant'
-    || !['idle', 'failed'].includes(session.status)
-    || !session.provider_cursor
-    || session.provider_cursor.provider !== session.provider
-    || !turn?.provider_turn_started
-  ) return null
-  return turn.turn_count
+function TranscriptHeader({ context }: { context?: { loadingOlder: boolean; label: string } }) {
+  if (!context?.loadingOlder) return null
+  return (
+    <div aria-live="polite" className="flex h-8 items-center justify-center gap-1.5 text-[11.5px] text-[var(--text-tertiary)]">
+      <WakuIcon className="size-3 motion-safe:animate-spin" name="loaderCircle" />
+      {context.label}
+    </div>
+  )
 }
 
 function TranscriptItemView({
   item,
   backgroundWork,
   locale,
-  sessionId,
+  taskId,
   t,
-  onToggleTurn,
+  onToggleRun,
   onReviewChanges,
   onCopyToComposer,
   onOpenBackgroundWork,
   onForkResponse,
-  forkingTurnCount,
+  forkingRunId,
   messageEdit,
   onBeginMessageEdit,
   onCancelMessageEdit,
   onSubmitMessageEdit,
-  rewindingTurnCount,
+  rewindingRunId,
 }: {
   item: TranscriptRenderItem
   backgroundWork: BackgroundWorkItem[]
   locale: AppLocale
-  sessionId: string
+  taskId: string
   t: Translator
-  onToggleTurn: (turnId: string) => void
-  onReviewChanges?: (source: ReviewDiffSource) => void
+  onToggleRun: (runId: string) => void
+  onReviewChanges?: (source: DiffSource) => void
   onCopyToComposer?: (content: string) => void
-  onOpenBackgroundWork?: (key: BackgroundWorkKey) => void
-  onForkResponse?: (turnCount: number) => void
-  forkingTurnCount?: number
+  onOpenBackgroundWork?: (id: string) => void
+  onForkResponse?: (runId: string) => void
+  forkingRunId?: string
   messageEdit: MessageEdit | null
-  onBeginMessageEdit: (
-    message: AgentSession['messages'][number],
-    turnCount: number,
-  ) => void
+  onBeginMessageEdit: (message: TranscriptMessage, runId: string) => void
   onCancelMessageEdit: () => void
   onSubmitMessageEdit: (prompt: string) => Promise<void>
-  rewindingTurnCount?: number
+  rewindingRunId?: string
 }) {
   if (item.kind === 'tail') return <div className="h-5" />
   let content: ReactNode
+  // A run's changed files review that run's turn diff.
+  const review = (checkpoint: CheckpointView) => onReviewChanges
+    ? () => onReviewChanges(checkpoint.runId ? { type: 'turn', runId: checkpoint.runId } : 'uncommitted')
+    : undefined
   if (item.kind === 'fold') {
     content = (
       <TurnFold
         expanded={item.expanded}
-        label={turnFoldLabel(item.turn, t)}
-        onToggle={() => onToggleTurn(item.turnId)}
+        label={turnFoldLabel(item.run, t)}
+        onToggle={() => onToggleRun(item.runId)}
       />
     )
   } else if (item.kind === 'block') {
     content = (
       <ActivityGroup
-        activities={activitiesForBlock(item.block)}
+        activities={item.activities}
         backgroundWork={backgroundWork}
         liveGroup={item.liveGroup}
         t={t}
+        taskId={taskId}
         onOpenBackgroundWork={onOpenBackgroundWork}
       />
     )
@@ -786,15 +826,7 @@ function TranscriptItemView({
         deletions={item.checkpoint.deletions}
         files={item.checkpoint.files}
         t={t}
-        onReview={onReviewChanges
-          ? () => onReviewChanges({
-              lastTurn: {
-                session_id: sessionId,
-                turn_id: item.turnId,
-                turn_count: item.checkpoint.turn_count,
-              },
-            })
-          : undefined}
+        onReview={review(item.checkpoint)}
       />
     )
   } else if (item.kind === 'working') {
@@ -811,36 +843,28 @@ function TranscriptItemView({
         editContent={messageEdit?.messageId === item.message.id ? messageEdit.content : undefined}
         onCancelEdit={onCancelMessageEdit}
         onSubmitEdit={onSubmitMessageEdit}
-        forkAction={item.forkTurnCount && onForkResponse
+        forkAction={item.forkRunId && onForkResponse
           ? {
-              turnCount: item.forkTurnCount,
-              pending: forkingTurnCount === item.forkTurnCount,
+              runId: item.forkRunId,
+              pending: forkingRunId === item.forkRunId,
               onFork: onForkResponse,
             }
           : undefined}
-        rewindAction={item.rewindTurnCount
+        rewindAction={item.rewindRunId
           ? {
-              turnCount: item.rewindTurnCount,
-              pending: rewindingTurnCount === item.rewindTurnCount,
-              onBegin: () => onBeginMessageEdit(item.message, item.rewindTurnCount!),
+              runId: item.rewindRunId,
+              pending: rewindingRunId === item.rewindRunId,
+              onBegin: () => onBeginMessageEdit(item.message, item.rewindRunId!),
             }
           : undefined}
-        beforeFooter={item.checkpoint?.status === 'ready' && item.checkpoint.files.length > 0
+        beforeFooter={item.checkpoint
           ? (
             <ChangedFilesCard
               additions={item.checkpoint.additions}
               deletions={item.checkpoint.deletions}
               files={item.checkpoint.files}
               t={t}
-              onReview={onReviewChanges && item.message.turn_id
-                ? () => onReviewChanges({
-                    lastTurn: {
-                      session_id: sessionId,
-                      turn_id: item.message.turn_id!,
-                      turn_count: item.checkpoint!.turn_count,
-                    },
-                  })
-                : undefined}
+              onReview={review(item.checkpoint)}
             />
           )
           : null}
@@ -857,79 +881,6 @@ function TranscriptItemView({
       </TranscriptRow>
     </div>
   )
-}
-
-type TranscriptItem =
-  | {
-      kind: 'message'
-      key: string
-      turnId: string | null
-      message: AgentSession['messages'][number]
-      index: number
-    }
-  | {
-      kind: 'block'
-      key: string
-      turnId: string | null
-      block: AgentSession['transcript_blocks'][number]
-      index: number
-    }
-
-function transcriptRows(session: AgentSession): TranscriptItem[] {
-  const blocks = new Map<number, Array<{ block: AgentSession['transcript_blocks'][number]; index: number }>>()
-  session.transcript_blocks.forEach((block, index) => {
-    const anchor = Math.min(block.after_message, session.messages.length)
-    const at = blocks.get(anchor) ?? []
-    at.push({ block, index })
-    blocks.set(anchor, at)
-  })
-  const rows: TranscriptItem[] = []
-  for (let index = 0; index <= session.messages.length; index++) {
-    for (const entry of blocks.get(index) ?? []) {
-      rows.push({
-        kind: 'block',
-        key: `block-${entry.index}`,
-        turnId: entry.block.turn_id ?? null,
-        block: entry.block,
-        index: entry.index,
-      })
-    }
-    const message = session.messages[index]
-    if (message) {
-      rows.push({
-        kind: 'message',
-        key: `message-${message.id}`,
-        turnId: message.turn_id ?? null,
-        message,
-        index,
-      })
-    }
-  }
-  return rows
-}
-
-function turnFolds(session: AgentSession, rows: TranscriptItem[]) {
-  const hidden = new Set<string>()
-  const anchors = new Map<string, { turnId: string; turn: AgentSession['turns'][number] }>()
-  const rowsByTurn = new Map<string, TranscriptItem[]>()
-  for (const row of rows) {
-    if (!row.turnId || (row.kind === 'message' && row.message.role !== 'assistant')) continue
-    const turnRows = rowsByTurn.get(row.turnId) ?? []
-    turnRows.push(row)
-    rowsByTurn.set(row.turnId, turnRows)
-  }
-  for (const turn of session.turns) {
-    if (turn.status === 'running') continue
-    const turnRows = rowsByTurn.get(turn.id) ?? []
-    const answerStart = turnAnswerStart(turnRows, (row) => (
-      row.kind === 'message' && Boolean(row.message.content.trim())
-    ))
-    const work = turnRows.slice(0, answerStart)
-    if (!work.length) continue
-    anchors.set(work[0]!.key, { turnId: turn.id, turn })
-    for (const row of work) hidden.add(row.key)
-  }
-  return { hidden, anchors }
 }
 
 function TurnFold({
@@ -958,12 +909,13 @@ function TurnFold({
   )
 }
 
+/** `startedAt` is epoch milliseconds. */
 function WorkingIndicator({ startedAt, t }: { startedAt: number; t: Translator }) {
-  const [now, setNow] = useState(() => Math.floor(Date.now() / 1_000))
+  const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     let timeout = 0
     const tick = () => {
-      setNow(Math.floor(Date.now() / 1_000))
+      setNow(Date.now())
       timeout = window.setTimeout(tick, 1_000 - (Date.now() % 1_000) + 8)
     }
     timeout = window.setTimeout(tick, 1_000 - (Date.now() % 1_000) + 8)
@@ -978,7 +930,7 @@ function WorkingIndicator({ startedAt, t }: { startedAt: number; t: Translator }
       </span>
       <span className="font-medium">
         {t('transcript.working_for', {
-          duration: formatWorkingElapsed(Math.max(0, now - startedAt), t),
+          duration: formatWorkingElapsed(Math.max(0, Math.floor((now - startedAt) / 1_000)), t),
         })}
       </span>
     </div>
@@ -1015,7 +967,7 @@ function MessageRow({
   onCancelEdit,
   onSubmitEdit,
 }: {
-  message: AgentSession['messages'][number]
+  message: TranscriptMessage
   locale: AppLocale
   t: Translator
   footer: AssistantResponseFooter | null
@@ -1028,7 +980,7 @@ function MessageRow({
   onCancelEdit?: () => void
   onSubmitEdit?: (prompt: string) => Promise<void>
 }) {
-  const visible = message.display_content ?? message.content
+  const visible = message.displayText ?? message.text
   const copyContent = footer?.content ?? visible
   if (message.role === 'user') {
     return (
@@ -1041,16 +993,16 @@ function MessageRow({
         rewindAction={rewindAction}
       >
         <article className="group/message flex w-full flex-col items-end gap-1">
-          {message.attachments?.length ? (
+          {message.attachments.length ? (
             <div className="flex max-w-[540px] flex-wrap justify-end gap-2">
               {message.attachments.map((attachment) => (
-                <Attachment key={`${attachment.blob_reference}-${attachment.name}`} attachment={attachment} />
+                <Attachment key={`${attachment.blobReference}-${attachment.name}`} attachment={attachment} />
               ))}
             </div>
           ) : null}
           {editing && onCancelEdit && onSubmitEdit ? (
             <MessageEditBubble
-              attachments={message.attachments ?? []}
+              attachments={message.attachments}
               initialContent={editContent ?? visible}
               pending={rewindAction?.pending ?? false}
               t={t}
@@ -1069,7 +1021,7 @@ function MessageRow({
               rewindAction={rewindAction}
               locale={locale}
               t={t}
-              timestamp={message.created_at}
+              timestamp={message.createdAt}
             />
           )}
         </article>
@@ -1079,7 +1031,15 @@ function MessageRow({
   if (message.role === 'system') {
     return (
       <div className="flex justify-center">
-        <div className="rounded-full bg-accent px-2.5 py-1 text-[11px] leading-4 text-[var(--text-tertiary)]">
+        <div
+          className={cn(
+            'rounded-full px-2.5 py-1 text-[11px] leading-4',
+            message.tone === 'error'
+              ? 'bg-destructive/10 text-destructive'
+              : 'bg-accent text-[var(--text-tertiary)]',
+          )}
+          role={message.tone === 'error' ? 'alert' : undefined}
+        >
           {visible}
         </div>
       </div>
@@ -1113,7 +1073,7 @@ function MessageEditBubble({
   onSubmit,
 }: {
   initialContent: string
-  attachments: MessageAttachment[]
+  attachments: T.Attachment[]
   pending: boolean
   t: Translator
   onCancel: () => void
@@ -1261,7 +1221,7 @@ function MessageFooter({
           disabled={forkAction.pending}
           title={t(forkAction.pending ? 'session.forking_task' : 'session.fork_task')}
           type="button"
-          onClick={() => forkAction.onFork(forkAction.turnCount)}
+          onClick={() => forkAction.onFork(forkAction.runId)}
         >
           <WakuIcon
             className={cn('size-3.5', forkAction.pending && 'motion-safe:animate-spin')}
@@ -1356,7 +1316,7 @@ function MessageContextMenu({
                 <ContextMenu.Item
                   className="waku-menu-item"
                   disabled={forkAction.pending}
-                  onClick={() => forkAction.onFork(forkAction.turnCount)}
+                  onClick={() => forkAction.onFork(forkAction.runId)}
                 >
                   <WakuIcon
                     className={cn('size-3', forkAction.pending && 'motion-safe:animate-spin')}
@@ -1428,13 +1388,15 @@ function ActivityGroup({
   backgroundWork,
   liveGroup,
   t,
+  taskId,
   onOpenBackgroundWork,
 }: {
-  activities: ActivityItem[]
+  activities: ActivityView[]
   backgroundWork: BackgroundWorkItem[]
   liveGroup: boolean
   t: Translator
-  onOpenBackgroundWork?: (key: BackgroundWorkKey) => void
+  taskId: string
+  onOpenBackgroundWork?: (id: string) => void
 }) {
   const [expanded, setExpanded] = useState(liveGroup)
   useEffect(() => {
@@ -1457,11 +1419,10 @@ function ActivityGroup({
           {activities.map((activity) => (
             <ActivityRow
               activity={activity}
-              backgroundWork={backgroundWork.find((item) => (
-                item.originActivityId === activity.source_id
-              ))}
+              backgroundWork={backgroundWork.find((item) => item.itemId === activity.id)}
               key={activity.id}
               t={t}
+              taskId={taskId}
               onOpenBackgroundWork={onOpenBackgroundWork}
             />
           ))}
@@ -1471,21 +1432,39 @@ function ActivityGroup({
   )
 }
 
+/**
+ * The activity a row shows: a command's output from its `commandOutput`
+ * stream while expanded, and a body the wire projection left out from the
+ * stored turn item.
+ */
+function useActivityDetail(taskId: string, activity: ActivityView, expanded: boolean): ActivityView {
+  const output = useCommandOutput(taskId, activity.id, expanded && activity.streamsOutput)
+  const full = useTurnItem(taskId, activity.id, expanded && activity.omitted && !activity.streamsOutput)
+  if (activity.streamsOutput) {
+    return output?.text ? { ...activity, output: output.text } : activity
+  }
+  const stored = full.data ? activityFromItem(full.data) : undefined
+  return stored ? { ...stored, complete: activity.complete, failed: activity.failed } : activity
+}
+
 function ActivityRow({
-  activity,
+  activity: summary,
   backgroundWork,
   t,
+  taskId,
   onOpenBackgroundWork,
 }: {
-  activity: ActivityItem
+  activity: ActivityView
   backgroundWork?: BackgroundWorkItem
   t: Translator
-  onOpenBackgroundWork?: (key: BackgroundWorkKey) => void
+  taskId: string
+  onOpenBackgroundWork?: (id: string) => void
 }) {
+  const [expanded, setExpanded] = useState(Boolean(summary.reasoning && !summary.complete))
+  const activity = useActivityDetail(taskId, summary, expanded)
   const sections = activity.reasoning ? [] : activityDisclosureSections(activity, t)
   const reasoningContent = activity.reasoning?.content.trim() ?? ''
-  const hasDetail = Boolean(reasoningContent || sections.length)
-  const [expanded, setExpanded] = useState(Boolean(activity.reasoning && !activity.complete))
+  const hasDetail = Boolean(reasoningContent || sections.length || summary.omitted || summary.streamsOutput)
   const iconName = activityIcon(activity)
   const preview = expanded || activity.reasoning ? '' : activityPreview(activity, t)
   const actionLabel = activityActionLabel(activity, t)
@@ -1554,10 +1533,10 @@ function ActivityRow({
             type="button"
             onClick={(event) => {
               event.stopPropagation()
-              onOpenBackgroundWork(backgroundWork.key)
+              onOpenBackgroundWork(backgroundWork.id)
             }}
           >
-            {t(`background.status.${backgroundWork.status}`)}
+            {t(backgroundWorkStatusKey(backgroundWork.status))}
           </button>
         )}
       </div>
@@ -1586,7 +1565,7 @@ function ActivityRow({
                 onScroll={updateDetailEdges}
               />
             ))}
-            {activity.image_urls?.map((url, index) => (
+            {activity.imageUrls.map((url, index) => (
               <ActivityImage key={`${url}-${index}`} reference={url} t={t} />
             ))}
           </div>
@@ -1642,12 +1621,14 @@ function ActivityScrollableContent({
 }
 
 function backgroundWorkStatusClass(status: BackgroundWorkStatus) {
-  if (status === 'starting' || status === 'running' || status === 'monitoring') {
-    return 'text-ring'
-  }
+  if (status === 'pending' || status === 'running') return 'text-ring'
   if (status === 'completed') return 'text-[var(--success)]'
-  if (status === 'failed' || status === 'lost') return 'text-destructive'
+  if (status === 'failed') return 'text-destructive'
   return 'text-[var(--text-tertiary)]'
+}
+
+function backgroundWorkStatusKey(status: BackgroundWorkStatus) {
+  return `background.status.${status === 'pending' ? 'starting' : status}`
 }
 
 function ActivitySection({
@@ -1760,7 +1741,7 @@ function ActivityState({
   hasDetail,
   t,
 }: {
-  activity: ActivityItem
+  activity: ActivityView
   expanded: boolean
   hasDetail: boolean
   t: Translator
@@ -1847,14 +1828,14 @@ function ChangedFilesCard({
   )
 }
 
-function Attachment({ attachment }: { attachment: MessageAttachment }) {
-  if (attachment.is_image) return <RemoteImage attachment={attachment} />
+function Attachment({ attachment }: { attachment: T.Attachment }) {
+  if (attachment.isImage) return <RemoteImage attachment={attachment} />
   return (
     <span
       className="flex h-20 w-24 flex-col items-center justify-center gap-[7px] overflow-hidden rounded-[9px] border bg-[var(--inset)] px-[7px]"
       title={attachment.name}
     >
-      {attachment.is_dir
+      {attachment.isDir
         ? <WakuIcon className="size-[18px] text-[var(--text-tertiary)]" name="folder" />
         : <FileTypeIcon className="size-[18px]" path={attachment.mention || attachment.name} />}
       <span className="w-full truncate text-center text-[9.5px] text-[var(--text-secondary)]">
@@ -1868,22 +1849,24 @@ function RemoteImage({
   attachment,
   tile = true,
 }: {
-  attachment: MessageAttachment
+  attachment: T.Attachment
   tile?: boolean
 }) {
-  const { client, config, phase } = useDaemon()
+  const { connection, phase } = useDaemon()
   const [source, setSource] = useState<string | null>(null)
   useEffect(() => {
-    if (phase !== 'connected' || !client || !config || !attachment.blob_reference) {
+    if (phase !== 'connected' || !connection || !attachment.blobReference) {
       setSource(null)
       return
     }
     let active = true
-    void readAttachmentImage(client, attachment)
+    void readAttachmentImage(connection, attachment)
       .then((value) => active && setSource(value))
       .catch(() => active && setSource(null))
     return () => { active = false }
-  }, [client, config?.address, phase, attachment.blob_reference, attachment.path, attachment.name])
+    // The attachment's identity is its reference, path and name.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connection, phase, attachment.blobReference, attachment.path, attachment.name])
 
   if (!source) {
     return (
@@ -1929,15 +1912,15 @@ function ActivityImage({ reference, t }: { reference: string; t: Translator }) {
         path: reference,
         mention: reference,
         name: reference,
-        is_dir: false,
-        is_image: true,
-        blob_reference: reference,
+        isDir: false,
+        isImage: true,
+        blobReference: reference,
       }}
     />
   )
 }
 
-function activityIcon(activity: ActivityItem): WakuIconName {
+function activityIcon(activity: ActivityView): WakuIconName {
   if (activity.reasoning || activity.kind === 'reasoning') return 'sparkle'
   if (activity.kind === 'command') return 'terminal'
   if (activity.kind === 'search' || activity.kind === 'fileSearch') return 'search'
@@ -1946,13 +1929,6 @@ function activityIcon(activity: ActivityItem): WakuIconName {
   if (activity.kind === 'fileList') return 'folder'
   if (activity.kind === 'plan') return 'list'
   return 'wrench'
-}
-
-function lastIndexWhere<T>(values: readonly T[], predicate: (value: T) => boolean) {
-  for (let index = values.length - 1; index >= 0; index--) {
-    if (predicate(values[index]!)) return index
-  }
-  return -1
 }
 
 function imageName(source: string) {

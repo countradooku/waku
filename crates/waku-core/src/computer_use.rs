@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context as _, anyhow, bail};
-use base64::Engine as _;
+#[cfg(target_os = "macos")]
 use serde::Deserialize;
 use serde_json::Value;
 #[cfg(target_os = "macos")]
@@ -78,39 +78,6 @@ fn plural(count: usize, noun: &str) -> String {
     } else {
         format!("{count} {noun}s")
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ComputerUsePreviewUpdate {
-    target: ComputerTarget,
-    image_url: String,
-}
-
-pub fn decode_preview_update(data: &[u8]) -> anyhow::Result<ComputerUseState> {
-    let update: ComputerUsePreviewUpdate =
-        serde_json::from_slice(data).context("Computer Use preview is invalid JSON")?;
-    validate_preview_image_url(&update.image_url)?;
-    Ok(ComputerUseState {
-        target: Some(update.target),
-        phase: ComputerUsePhase::Running,
-        visible: true,
-        image_url: Some(update.image_url),
-    })
-}
-
-fn validate_preview_image_url(image_url: &str) -> anyhow::Result<()> {
-    const PNG_PREFIX: &str = "data:image/png;base64,";
-    let encoded = image_url
-        .strip_prefix(PNG_PREFIX)
-        .ok_or_else(|| anyhow!("Computer Use preview is not a PNG data URL"))?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .context("Computer Use preview contains invalid base64")?;
-    if bytes.is_empty() {
-        bail!("Computer Use preview is empty");
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -443,29 +410,5 @@ mod tests {
         };
         assert_eq!(target.grant_key(), grant.key());
         assert!(target.persistable());
-    }
-
-    #[test]
-    fn preview_updates_restore_the_pip_state() {
-        let state = decode_preview_update(
-            br#"{
-                "target": {
-                    "windowId": 42,
-                    "bundleId": "net.imput.helium",
-                    "teamId": "S4Q33XPHB4",
-                    "appName": "Helium",
-                    "windowTitle": "Window",
-                    "width": 1440,
-                    "height": 823
-                },
-                "imageUrl": "data:image/png;base64,aGVsbG8="
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(state.target.unwrap().window_id, 42);
-        assert_eq!(state.phase, ComputerUsePhase::Running);
-        assert!(state.visible);
-        assert!(state.image_url.is_some());
     }
 }

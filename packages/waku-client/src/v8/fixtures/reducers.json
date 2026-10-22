@@ -1,0 +1,813 @@
+{
+  "thread": {
+    "items": [
+      {
+        "type": "snapshot",
+        "cursor": {
+          "type": "sequence",
+          "store": "00000000-0000-0000-0000-000000000000",
+          "seq": 20
+        },
+        "projection": {
+          "thread": {
+            "id": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+            "projectId": "61cd4b0a-5f81-50ca-9956-74f86d38b966",
+            "createdBy": "user",
+            "creationSource": "desktop",
+            "title": "fixture",
+            "titleSource": "user",
+            "modelSelection": {
+              "instance": "codex"
+            },
+            "runtimeMode": "full_access",
+            "interactionMode": "default",
+            "historyOrigin": "native",
+            "lineage": {
+              "rootThreadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad"
+            },
+            "createdAt": 1700000000000,
+            "updatedAt": 1700000000000,
+            "lastVisitedAt": 1700000000000
+          },
+          "runs": [
+            {
+              "id": "12e08b5b-1527-5481-b0e3-b80f4ac2ae09",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "ordinal": 2,
+              "modelSelection": {
+                "instance": "codex"
+              },
+              "userMessageId": "7636ef23-e64b-54ad-9aa6-08f6285b0482",
+              "status": "completed",
+              "requestedAt": 1700000002000,
+              "startedAt": 1700000002000,
+              "providerCompletedAt": 1700000002000,
+              "completedAt": 1700000002000
+            },
+            {
+              "id": "a924676b-b594-5590-928c-6f4470decb8f",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "ordinal": 1,
+              "modelSelection": {
+                "instance": "codex"
+              },
+              "userMessageId": "29222fe5-8b36-5163-97cd-83742d2b2fb9",
+              "status": "completed",
+              "requestedAt": 1700000001000,
+              "startedAt": 1700000001000,
+              "providerCompletedAt": 1700000001000,
+              "completedAt": 1700000001000
+            },
+            {
+              "id": "e70a8f30-6d9b-577f-b358-a6e176fd8c89",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "ordinal": 3,
+              "modelSelection": {
+                "instance": "codex"
+              },
+              "userMessageId": "3ec8619c-f3c2-53ed-bc62-9ec20d3eeb92",
+              "status": "completed",
+              "requestedAt": 1700000003000,
+              "startedAt": 1700000003000,
+              "providerCompletedAt": 1700000003000,
+              "completedAt": 1700000003000
+            }
+          ],
+          "turnItems": [
+            {
+              "id": "122ec2c2-a5cd-52d7-90fe-3479f3841d39",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "runId": "a924676b-b594-5590-928c-6f4470decb8f",
+              "position": 16777216,
+              "status": "completed",
+              "startedAt": 1700000001000,
+              "completedAt": 1700000001000,
+              "updatedAt": 1700000001000,
+              "kind": {
+                "type": "user_message",
+                "messageId": "29222fe5-8b36-5163-97cd-83742d2b2fb9",
+                "inputIntent": "turn_start",
+                "text": "question 1 lorem ipsum dolor sit amet. question 1 lorem ipsum dolor sit amet. question 1 lorem ipsum dolor sit amet. que",
+                "createdBy": "user"
+              }
+            },
+            {
+              "id": "2e091ae7-92ed-5399-8fc3-23f927138d8d",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "runId": "a924676b-b594-5590-928c-6f4470decb8f",
+              "position": 16777217,
+              "status": "completed",
+              "startedAt": 1700000001000,
+              "completedAt": 1700000001000,
+              "updatedAt": 1700000001000,
+              "kind": {
+                "type": "command_execution",
+                "input": "cargo test --package seed-0",
+                "outputOmitted": true,
+                "exitCode": 0
+              }
+            },
+            {
+              "id": "9d44e51c-8b54-5398-b78a-ed6f1bab3676",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "runId": "a924676b-b594-5590-928c-6f4470decb8f",
+              "position": 16777218,
+              "status": "completed",
+              "startedAt": 1700000001000,
+              "completedAt": 1700000001000,
+              "updatedAt": 1700000001000,
+              "kind": {
+                "type": "assistant_message",
+                "messageId": "fdf9de61-db86-525c-b40e-6a86d2602b51",
+                "text": "answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1"
+              }
+            },
+            {
+              "id": "47e4b048-d68e-56c2-b066-da2c2d0a9b19",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "runId": "12e08b5b-1527-5481-b0e3-b80f4ac2ae09",
+              "position": 33554432,
+              "status": "completed",
+              "startedAt": 1700000002000,
+              "completedAt": 1700000002000,
+              "updatedAt": 1700000002000,
+              "kind": {
+                "type": "user_message",
+                "messageId": "7636ef23-e64b-54ad-9aa6-08f6285b0482",
+                "inputIntent": "turn_start",
+                "text": "question 2 lorem ipsum dolor sit amet. question 2 lorem ipsum dolor sit amet. question 2 lorem ipsum dolor sit amet. que",
+                "createdBy": "user"
+              }
+            },
+            {
+              "id": "c200057b-36b4-5e0a-9cff-6ea1ebe4ae9f",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "runId": "12e08b5b-1527-5481-b0e3-b80f4ac2ae09",
+              "position": 33554433,
+              "status": "completed",
+              "startedAt": 1700000002000,
+              "completedAt": 1700000002000,
+              "updatedAt": 1700000002000,
+              "kind": {
+                "type": "command_execution",
+                "input": "cargo test --package seed-0",
+                "outputOmitted": true,
+                "exitCode": 0
+              }
+            },
+            {
+              "id": "50409b6f-d4fb-5f5e-b3e1-3164e2bb0b9c",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "runId": "12e08b5b-1527-5481-b0e3-b80f4ac2ae09",
+              "position": 33554434,
+              "status": "completed",
+              "startedAt": 1700000002000,
+              "completedAt": 1700000002000,
+              "updatedAt": 1700000002000,
+              "kind": {
+                "type": "assistant_message",
+                "messageId": "39e529f3-651d-5ff0-93f1-499bf704eade",
+                "text": "answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2"
+              }
+            },
+            {
+              "id": "da4ee851-d6dd-5a95-89f1-6976ff570c0b",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "runId": "e70a8f30-6d9b-577f-b358-a6e176fd8c89",
+              "position": 50331648,
+              "status": "completed",
+              "startedAt": 1700000003000,
+              "completedAt": 1700000003000,
+              "updatedAt": 1700000003000,
+              "kind": {
+                "type": "user_message",
+                "messageId": "3ec8619c-f3c2-53ed-bc62-9ec20d3eeb92",
+                "inputIntent": "turn_start",
+                "text": "question 3 lorem ipsum dolor sit amet. question 3 lorem ipsum dolor sit amet. question 3 lorem ipsum dolor sit amet. que",
+                "createdBy": "user"
+              }
+            },
+            {
+              "id": "f8f47346-e993-509d-b1df-2b6d8b537755",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "runId": "e70a8f30-6d9b-577f-b358-a6e176fd8c89",
+              "position": 50331649,
+              "status": "completed",
+              "startedAt": 1700000003000,
+              "completedAt": 1700000003000,
+              "updatedAt": 1700000003000,
+              "kind": {
+                "type": "command_execution",
+                "input": "cargo test --package seed-0",
+                "outputOmitted": true,
+                "exitCode": 0
+              }
+            },
+            {
+              "id": "806fe2af-6e6e-514b-8f36-a46a0b1f417e",
+              "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "runId": "e70a8f30-6d9b-577f-b358-a6e176fd8c89",
+              "position": 50331650,
+              "status": "completed",
+              "startedAt": 1700000003000,
+              "completedAt": 1700000003000,
+              "updatedAt": 1700000003000,
+              "kind": {
+                "type": "assistant_message",
+                "messageId": "0777bb50-8bba-5ca6-8034-a671491df0d6",
+                "text": "answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3"
+              }
+            }
+          ]
+        },
+        "hasMoreHistory": false
+      },
+      {
+        "type": "synchronized",
+        "cursor": {
+          "type": "sequence",
+          "store": "00000000-0000-0000-0000-000000000000",
+          "seq": 20
+        }
+      },
+      {
+        "type": "event",
+        "seq": 21,
+        "event": {
+          "type": "run.updated",
+          "id": "81e4cece-7be6-5367-a1ea-94c448256c48",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "ordinal": 4,
+          "modelSelection": {
+            "instance": "codex"
+          },
+          "userMessageId": "e600224d-e7fe-5e59-9480-11a1f22d7a1a",
+          "status": "completed",
+          "requestedAt": 1700000004000,
+          "startedAt": 1700000004000,
+          "providerCompletedAt": 1700000004000,
+          "completedAt": 1700000004000
+        }
+      },
+      {
+        "type": "event",
+        "seq": 22,
+        "event": {
+          "type": "message.updated",
+          "id": "e600224d-e7fe-5e59-9480-11a1f22d7a1a",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "81e4cece-7be6-5367-a1ea-94c448256c48",
+          "role": "user",
+          "createdBy": "user",
+          "creationSource": "desktop",
+          "text": "question 4 lorem ipsum dolor sit amet. question 4 lorem ipsum dolor sit amet. question 4 lorem ipsum dolor sit amet. que",
+          "createdAt": 1700000004000,
+          "updatedAt": 1700000004000
+        }
+      },
+      {
+        "type": "event",
+        "seq": 23,
+        "event": {
+          "type": "turn_item.updated",
+          "id": "7b96e355-b549-5fee-9cbe-00c32ed18ef6",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "81e4cece-7be6-5367-a1ea-94c448256c48",
+          "position": 67108864,
+          "status": "completed",
+          "startedAt": 1700000004000,
+          "completedAt": 1700000004000,
+          "updatedAt": 1700000004000,
+          "kind": {
+            "type": "user_message",
+            "messageId": "e600224d-e7fe-5e59-9480-11a1f22d7a1a",
+            "inputIntent": "turn_start",
+            "text": "question 4 lorem ipsum dolor sit amet. question 4 lorem ipsum dolor sit amet. question 4 lorem ipsum dolor sit amet. que",
+            "createdBy": "user"
+          }
+        }
+      },
+      {
+        "type": "event",
+        "seq": 24,
+        "event": {
+          "type": "turn_item.updated",
+          "id": "00000000-0000-0000-0000-000000000a11",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "position": 67108865,
+          "status": "running",
+          "streamRev": 2,
+          "startedAt": 1700000000000,
+          "updatedAt": 1700000000000,
+          "kind": {
+            "type": "assistant_message",
+            "messageId": "00000000-0000-0000-0000-000000000a12",
+            "text": "He",
+            "streaming": true
+          }
+        }
+      },
+      {
+        "type": "event",
+        "seq": 25,
+        "event": {
+          "type": "thread.updated",
+          "change": "renamed",
+          "thread": {
+            "id": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+            "projectId": "61cd4b0a-5f81-50ca-9956-74f86d38b966",
+            "createdBy": "user",
+            "creationSource": "desktop",
+            "title": "Fixture, renamed",
+            "titleSource": "user",
+            "modelSelection": {
+              "instance": "codex"
+            },
+            "runtimeMode": "full_access",
+            "interactionMode": "default",
+            "historyOrigin": "native",
+            "lineage": {
+              "rootThreadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad"
+            },
+            "createdAt": 1700000000000,
+            "updatedAt": 1700000000000,
+            "lastVisitedAt": 1700000000000
+          }
+        }
+      },
+      {
+        "type": "delta",
+        "itemId": "00000000-0000-0000-0000-000000000a11",
+        "channel": "text",
+        "rev": 3,
+        "text": "ll"
+      },
+      {
+        "type": "delta",
+        "itemId": "00000000-0000-0000-0000-000000000a11",
+        "channel": "text",
+        "rev": 4,
+        "text": "o,"
+      },
+      {
+        "type": "delta",
+        "itemId": "00000000-0000-0000-0000-000000000a11",
+        "channel": "text",
+        "rev": 6,
+        "text": " skipped"
+      },
+      {
+        "type": "event",
+        "seq": 26,
+        "event": {
+          "type": "turn_item.updated",
+          "id": "00000000-0000-0000-0000-000000000a11",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "position": 67108865,
+          "status": "completed",
+          "streamRev": 5,
+          "startedAt": 1700000000000,
+          "updatedAt": 1700000000000,
+          "kind": {
+            "type": "assistant_message",
+            "messageId": "00000000-0000-0000-0000-000000000a12",
+            "text": "Hello, world"
+          }
+        }
+      }
+    ],
+    "expected": {
+      "thread": {
+        "id": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+        "projectId": "61cd4b0a-5f81-50ca-9956-74f86d38b966",
+        "createdBy": "user",
+        "creationSource": "desktop",
+        "title": "Fixture, renamed",
+        "titleSource": "user",
+        "modelSelection": {
+          "instance": "codex"
+        },
+        "runtimeMode": "full_access",
+        "interactionMode": "default",
+        "historyOrigin": "native",
+        "lineage": {
+          "rootThreadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad"
+        },
+        "createdAt": 1700000000000,
+        "updatedAt": 1700000000000,
+        "lastVisitedAt": 1700000000000
+      },
+      "runs": [
+        {
+          "id": "12e08b5b-1527-5481-b0e3-b80f4ac2ae09",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "ordinal": 2,
+          "modelSelection": {
+            "instance": "codex"
+          },
+          "userMessageId": "7636ef23-e64b-54ad-9aa6-08f6285b0482",
+          "status": "completed",
+          "requestedAt": 1700000002000,
+          "startedAt": 1700000002000,
+          "providerCompletedAt": 1700000002000,
+          "completedAt": 1700000002000
+        },
+        {
+          "id": "81e4cece-7be6-5367-a1ea-94c448256c48",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "ordinal": 4,
+          "modelSelection": {
+            "instance": "codex"
+          },
+          "userMessageId": "e600224d-e7fe-5e59-9480-11a1f22d7a1a",
+          "status": "completed",
+          "requestedAt": 1700000004000,
+          "startedAt": 1700000004000,
+          "providerCompletedAt": 1700000004000,
+          "completedAt": 1700000004000
+        },
+        {
+          "id": "a924676b-b594-5590-928c-6f4470decb8f",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "ordinal": 1,
+          "modelSelection": {
+            "instance": "codex"
+          },
+          "userMessageId": "29222fe5-8b36-5163-97cd-83742d2b2fb9",
+          "status": "completed",
+          "requestedAt": 1700000001000,
+          "startedAt": 1700000001000,
+          "providerCompletedAt": 1700000001000,
+          "completedAt": 1700000001000
+        },
+        {
+          "id": "e70a8f30-6d9b-577f-b358-a6e176fd8c89",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "ordinal": 3,
+          "modelSelection": {
+            "instance": "codex"
+          },
+          "userMessageId": "3ec8619c-f3c2-53ed-bc62-9ec20d3eeb92",
+          "status": "completed",
+          "requestedAt": 1700000003000,
+          "startedAt": 1700000003000,
+          "providerCompletedAt": 1700000003000,
+          "completedAt": 1700000003000
+        }
+      ],
+      "turnItems": [
+        {
+          "id": "122ec2c2-a5cd-52d7-90fe-3479f3841d39",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "a924676b-b594-5590-928c-6f4470decb8f",
+          "position": 16777216,
+          "status": "completed",
+          "startedAt": 1700000001000,
+          "completedAt": 1700000001000,
+          "updatedAt": 1700000001000,
+          "kind": {
+            "type": "user_message",
+            "messageId": "29222fe5-8b36-5163-97cd-83742d2b2fb9",
+            "inputIntent": "turn_start",
+            "text": "question 1 lorem ipsum dolor sit amet. question 1 lorem ipsum dolor sit amet. question 1 lorem ipsum dolor sit amet. que",
+            "createdBy": "user"
+          }
+        },
+        {
+          "id": "2e091ae7-92ed-5399-8fc3-23f927138d8d",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "a924676b-b594-5590-928c-6f4470decb8f",
+          "position": 16777217,
+          "status": "completed",
+          "startedAt": 1700000001000,
+          "completedAt": 1700000001000,
+          "updatedAt": 1700000001000,
+          "kind": {
+            "type": "command_execution",
+            "input": "cargo test --package seed-0",
+            "outputOmitted": true,
+            "exitCode": 0
+          }
+        },
+        {
+          "id": "9d44e51c-8b54-5398-b78a-ed6f1bab3676",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "a924676b-b594-5590-928c-6f4470decb8f",
+          "position": 16777218,
+          "status": "completed",
+          "startedAt": 1700000001000,
+          "completedAt": 1700000001000,
+          "updatedAt": 1700000001000,
+          "kind": {
+            "type": "assistant_message",
+            "messageId": "fdf9de61-db86-525c-b40e-6a86d2602b51",
+            "text": "answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1 lorem ipsum dolor sit amet. answer 1"
+          }
+        },
+        {
+          "id": "47e4b048-d68e-56c2-b066-da2c2d0a9b19",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "12e08b5b-1527-5481-b0e3-b80f4ac2ae09",
+          "position": 33554432,
+          "status": "completed",
+          "startedAt": 1700000002000,
+          "completedAt": 1700000002000,
+          "updatedAt": 1700000002000,
+          "kind": {
+            "type": "user_message",
+            "messageId": "7636ef23-e64b-54ad-9aa6-08f6285b0482",
+            "inputIntent": "turn_start",
+            "text": "question 2 lorem ipsum dolor sit amet. question 2 lorem ipsum dolor sit amet. question 2 lorem ipsum dolor sit amet. que",
+            "createdBy": "user"
+          }
+        },
+        {
+          "id": "c200057b-36b4-5e0a-9cff-6ea1ebe4ae9f",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "12e08b5b-1527-5481-b0e3-b80f4ac2ae09",
+          "position": 33554433,
+          "status": "completed",
+          "startedAt": 1700000002000,
+          "completedAt": 1700000002000,
+          "updatedAt": 1700000002000,
+          "kind": {
+            "type": "command_execution",
+            "input": "cargo test --package seed-0",
+            "outputOmitted": true,
+            "exitCode": 0
+          }
+        },
+        {
+          "id": "50409b6f-d4fb-5f5e-b3e1-3164e2bb0b9c",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "12e08b5b-1527-5481-b0e3-b80f4ac2ae09",
+          "position": 33554434,
+          "status": "completed",
+          "startedAt": 1700000002000,
+          "completedAt": 1700000002000,
+          "updatedAt": 1700000002000,
+          "kind": {
+            "type": "assistant_message",
+            "messageId": "39e529f3-651d-5ff0-93f1-499bf704eade",
+            "text": "answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2 lorem ipsum dolor sit amet. answer 2"
+          }
+        },
+        {
+          "id": "da4ee851-d6dd-5a95-89f1-6976ff570c0b",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "e70a8f30-6d9b-577f-b358-a6e176fd8c89",
+          "position": 50331648,
+          "status": "completed",
+          "startedAt": 1700000003000,
+          "completedAt": 1700000003000,
+          "updatedAt": 1700000003000,
+          "kind": {
+            "type": "user_message",
+            "messageId": "3ec8619c-f3c2-53ed-bc62-9ec20d3eeb92",
+            "inputIntent": "turn_start",
+            "text": "question 3 lorem ipsum dolor sit amet. question 3 lorem ipsum dolor sit amet. question 3 lorem ipsum dolor sit amet. que",
+            "createdBy": "user"
+          }
+        },
+        {
+          "id": "f8f47346-e993-509d-b1df-2b6d8b537755",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "e70a8f30-6d9b-577f-b358-a6e176fd8c89",
+          "position": 50331649,
+          "status": "completed",
+          "startedAt": 1700000003000,
+          "completedAt": 1700000003000,
+          "updatedAt": 1700000003000,
+          "kind": {
+            "type": "command_execution",
+            "input": "cargo test --package seed-0",
+            "outputOmitted": true,
+            "exitCode": 0
+          }
+        },
+        {
+          "id": "806fe2af-6e6e-514b-8f36-a46a0b1f417e",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "e70a8f30-6d9b-577f-b358-a6e176fd8c89",
+          "position": 50331650,
+          "status": "completed",
+          "startedAt": 1700000003000,
+          "completedAt": 1700000003000,
+          "updatedAt": 1700000003000,
+          "kind": {
+            "type": "assistant_message",
+            "messageId": "0777bb50-8bba-5ca6-8034-a671491df0d6",
+            "text": "answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3 lorem ipsum dolor sit amet. answer 3"
+          }
+        },
+        {
+          "id": "7b96e355-b549-5fee-9cbe-00c32ed18ef6",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "runId": "81e4cece-7be6-5367-a1ea-94c448256c48",
+          "position": 67108864,
+          "status": "completed",
+          "startedAt": 1700000004000,
+          "completedAt": 1700000004000,
+          "updatedAt": 1700000004000,
+          "kind": {
+            "type": "user_message",
+            "messageId": "e600224d-e7fe-5e59-9480-11a1f22d7a1a",
+            "inputIntent": "turn_start",
+            "text": "question 4 lorem ipsum dolor sit amet. question 4 lorem ipsum dolor sit amet. question 4 lorem ipsum dolor sit amet. que",
+            "createdBy": "user"
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000a11",
+          "threadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "position": 67108865,
+          "status": "completed",
+          "streamRev": 5,
+          "startedAt": 1700000000000,
+          "updatedAt": 1700000000000,
+          "kind": {
+            "type": "assistant_message",
+            "messageId": "00000000-0000-0000-0000-000000000a12",
+            "text": "Hello, world"
+          }
+        }
+      ]
+    }
+  },
+  "shell": {
+    "items": [
+      {
+        "type": "snapshot",
+        "cursor": {
+          "type": "sequence",
+          "store": "00000000-0000-0000-0000-000000000000",
+          "seq": 20
+        },
+        "projects": [
+          {
+            "id": "61cd4b0a-5f81-50ca-9956-74f86d38b966",
+            "name": "fixture",
+            "path": "/seed/fixture",
+            "orderKey": "t0001700000000000",
+            "createdAt": 1700000000000,
+            "updatedAt": 1700000000000
+          }
+        ],
+        "threads": [
+          {
+            "thread": {
+              "id": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+              "projectId": "61cd4b0a-5f81-50ca-9956-74f86d38b966",
+              "createdBy": "user",
+              "creationSource": "desktop",
+              "title": "fixture",
+              "titleSource": "user",
+              "modelSelection": {
+                "instance": "codex"
+              },
+              "runtimeMode": "full_access",
+              "interactionMode": "default",
+              "historyOrigin": "native",
+              "lineage": {
+                "rootThreadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad"
+              },
+              "createdAt": 1700000000000,
+              "updatedAt": 1700000000000,
+              "lastVisitedAt": 1700000000000
+            },
+            "activity": "idle",
+            "pendingRequestCount": 0,
+            "queuedRunCount": 0
+          }
+        ],
+        "complete": true
+      },
+      {
+        "type": "synchronized",
+        "cursor": {
+          "type": "sequence",
+          "store": "00000000-0000-0000-0000-000000000000",
+          "seq": 20
+        }
+      },
+      {
+        "type": "threadUpdated",
+        "seq": 25,
+        "row": {
+          "thread": {
+            "id": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+            "projectId": "61cd4b0a-5f81-50ca-9956-74f86d38b966",
+            "createdBy": "user",
+            "creationSource": "desktop",
+            "title": "Fixture, renamed",
+            "titleSource": "user",
+            "modelSelection": {
+              "instance": "codex"
+            },
+            "runtimeMode": "full_access",
+            "interactionMode": "default",
+            "historyOrigin": "native",
+            "lineage": {
+              "rootThreadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad"
+            },
+            "createdAt": 1700000000000,
+            "updatedAt": 1700000000000,
+            "lastVisitedAt": 1700000000000
+          },
+          "activity": "idle",
+          "pendingRequestCount": 0,
+          "queuedRunCount": 0
+        },
+        "location": "active"
+      },
+      {
+        "type": "threadUpdated",
+        "seq": 27,
+        "row": {
+          "thread": {
+            "id": "8c74f76d-9690-5dd9-ab05-a89fdb8f57ea",
+            "projectId": "61cd4b0a-5f81-50ca-9956-74f86d38b966",
+            "createdBy": "user",
+            "creationSource": "desktop",
+            "title": "Second",
+            "titleSource": "user",
+            "modelSelection": {
+              "instance": "codex"
+            },
+            "runtimeMode": "full_access",
+            "interactionMode": "default",
+            "historyOrigin": "native",
+            "lineage": {
+              "rootThreadId": "8c74f76d-9690-5dd9-ab05-a89fdb8f57ea"
+            },
+            "createdAt": 1700000000000,
+            "updatedAt": 1700000000000,
+            "lastVisitedAt": 1700000000000
+          },
+          "activity": "idle",
+          "pendingRequestCount": 0,
+          "queuedRunCount": 0
+        },
+        "location": "active"
+      },
+      {
+        "type": "threadUpdated",
+        "seq": 28,
+        "row": {
+          "thread": {
+            "id": "8c74f76d-9690-5dd9-ab05-a89fdb8f57ea",
+            "projectId": "61cd4b0a-5f81-50ca-9956-74f86d38b966",
+            "createdBy": "user",
+            "creationSource": "desktop",
+            "title": "Second",
+            "titleSource": "user",
+            "modelSelection": {
+              "instance": "codex"
+            },
+            "runtimeMode": "full_access",
+            "interactionMode": "default",
+            "historyOrigin": "native",
+            "lineage": {
+              "rootThreadId": "8c74f76d-9690-5dd9-ab05-a89fdb8f57ea"
+            },
+            "createdAt": 1700000000000,
+            "updatedAt": 1700000000000,
+            "archivedAt": 1700000000000,
+            "lastVisitedAt": 1700000000000
+          },
+          "activity": "idle",
+          "pendingRequestCount": 0,
+          "queuedRunCount": 0
+        },
+        "location": "archived"
+      }
+    ],
+    "expectedThreads": [
+      {
+        "thread": {
+          "id": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad",
+          "projectId": "61cd4b0a-5f81-50ca-9956-74f86d38b966",
+          "createdBy": "user",
+          "creationSource": "desktop",
+          "title": "Fixture, renamed",
+          "titleSource": "user",
+          "modelSelection": {
+            "instance": "codex"
+          },
+          "runtimeMode": "full_access",
+          "interactionMode": "default",
+          "historyOrigin": "native",
+          "lineage": {
+            "rootThreadId": "44a520e9-3b5c-57a3-8735-2b450dd6e7ad"
+          },
+          "createdAt": 1700000000000,
+          "updatedAt": 1700000000000,
+          "lastVisitedAt": 1700000000000
+        },
+        "activity": "idle",
+        "pendingRequestCount": 0,
+        "queuedRunCount": 0
+      }
+    ]
+  }
+}

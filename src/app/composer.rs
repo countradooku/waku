@@ -1,33 +1,6 @@
 use super::*;
 
 use anyhow::Context as _;
-use base64::Engine as _;
-
-const COMPUTER_USE_PREVIEW_WIDTH: f32 = 304.0;
-const COMPUTER_USE_PREVIEW_HEIGHT: f32 = 172.0;
-const COMPUTER_USE_PREVIEW_RADIUS: f32 = 12.0;
-const COMPUTER_USE_PREVIEW_INNER_RADIUS: f32 = COMPUTER_USE_PREVIEW_RADIUS - 1.0;
-
-struct ComputerUsePreviewDrag {
-    cursor_offset: Cell<gpui::Point<Pixels>>,
-}
-
-fn clamp_computer_use_preview_position(
-    position: gpui::Point<Pixels>,
-    size: gpui::Size<Pixels>,
-    window: &Window,
-) -> gpui::Point<Pixels> {
-    let inset = window.client_inset().unwrap_or_default() + px(8.0);
-    let viewport = window.viewport_size();
-    point(
-        position
-            .x
-            .clamp(inset, (viewport.width - size.width - inset).max(inset)),
-        position
-            .y
-            .clamp(inset, (viewport.height - size.height - inset).max(inset)),
-    )
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ComposerSubmitAction {
@@ -53,13 +26,10 @@ impl Waku {
     // ── Permission ─────────────────────────────────────────────────────────
 
     pub(super) fn render_permission(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if let Some(input) = self.selected_runtime()?.pending_user_input.clone() {
+        if let Some(input) = self.threads.user_input.clone() {
             return Some(self.render_user_input(input, cx));
         }
-        if let Some(permission) = self.selected_runtime()?.pending_computer_approval.as_ref() {
-            return Some(self.render_computer_permission(permission, cx));
-        }
-        let permission = self.selected_runtime()?.pending_permission.as_ref()?;
+        let permission = self.selected_session()?.pending_permission.as_ref()?;
         let theme = Theme::current(cx);
         let request_id = permission.request_id.clone();
         let mut buttons = div().flex().items_center().gap(px(8.0)).mt(px(10.0));
@@ -429,415 +399,6 @@ impl Waku {
                         .child(div().flex_1())
                         .child(continue_button),
                 ),
-        )
-    }
-
-    fn render_computer_permission(
-        &self,
-        permission: &PendingComputerApproval,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let theme = Theme::current(cx);
-        let target = &permission.target;
-        let mut buttons = div().mt(px(12.0)).flex().items_center().gap(px(8.0));
-        let mut options = vec![
-            ("task", tr!("computer_use.allow_for_task"), true),
-            ("deny", tr!("common.deny"), false),
-        ];
-        if target.persistable() {
-            options.insert(1, ("always", tr!("computer_use.always_allow_app"), false));
-        }
-        for (decision, label, primary) in options {
-            buttons = buttons.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "computer-permission-{}-{decision}",
-                        permission.request.call_id
-                    )))
-                    .h(px(29.0))
-                    .px(px(13.0))
-                    .rounded(px(7.0))
-                    .flex()
-                    .items_center()
-                    .cursor_default()
-                    .text_size(sp(12.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .when(primary, |element| {
-                        element
-                            .bg(theme.inverse)
-                            .text_color(theme.on_inverse)
-                            .hover(|element| element.opacity(0.9))
-                    })
-                    .when(!primary, |element| {
-                        element
-                            .border_1()
-                            .border_color(theme.border_strong)
-                            .text_color(theme.text_secondary)
-                            .hover(|element| element.bg(theme.overlay).text_color(theme.text))
-                    })
-                    .active(|element| element.opacity(0.8))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.respond_computer_permission(decision, cx);
-                    })),
-            );
-        }
-
-        div().px(px(20.0)).pb(px(8.0)).child(
-            div()
-                .w_full()
-                .max_w(px(CONTENT_MAX_WIDTH))
-                .mx_auto()
-                .p(px(13.0))
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(theme.warning.opacity(0.5))
-                .bg(theme.raised)
-                .shadow_md()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(9.0))
-                        .child(icon("icons/globe.svg", 14.0, theme.warning))
-                        .child(
-                            div()
-                                .text_size(sp(12.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(tr!("computer_use.allow_control", app = &target.app_name)),
-                        ),
-                )
-                .child(
-                    div()
-                        .mt(px(7.0))
-                        .text_size(sp(12.5))
-                        .line_height(sp(14.0))
-                        .text_color(theme.text_secondary)
-                        .child(tr!("computer_use.screenshot_shared")),
-                )
-                .child(
-                    div()
-                        .mt(px(8.0))
-                        .p(px(9.0))
-                        .rounded(px(8.0))
-                        .bg(theme.inset)
-                        .child(
-                            div()
-                                .text_size(sp(12.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .truncate()
-                                .child(SharedString::from(target.window_title.clone())),
-                        )
-                        .child(
-                            div()
-                                .mt(px(4.0))
-                                .text_size(sp(12.5))
-                                .text_color(theme.text_secondary)
-                                .child(SharedString::from(permission.request.summary())),
-                        )
-                        .when(permission.sensitive, |element| {
-                            element.child(
-                                div()
-                                    .mt(px(5.0))
-                                    .text_size(sp(12.5))
-                                    .text_color(theme.warning)
-                                    .child(tr!("computer_use.sensitive_action")),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .mt(px(7.0))
-                        .text_size(sp(12.5))
-                        .text_color(theme.text_tertiary)
-                        .child(if target.persistable() {
-                            tr!("computer_use.bundle_id", id = &target.bundle_id)
-                        } else {
-                            tr!("computer_use.no_bundle_id")
-                        }),
-                )
-                .child(buttons),
-        )
-    }
-
-    pub(super) fn render_computer_use_overlay(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let previews = self
-            .selected_runtime()?
-            .computer_use_previews
-            .iter()
-            .filter(|state| {
-                state.visible
-                    && state.target.is_some()
-                    && state.phase != ComputerUsePhase::AwaitingApproval
-            })
-            .collect::<Vec<_>>();
-        if previews.is_empty() {
-            return None;
-        }
-        let theme = Theme::current(cx);
-        let stack_x_offset = 14.0;
-        let stack_y_offset = 24.0;
-        let deepest_x_offset = (previews.len().saturating_sub(1) as f32) * stack_x_offset;
-        let deepest_y_offset = (previews.len().saturating_sub(1) as f32) * stack_y_offset;
-        let stack_size = gpui::size(
-            px(COMPUTER_USE_PREVIEW_WIDTH + deepest_x_offset),
-            px(COMPUTER_USE_PREVIEW_HEIGHT + deepest_y_offset),
-        );
-        let position = clamp_computer_use_preview_position(
-            self.computer_use_preview_position.unwrap_or_else(|| {
-                let viewport = window.viewport_size();
-                point(
-                    viewport.width - px(self.right_panel_rendered_width + 16.0) - stack_size.width,
-                    viewport.height - px(82.0) - stack_size.height,
-                )
-            }),
-            stack_size,
-            window,
-        );
-        let top_index = previews.len() - 1;
-        let cards = previews
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, state)| {
-                let target = state.target.as_ref()?;
-                let window_id = target.window_id;
-                let app_name = target.app_name.clone();
-                let screenshot = state
-                    .frames
-                    .current
-                    .as_ref()
-                    .map(|frame| frame.image.clone());
-                let is_top = index == top_index;
-                let depth = (top_index - index) as f32;
-                let x_offset = depth * stack_x_offset;
-                let y_offset = depth * stack_y_offset;
-                let card_offset = point(
-                    px(deepest_x_offset - x_offset),
-                    px(deepest_y_offset - y_offset),
-                );
-                let focus =
-                    self.transcript_control_focus(format!("computer-use-preview-{window_id}"), cx);
-                let mouse_focus = focus.clone();
-                let close_focus = self.transcript_control_focus(
-                    format!("computer-use-preview-close-{window_id}"),
-                    cx,
-                );
-                let group_name = SharedString::from(format!("computer-use-preview-{window_id}"));
-                let keyboard_controls = window.last_input_was_keyboard()
-                    && (focus.contains_focused(window, cx) || close_focus.is_focused(window));
-
-                Some(
-                    div()
-                        .id(SharedString::from(format!(
-                            "computer-use-preview-{window_id}"
-                        )))
-                        .track_focus(&focus)
-                        .tab_index(0)
-                        .tab_stop(true)
-                        .group(group_name.clone())
-                        .absolute()
-                        .right(px(x_offset))
-                        .bottom(px(y_offset))
-                        .w(px(COMPUTER_USE_PREVIEW_WIDTH))
-                        .h(px(COMPUTER_USE_PREVIEW_HEIGHT))
-                        .rounded(px(COMPUTER_USE_PREVIEW_RADIUS))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(if is_top {
-                            theme.border_strong
-                        } else {
-                            theme.border
-                        })
-                        .bg(theme.raised)
-                        .shadow(vec![
-                            gpui::BoxShadow::new(
-                                px(0.0),
-                                px(4.0),
-                                gpui::black().opacity(if theme.is_dark { 0.32 } else { 0.16 }),
-                            )
-                            .blur_radius(px(16.0)),
-                        ])
-                        .occlude()
-                        .cursor(gpui::CursorStyle::OpenHand)
-                        .focus_visible(|style| style.border_color(theme.accent))
-                        .on_drag(
-                            ComputerUsePreviewDrag {
-                                cursor_offset: Cell::default(),
-                            },
-                            move |drag, offset, _, cx| {
-                                drag.cursor_offset.set(offset + card_offset);
-                                cx.new(|_| gpui::EmptyView)
-                            },
-                        )
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            window.focus(&mouse_focus, cx);
-                            cx.stop_propagation();
-                        })
-                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                            if !focus.is_focused(window) {
-                                return;
-                            }
-                            let step = px(if event.keystroke.modifiers.shift {
-                                40.0
-                            } else {
-                                10.0
-                            });
-                            let delta = match event.keystroke.key.as_str() {
-                                "left" => point(-step, px(0.0)),
-                                "right" => point(step, px(0.0)),
-                                "up" => point(px(0.0), -step),
-                                "down" => point(px(0.0), step),
-                                _ => return,
-                            };
-                            this.computer_use_preview_position =
-                                Some(clamp_computer_use_preview_position(
-                                    position + delta,
-                                    stack_size,
-                                    window,
-                                ));
-                            cx.stop_propagation();
-                            cx.notify();
-                        }))
-                        .child(
-                            // GPUI overflow clipping is rectangular. Round
-                            // each painted layer inside the card's 1px border.
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .rounded(px(COMPUTER_USE_PREVIEW_INNER_RADIUS))
-                                .overflow_hidden()
-                                .bg(theme.inset)
-                                .when_some(screenshot, |element, screenshot| {
-                                    element.child(
-                                        img(screenshot)
-                                            .w_full()
-                                            .h_full()
-                                            .rounded(px(COMPUTER_USE_PREVIEW_INNER_RADIUS))
-                                            .object_fit(ObjectFit::Contain),
-                                    )
-                                })
-                                .when(state.frames.current.is_none(), |element| {
-                                    element.child(
-                                        div()
-                                            .absolute()
-                                            .inset_0()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_size(sp(12.0))
-                                            .text_color(theme.text_secondary)
-                                            .child(tr!("computer_use.preparing_preview")),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .w_full()
-                                .h(px(64.0))
-                                .rounded_t(px(COMPUTER_USE_PREVIEW_INNER_RADIUS))
-                                .pt(px(6.0))
-                                .pl(px(6.0))
-                                .pr(px(10.0))
-                                .flex()
-                                .items_start()
-                                .gap(px(6.0))
-                                .opacity(if keyboard_controls { 1.0 } else { 0.0 })
-                                .group_hover(group_name, |style| style.opacity(1.0))
-                                .bg(linear_gradient(
-                                    180.0,
-                                    linear_color_stop(gpui::black().opacity(0.65), 0.5),
-                                    linear_color_stop(gpui::transparent_black(), 1.0),
-                                ))
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "computer-use-preview-close-{window_id}"
-                                        )))
-                                        .track_focus(&close_focus)
-                                        .aria_label(tr!("common.close"))
-                                        .tab_index(0)
-                                        .tab_stop(true)
-                                        .size(px(26.0))
-                                        .flex_none()
-                                        .rounded_full()
-                                        .border_1()
-                                        .border_color(gpui::transparent_black())
-                                        .focus_visible(|style| style.border_color(gpui::white()))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_default()
-                                        .hover(|style| style.bg(gpui::white().opacity(0.16)))
-                                        .active(|style| style.bg(gpui::white().opacity(0.24)))
-                                        .tooltip(Tooltip::text(tr!("common.close")))
-                                        .child(icon("icons/x.svg", 11.0, gpui::white()))
-                                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                            window.focus(&close_focus, cx);
-                                            cx.stop_propagation();
-                                        })
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            this.dismiss_computer_use(window_id, cx);
-                                            window.focus(&this.composer_focus(cx), cx);
-                                        })),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .pt(px(5.0))
-                                        .text_size(sp(12.0))
-                                        .line_height(sp(16.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(gpui::white())
-                                        .truncate()
-                                        .child(SharedString::from(app_name)),
-                                ),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.bring_computer_use_to_front(window_id, cx);
-                        })),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let stack = div()
-            .id("computer-use-previews")
-            .tab_group()
-            .tab_stop(false)
-            .relative()
-            .w(stack_size.width)
-            .h(stack_size.height)
-            .children(cards)
-            .on_drag_move::<ComputerUsePreviewDrag>(cx.listener(
-                move |this, event: &gpui::DragMoveEvent<ComputerUsePreviewDrag>, window, cx| {
-                    let position = event.event.position - event.drag(cx).cursor_offset.get();
-                    this.computer_use_preview_position = Some(clamp_computer_use_preview_position(
-                        position, stack_size, window,
-                    ));
-                    // Native drag dispatch already refreshes the window; avoid
-                    // an additional root notify for every pointer movement.
-                },
-            ));
-
-        Some(
-            gpui::deferred(
-                gpui::anchored()
-                    .position(position)
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(stack),
-            )
-            .into_any_element(),
         )
     }
 
@@ -1941,7 +1502,7 @@ impl Waku {
             return false;
         }
         let paths = paths.to_vec();
-        let daemon = self.daemon.clone();
+        let daemon_v8 = self.daemon_v8.clone();
         let draft_owner = self.selected_composer_draft_key();
         cx.spawn(async move |waku, cx| {
             let result = cx
@@ -1956,16 +1517,9 @@ impl Waku {
                             image_preview::image_format_for_name(&name)
                                 .map(|format| Arc::new(gpui::Image::from_bytes(format, bytes)))
                         });
-                        let response = daemon.client().request(
-                            Uuid::nil(),
-                            Uuid::nil(),
-                            waku_client::Command::ImportAttachment { name, upload },
+                        let attachment = waku_client::surfaces::blobs::upload_attachment(
+                            &daemon_v8, &name, upload,
                         )?;
-                        let waku_client::ResponsePayload::AttachmentStored { attachment } =
-                            response
-                        else {
-                            anyhow::bail!("the daemon returned an invalid attachment response");
-                        };
                         stored.push((attachment, preview_image, is_image));
                     }
                     Ok::<_, anyhow::Error>(stored)
@@ -1979,7 +1533,7 @@ impl Waku {
                     let mut changed = false;
                     for (attachment, preview_image, is_image) in stored {
                         changed |= waku.stage_daemon_attachment(
-                            attachment.path,
+                            PathBuf::from(attachment.path),
                             attachment.name,
                             attachment.is_dir,
                             is_image,
@@ -2057,7 +1611,7 @@ impl Waku {
             return;
         }
 
-        let daemon = self.daemon.clone();
+        let daemon_v8 = self.daemon_v8.clone();
         let draft_owner = self.selected_composer_draft_key();
         cx.spawn(async move |waku, cx| {
             let stored = cx
@@ -2069,33 +1623,28 @@ impl Waku {
                         .enumerate()
                         .map(|(index, image)| {
                             let preview_image = Arc::new(image);
-                            let bytes = preview_image.bytes.clone();
-                            let response = daemon
-                                .client()
-                                .request(
-                                    Uuid::nil(),
-                                    Uuid::nil(),
-                                    waku_client::Command::StoreBlob {
-                                        mime_type: preview_image.format.mime_type().to_owned(),
-                                        bytes,
-                                    },
-                                )
-                                .map_err(|error| error.to_string())?;
-                            let waku_client::ResponsePayload::BlobStored { reference, path } =
-                                response
-                            else {
-                                return Err("the daemon returned an invalid blob response".into());
-                            };
-                            let extension = path
-                                .extension()
-                                .and_then(|extension| extension.to_str())
-                                .unwrap_or("png");
+                            let mime = preview_image.format.mime_type();
+                            let extension = waku_client::surfaces::blobs::image_extension(mime);
                             let name = if image_count == 1 {
                                 format!("image.{extension}")
                             } else {
                                 format!("image-{}.{extension}", index + 1)
                             };
-                            Ok::<_, String>((path, name, reference, preview_image))
+                            // A one-file attachment gives the bytes a path on
+                            // the daemon host, which a provider can open.
+                            let stored = waku_client::surfaces::blobs::store_image(
+                                &daemon_v8,
+                                &preview_image.bytes,
+                                mime,
+                                &name,
+                            )
+                            .map_err(|error| error.to_string())?;
+                            Ok::<_, String>((
+                                PathBuf::from(stored.path),
+                                name,
+                                stored.reference,
+                                preview_image,
+                            ))
                         })
                         .collect::<Result<Vec<_>, _>>()
                 })
@@ -2707,10 +2256,8 @@ impl Waku {
     pub(super) fn render_composer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let session = self.selected_session();
-        let preparing = session.is_some_and(|session| {
-            self.submission_preparations.contains(&session.id)
-                || self.response_fork_preparations.contains_key(&session.id)
-        });
+        // Sending is one dispatch: there is no client-side preparation phase.
+        let preparing = false;
         let submit_action =
             composer_submit_action(session.map(|session| session.status), preparing);
         let escape_stop_armed = session.is_some_and(|session| {
@@ -3520,10 +3067,8 @@ pub(super) fn visible_branch_entries(
 /// file is inside it, absolute otherwise, directories with a trailing slash —
 /// the same form the `@` autocomplete inserts. Dropping the root itself keeps
 /// the absolute path rather than producing an empty mention.
-// Base64 keeps the authenticated JSON transport browser-compatible but adds
-// one third of wire overhead. Stay comfortably below tungstenite's default
-// message limit until uploads move to a streaming content endpoint.
-const MAX_ATTACHMENT_BYTES: u64 = waku_client::attachments::MAX_ATTACHMENT_BYTES as u64;
+// The daemon refuses larger attachments (RFC 0003 §5.6, `attachments.import`).
+const MAX_ATTACHMENT_BYTES: u64 = waku_client::v8::MAX_ATTACHMENT_BYTES;
 
 /// Reads a client-local drop into an upload payload. This is the explicit
 /// client/daemon boundary: none of these source paths are persisted or handed
@@ -3532,7 +3077,7 @@ fn attachment_upload_from_path(
     source: &Path,
 ) -> anyhow::Result<(
     String,
-    waku_client::attachments::AttachmentUpload,
+    waku_client::surfaces::blobs::AttachmentSource,
     Option<Vec<u8>>,
 )> {
     let metadata = std::fs::symlink_metadata(source)
@@ -3556,12 +3101,11 @@ fn attachment_upload_from_path(
         let bytes = std::fs::read(source)
             .with_context(|| format!("could not read attachment {}", source.display()))?;
         let is_image = is_image_attachment_path(source);
+        let preview = is_image.then(|| bytes.clone());
         return Ok((
             name,
-            waku_client::attachments::AttachmentUpload::File {
-                data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-            },
-            is_image.then_some(bytes),
+            waku_client::surfaces::blobs::AttachmentSource::File(bytes),
+            preview,
         ));
     }
     if !metadata.is_dir() {
@@ -3594,31 +3138,26 @@ fn attachment_upload_from_path(
             if !metadata.is_file() {
                 continue;
             }
-            if entries.len() >= waku_client::attachments::MAX_ATTACHMENT_FILES {
+            if entries.len() >= waku_client::v8::MAX_ATTACHMENT_PARTS as usize {
                 anyhow::bail!(
                     "attachment directory contains more than {} files",
-                    waku_client::attachments::MAX_ATTACHMENT_FILES
+                    waku_client::v8::MAX_ATTACHMENT_PARTS
                 );
             }
             total_bytes = total_bytes.saturating_add(metadata.len());
             if total_bytes > MAX_ATTACHMENT_BYTES {
                 anyhow::bail!("attachment directory is larger than 32 MB");
             }
-            let relative_path = path
-                .strip_prefix(source)
-                .context("attachment entry escaped its source directory")?
-                .to_path_buf();
+            let relative_path = waku_client::surfaces::files::relative_slash_path(source, &path)
+                .context("attachment entry escaped its source directory")?;
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("could not read attachment {}", path.display()))?;
-            entries.push(waku_client::attachments::AttachmentUploadEntry {
-                relative_path,
-                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-            });
+            entries.push((relative_path, bytes));
         }
     }
     Ok((
         name,
-        waku_client::attachments::AttachmentUpload::Directory { entries },
+        waku_client::surfaces::blobs::AttachmentSource::Directory(entries),
         None,
     ))
 }

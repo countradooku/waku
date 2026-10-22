@@ -1,7 +1,8 @@
 //! Realistic transcript material for timelines and fixture sessions.
 //!
-//! The banks and generators are ported from `scripts/seed-mock-sessions.ts` so
-//! the bench exercises the same shapes as the seeded corpora: Markdown with
+//! The banks and generators were ported from the former
+//! `scripts/seed-mock-sessions.ts`, so the bench exercises the same shapes as
+//! its seeded corpora: Markdown with
 //! tables, fenced code, nested lists and quotes; build logs; unified diffs;
 //! search hits. What is measured is parsing, highlighting, shaping and
 //! wrapping, so the text has to look like what an agent actually produces.

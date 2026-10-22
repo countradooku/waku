@@ -1,6 +1,7 @@
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Editor } from '@pierre/diffs/edit'
-import type { AgentSession, Project, ReviewDiffSource, WorkingTreeEntry } from '@waku/client'
+import { CallError, type StreamHandle } from '@waku/client/v8'
+import type * as T from '@waku/client/v8'
 import { GhosttyCore } from '@wterm/ghostty'
 import { Terminal, useTerminal } from '@wterm/react'
 import {
@@ -25,20 +26,19 @@ import type { CodeDiffSurfaceHandle, DiffSurfaceFile } from '@/components/code-s
 import {
   collectWorkspaceDiff,
   daemonKeys,
+  diffSourceKey,
   listWorkspaceTree,
   readWorkspaceTextFile,
-  sessionCwd,
+  rootKey,
   writeWorkspaceTextFile,
+  type DiffSource,
+  type TextFile,
 } from '@/lib/daemon-api'
-import { useDaemon } from '@/lib/daemon-context'
+import { useCommandOutput } from '@/hooks/use-daemon-stores'
+import { requireConnection, useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
 import { usePrimaryShortcut } from '@/lib/platform'
-import { projectDisplayName } from '@/lib/project-presentation'
-import {
-  latestReviewTurnSource,
-  reviewDiffSourceLabel,
-  sameReviewDiffSource,
-} from '@/lib/review-diff'
+import { diffSourceChoices, reviewDiffSourceLabel, reviewTurns } from '@/lib/review-diff'
 import {
   mergeReviewDiffFiles,
   openFileInPanel,
@@ -48,12 +48,13 @@ import {
   type TreeNavigationKey,
 } from '@/lib/right-panel-state'
 import { formatWorkingElapsed, type Translator } from '@/lib/transcript-presentation'
-import {
-  useRuntime,
-  type BackgroundWorkItem,
-  type BackgroundWorkKey,
-  type BackgroundWorkStatus,
-} from '@/lib/runtime-context'
+import { useTaskActions } from '@/lib/task-actions'
+import type {
+  BackgroundWorkItem,
+  BackgroundWorkKind,
+  BackgroundWorkStatus,
+  Task,
+} from '@/lib/thread-model'
 import { cn } from '@/lib/utils'
 
 const CodeFileSurface = lazy(() => import('@/components/code-surfaces').then((module) => ({
@@ -68,11 +69,10 @@ export type PanelSurface = 'files' | 'file' | 'changes' | 'terminal' | 'backgrou
 interface PanelTab {
   id: string
   surface: PanelSurface
-  terminalId?: string
   title?: string
   selectedFile?: string | null
   dirty?: boolean
-  backgroundWorkKey?: BackgroundWorkKey
+  backgroundWorkId?: string
 }
 
 interface PanelState {
@@ -84,11 +84,13 @@ export function RightPanel({
   active,
   open,
   panelWidth,
-  session,
-  project,
+  panelKey,
+  root,
+  cwd,
+  task,
   requestedSurface,
   requestedDiffSource,
-  requestedBackgroundWorkKey,
+  requestedBackgroundWorkId,
   requestedFile,
   requestSignal,
   sidebarWidth,
@@ -98,11 +100,16 @@ export function RightPanel({
   active: boolean
   open: boolean
   panelWidth: number
-  session: AgentSession | null
-  project?: Project
+  /** The thread id, or the new-task draft id. */
+  panelKey: string
+  /** Where files, diffs and terminals of this panel operate. */
+  root: T.RootRef
+  /** The absolute workspace path, for display. */
+  cwd?: string
+  task?: Task
   requestedSurface: PanelSurface
-  requestedDiffSource: ReviewDiffSource
-  requestedBackgroundWorkKey: BackgroundWorkKey | null
+  requestedDiffSource: DiffSource
+  requestedBackgroundWorkId: string | null
   requestedFile: string | null
   requestSignal: number
   sidebarWidth: number
@@ -115,13 +122,13 @@ export function RightPanel({
     activeId: null,
   })
   const [fileBuffers, setFileBuffers] = useState<Record<string, FileBuffer>>({})
-  const [diffSource, setDiffSource] = useState<ReviewDiffSource>('uncommitted')
+  const [diffSource, setDiffSource] = useState<DiffSource>('uncommitted')
   const tabStrip = useRef<HTMLDivElement>(null)
   const [tabOverflow, setTabOverflow] = useState({ start: false, end: false })
   const viewportWidth = useViewportWidth()
   const maxPanelWidth = Math.max(280, Math.min(1_000, viewportWidth - sidebarWidth - 360))
   const fittedPanelWidth = clamp(panelWidth, 280, maxPanelWidth)
-  const bufferRoot = session && project ? sessionCwd(session, project) : undefined
+  const bufferRoot = rootKey(root)
 
   useEffect(() => {
     setFileBuffers({})
@@ -129,8 +136,8 @@ export function RightPanel({
 
   const openSurface = useCallback((
     surface: PanelSurface,
-    source: ReviewDiffSource = 'uncommitted',
-    backgroundWorkKey?: BackgroundWorkKey | null,
+    source: DiffSource = 'uncommitted',
+    backgroundWorkId?: string | null,
     file?: string | null,
   ) => {
     if (surface === 'changes') setDiffSource(source)
@@ -156,8 +163,7 @@ export function RightPanel({
             surface === 'file'
               ? tab.selectedFile === file
               : surface !== 'backgroundWork'
-                || (backgroundWorkKey && tab.backgroundWorkKey
-                  && sameBackgroundWorkKey(backgroundWorkKey, tab.backgroundWorkKey))
+                || (backgroundWorkId && tab.backgroundWorkId === backgroundWorkId)
           ))
       if (reusable) {
         return {
@@ -170,16 +176,16 @@ export function RightPanel({
             : current.tabs,
         }
       }
-      if (surface === 'backgroundWork' && !backgroundWorkKey) return current
+      if (surface === 'backgroundWork' && !backgroundWorkId) return current
       const id = crypto.randomUUID()
       const tab: PanelTab = surface === 'terminal'
-        ? { id, surface, terminalId: crypto.randomUUID() }
+        ? { id, surface }
         : {
             id,
             surface,
             selectedFile: surface === 'files' || surface === 'file' ? file ?? null : undefined,
-            backgroundWorkKey: surface === 'backgroundWork'
-              ? backgroundWorkKey ?? undefined
+            backgroundWorkId: surface === 'backgroundWork'
+              ? backgroundWorkId ?? undefined
               : undefined,
           }
       return { tabs: [...current.tabs, tab], activeId: id }
@@ -188,9 +194,9 @@ export function RightPanel({
 
   useEffect(() => {
     if (requestSignal > 0) {
-      openSurface(requestedSurface, requestedDiffSource, requestedBackgroundWorkKey, requestedFile)
+      openSurface(requestedSurface, requestedDiffSource, requestedBackgroundWorkId, requestedFile)
     }
-  }, [openSurface, requestedBackgroundWorkKey, requestedDiffSource, requestedFile, requestedSurface, requestSignal])
+  }, [openSurface, requestedBackgroundWorkId, requestedDiffSource, requestedFile, requestedSurface, requestSignal])
 
   const activeTab = tabs.find((tab) => tab.id === activeId) ?? tabs.at(-1)
 
@@ -395,10 +401,10 @@ export function RightPanel({
             <FilesPanel
               active={active && tab.id === activeTab?.id}
               buffers={fileBuffers}
+              cwd={cwd}
               panelWidth={fittedPanelWidth}
-              project={project}
               requestedFile={tab.selectedFile ?? null}
-              session={session}
+              root={root}
               setBuffers={setFileBuffers}
               tabId={tab.id}
               onDirtyChange={setTabDirty}
@@ -409,23 +415,24 @@ export function RightPanel({
             <ChangesPanel
               diffSource={diffSource}
               panelWidth={fittedPanelWidth}
-              project={project}
-              session={session}
+              root={root}
+              runs={task?.runs}
               onDiffSourceChange={setDiffSource}
             />
           )}
-          {tab.surface === 'terminal' && tab.terminalId && (
+          {tab.surface === 'terminal' && (
             <TerminalPanel
-              project={project}
-              session={session}
-              terminalId={tab.terminalId}
+              key={`${panelKey}:${tab.id}`}
+              root={root}
+              title={cwd}
               onTitle={(title) => updateTab(tab.id, { title })}
             />
           )}
-          {tab.surface === 'backgroundWork' && tab.backgroundWorkKey && (
+          {tab.surface === 'backgroundWork' && tab.backgroundWorkId && (
             <BackgroundWorkPanel
-              session={session}
-              workKey={tab.backgroundWorkKey}
+              active={active && open && tab.id === activeTab?.id}
+              task={task}
+              workId={tab.backgroundWorkId}
               onTitle={(title) => updateTab(tab.id, { title })}
             />
           )}
@@ -455,14 +462,14 @@ function PanelTabButton({
     : tab.surface === 'changes'
       ? t('right_panel.diff')
       : tab.surface === 'backgroundWork'
-        ? tab.title?.trim() || backgroundWorkKindLabel(tab.backgroundWorkKey?.kind, t)
+        ? tab.title?.trim() || backgroundWorkKindLabel(undefined, t)
         : tab.title?.trim() || t('right_panel.terminal')
   const icon = tab.surface === 'files' || tab.surface === 'file'
     ? 'folder'
     : tab.surface === 'changes'
       ? 'fileDiff'
       : tab.surface === 'backgroundWork'
-        ? backgroundWorkKindIcon(tab.backgroundWorkKey?.kind)
+        ? backgroundWorkKindIcon(undefined)
         : 'terminal'
   return (
     <div
@@ -559,6 +566,8 @@ function PanelCard({
 interface FileBuffer {
   content: string
   diskContent: string
+  /** The disk content's `files.read` revision, the base of the next write. */
+  diskRevision?: string
   revision: number
   saving: boolean
   editor?: Editor<undefined>
@@ -568,8 +577,8 @@ function FilesPanel({
   active,
   buffers,
   tabId,
-  session,
-  project,
+  root,
+  cwd,
   requestedFile,
   panelWidth,
   setBuffers,
@@ -579,8 +588,8 @@ function FilesPanel({
   active: boolean
   buffers: Record<string, FileBuffer>
   tabId: string
-  session: AgentSession | null
-  project?: Project
+  root: T.RootRef
+  cwd?: string
   requestedFile: string | null
   panelWidth: number
   setBuffers: Dispatch<SetStateAction<Record<string, FileBuffer>>>
@@ -588,7 +597,7 @@ function FilesPanel({
   onOpenFile: (tabId: string, path: string, treeWidth: number) => void
 }) {
   const { t } = useI18n()
-  const { client, config, phase } = useDaemon()
+  const { connection, config, phase } = useDaemon()
   const queryClient = useQueryClient()
   const [expanded, setExpanded] = useState<string[]>([])
   const [selected, setSelected] = useState<string | null>(null)
@@ -599,28 +608,28 @@ function FilesPanel({
   const [treeWidth, setTreeWidth] = useState(() => readStoredWidth('waku.fileTreeWidth', 184, 140, 360))
   const treeWidthRef = useRef(treeWidth)
   treeWidthRef.current = treeWidth
-  const root = session && project ? sessionCwd(session, project) : undefined
+  const key = rootKey(root)
   const maxTreeWidth = Math.max(140, Math.min(360, panelWidth - 140))
   const fittedTreeWidth = clamp(treeWidth, 140, maxTreeWidth)
-  const previousRoot = useRef(root)
+  const previousRoot = useRef(key)
 
   useEffect(() => {
-    if (previousRoot.current === root) return
-    previousRoot.current = root
+    if (previousRoot.current === key) return
+    previousRoot.current = key
     setExpanded([])
     setSelected(requestedFile)
     setFocusedTreeEntry(null)
-  }, [requestedFile, root])
+  }, [key, requestedFile])
 
   useEffect(() => {
     if (!requestedFile || requestedFile === selected) return
     setSelected(requestedFile)
     setExpanded((current) => {
       const next = new Set(current)
-      for (const path of absoluteParentPaths(root, requestedFile)) next.add(path)
+      for (const path of parentPaths(requestedFile)) next.add(path)
       return [...next]
     })
-  }, [requestedFile, root, selected])
+  }, [requestedFile, selected])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -630,30 +639,33 @@ function FilesPanel({
   }, [treeWidth])
 
   const tree = useQuery({
-    queryKey: daemonKeys.workspaceTree(config?.address ?? 'disconnected', root ?? 'none', expanded),
-    queryFn: () => listWorkspaceTree(requireClient(client), root!, expanded),
-    enabled: phase === 'connected' && Boolean(client && config && root),
+    queryKey: daemonKeys.workspaceTree(config?.address ?? 'disconnected', key, expanded),
+    queryFn: () => listWorkspaceTree(requireConnection(connection), root, expanded),
+    enabled: phase === 'connected' && Boolean(connection && config),
     placeholderData: keepPreviousData,
   })
-  const file = useQuery({
-    queryKey: daemonKeys.workspaceFile(config?.address ?? 'disconnected', root ?? 'none', selected ?? 'none'),
-    queryFn: () => readWorkspaceTextFile(requireClient(client), root!, selected!),
-    enabled: phase === 'connected' && Boolean(client && config && root && selected),
+  const file = useQuery<TextFile>({
+    queryKey: daemonKeys.workspaceFile(config?.address ?? 'disconnected', key, selected ?? 'none'),
+    queryFn: () => readWorkspaceTextFile(requireConnection(connection), root, selected!),
+    enabled: phase === 'connected' && Boolean(connection && config && selected),
   })
+  const diskText = file.data?.text
   const refetchFile = file.refetch
 
   useEffect(() => {
     if (!selected || file.data === undefined) return
+    const disk = file.data
     setBuffers((current) => {
       const buffer = current[selected]
       if (buffer && buffer.content !== buffer.diskContent) return current
-      if (buffer?.diskContent === file.data) return current
+      if (buffer?.diskContent === disk.text && buffer.diskRevision === disk.revision) return current
       return {
         ...current,
         [selected]: {
-          content: file.data,
-          diskContent: file.data,
-          revision: (buffer?.revision ?? -1) + 1,
+          content: disk.text,
+          diskContent: disk.text,
+          diskRevision: disk.revision,
+          revision: buffer?.diskContent === disk.text ? buffer.revision : (buffer?.revision ?? -1) + 1,
           saving: false,
           editor: buffer?.editor,
         },
@@ -668,7 +680,7 @@ function FilesPanel({
   }, [dirty, onDirtyChange, tabId])
 
   const saveSelected = useCallback(async () => {
-    if (!selected || !root || !client || !config) return
+    if (!selected || !connection || !config) return
     const buffer = buffersRef.current[selected]
     if (!buffer || buffer.saving || buffer.content === buffer.diskContent) return
     const path = selected
@@ -677,10 +689,10 @@ function FilesPanel({
       ? { ...current, [path]: { ...current[path], saving: true } }
       : current)
     try {
-      await writeWorkspaceTextFile(client, root, path, snapshot)
-      queryClient.setQueryData(
-        daemonKeys.workspaceFile(config.address, root, path),
-        snapshot,
+      const revision = await writeWorkspaceTextFile(connection, root, path, snapshot, buffer.diskRevision)
+      queryClient.setQueryData<TextFile>(
+        daemonKeys.workspaceFile(config.address, key, path),
+        { text: snapshot, revision },
       )
       setBuffers((current) => current[path]
         ? {
@@ -688,20 +700,25 @@ function FilesPanel({
             [path]: {
               ...current[path],
               diskContent: snapshot,
+              diskRevision: revision,
               saving: false,
             },
           }
         : current)
       void queryClient.invalidateQueries({
-        queryKey: ['daemon', config.address, 'workspace-diff', root],
+        queryKey: ['daemon', config.address, 'workspace-diff', key],
       })
     } catch (error) {
       setBuffers((current) => current[path]
         ? { ...current, [path]: { ...current[path], saving: false } }
         : current)
-      toast.error(t('files.could_not_save', { path, error: errorMessage(error) }))
+      const conflict = error instanceof CallError && error.error.code === 'conflict'
+      toast.error(t('files.could_not_save', {
+        path,
+        error: conflict ? t('files.changed_on_disk') : errorMessage(error),
+      }))
     }
-  }, [client, config, queryClient, root, selected])
+  }, [config, connection, key, queryClient, root, selected])
 
   useEffect(() => {
     if (!active) return
@@ -715,34 +732,34 @@ function FilesPanel({
     return () => window.removeEventListener('keydown', save, true)
   }, [active, saveSelected])
 
-  const activateTreeEntry = useCallback((entry: WorkingTreeEntry) => {
+  const activateTreeEntry = useCallback((entry: T.TreeEntry) => {
     if (entry.isDir) {
-      setExpanded((current) => current.includes(entry.absolutePath)
-        ? current.filter((path) => path !== entry.absolutePath)
-        : [...current, entry.absolutePath])
+      setExpanded((current) => current.includes(entry.path)
+        ? current.filter((path) => path !== entry.path)
+        : [...current, entry.path])
     } else {
-      onOpenFile(tabId, entry.relativePath, treeWidthRef.current)
+      onOpenFile(tabId, entry.path, treeWidthRef.current)
     }
   }, [onOpenFile, tabId])
 
   const workingTreeEntries = tree.data ?? []
   const selectedTreeEntry = selected
-    ? workingTreeEntries.find((entry) => entry.relativePath === selected)
+    ? workingTreeEntries.find((entry) => entry.path === selected)
     : undefined
-  const treeTabStop = focusedTreeEntry && workingTreeEntries.some((entry) => entry.absolutePath === focusedTreeEntry)
+  const treeTabStop = focusedTreeEntry && workingTreeEntries.some((entry) => entry.path === focusedTreeEntry)
     ? focusedTreeEntry
-    : selectedTreeEntry?.absolutePath ?? workingTreeEntries[0]?.absolutePath
+    : selectedTreeEntry?.path ?? workingTreeEntries[0]?.path
 
   const focusWorkingTreeIndex = useCallback((index: number) => {
     const entry = workingTreeEntries[index]
     if (!entry) return
-    setFocusedTreeEntry(entry.absolutePath)
-    focusVirtualTreeRow(treeList, index, workingTreeRowId(entry.absolutePath))
+    setFocusedTreeEntry(entry.path)
+    focusVirtualTreeRow(treeList, index, workingTreeRowId(entry.path))
   }, [workingTreeEntries])
 
   const handleWorkingTreeKeyDown = useCallback((
     event: ReactKeyboardEvent<HTMLButtonElement>,
-    entry: WorkingTreeEntry,
+    entry: T.TreeEntry,
     index: number,
   ) => {
     if (!isTreeNavigationKey(event.key)) return
@@ -751,13 +768,13 @@ function FilesPanel({
       workingTreeEntries.map((candidate) => ({
         depth: candidate.depth,
         directory: candidate.isDir,
-        expanded: candidate.isDir && expanded.includes(candidate.absolutePath),
+        expanded: candidate.isDir && expanded.includes(candidate.path),
       })),
       index,
       event.key,
     )
     if (action.toggle) {
-      setFocusedTreeEntry(entry.absolutePath)
+      setFocusedTreeEntry(entry.path)
       activateTreeEntry(entry)
     } else {
       focusWorkingTreeIndex(action.index)
@@ -770,7 +787,7 @@ function FilesPanel({
       const buffer = current[selected]
       const fallback = file.data === undefined
         ? undefined
-        : { content: file.data, diskContent: file.data, revision: 0, saving: false }
+        : { content: file.data.text, diskContent: file.data.text, diskRevision: file.data.revision, revision: 0, saving: false }
       const next = buffer ?? fallback
       if (!next || next.content === content) return current
       return { ...current, [selected]: { ...next, content } }
@@ -783,7 +800,7 @@ function FilesPanel({
       const buffer = current[selected]
       const fallback = file.data === undefined
         ? undefined
-        : { content: file.data, diskContent: file.data, revision: 0, saving: false }
+        : { content: file.data.text, diskContent: file.data.text, diskRevision: file.data.revision, revision: 0, saving: false }
       const next = buffer ?? fallback
       if (!next || next.editor === editor) return current
       return { ...current, [selected]: { ...next, editor } }
@@ -795,8 +812,6 @@ function FilesPanel({
     const buffer = buffersRef.current[selected]
     if (!buffer || buffer.content === buffer.diskContent) void refetchFile()
   }, [refetchFile, selected])
-
-  if (!root) return <PanelMessage title={t('files.no_project_open')} detail={t('files.no_project_open_description')} />
 
   const fileTree = (
     <div
@@ -816,7 +831,7 @@ function FilesPanel({
       <div className="flex h-[42px] shrink-0 items-center gap-2 border-b px-4 text-[11.5px] font-medium text-[var(--text-secondary)]">
         <WakuIcon className="size-[13px] text-[var(--text-tertiary)]" name="folder" />
         <span className="min-w-0 flex-1 truncate">
-          {project ? projectDisplayName(project, t('project.no_project_name')) : ''}
+          {cwd ? cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? cwd : ''}
         </span>
       </div>
       <div className="relative min-h-0 flex-1">
@@ -828,19 +843,19 @@ function FilesPanel({
           <Virtuoso
             aria-label={t('files.workspace_files')}
             className="size-full py-1"
-            computeItemKey={(_, entry) => entry.absolutePath}
+            computeItemKey={(_, entry) => entry.path}
             data={tree.data ?? []}
             fixedItemHeight={30}
             increaseViewportBy={180}
             itemContent={(index, entry) => (
               <TreeRow
                 entry={entry}
-                expanded={entry.isDir && expanded.includes(entry.absolutePath)}
-                id={workingTreeRowId(entry.absolutePath)}
-                selected={selected === entry.relativePath}
-                tabIndex={treeTabStop === entry.absolutePath ? 0 : -1}
+                expanded={entry.isDir && expanded.includes(entry.path)}
+                id={workingTreeRowId(entry.path)}
+                selected={selected === entry.path}
+                tabIndex={treeTabStop === entry.path ? 0 : -1}
                 onActivate={activateTreeEntry}
-                onFocus={() => setFocusedTreeEntry(entry.absolutePath)}
+                onFocus={() => setFocusedTreeEntry(entry.path)}
                 onKeyDown={(event) => handleWorkingTreeKeyDown(event, entry, index)}
               />
             )}
@@ -853,11 +868,11 @@ function FilesPanel({
   )
 
   if (!selected) return fileTree
-  const buffer = buffers[selected] ?? (file.data === undefined
+  const buffer = buffers[selected] ?? (diskText === undefined
     ? undefined
     : {
-        content: file.data,
-        diskContent: file.data,
+        content: diskText,
+        diskContent: diskText,
         revision: 0,
         saving: false,
       })
@@ -893,12 +908,12 @@ function FilesPanel({
 }
 
 interface TreeRowProps {
-  entry: WorkingTreeEntry
+  entry: T.TreeEntry
   expanded: boolean
   id: string
   selected: boolean
   tabIndex: number
-  onActivate: (entry: WorkingTreeEntry) => void
+  onActivate: (entry: T.TreeEntry) => void
   onFocus: () => void
   onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void
 }
@@ -944,20 +959,21 @@ function TreeRow({
 }
 
 function ChangesPanel({
-  session,
-  project,
-  diffSource,
+  root,
+  diffSource: requestedSource,
   panelWidth,
+  runs,
   onDiffSourceChange,
 }: {
-  session: AgentSession | null
-  project?: Project
-  diffSource: ReviewDiffSource
+  root: T.RootRef
+  diffSource: DiffSource
   panelWidth: number
-  onDiffSourceChange: (source: ReviewDiffSource) => void
+  /** The task's runs, whose turns it can review; absent for a new task. */
+  runs?: Task['runs']
+  onDiffSourceChange: (source: DiffSource) => void
 }) {
   const { t } = useI18n()
-  const { client, config, phase } = useDaemon()
+  const { connection, config, phase } = useDaemon()
   const diffView = useRef<CodeDiffSurfaceHandle>(null)
   const diffTreeList = useRef<VirtuosoHandle>(null)
   const [files, setFiles] = useState<DiffSurfaceFile[]>([])
@@ -967,15 +983,20 @@ function ChangesPanel({
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
   const [filter, setFilter] = useState('')
   const [treeWidth, setTreeWidth] = useState(() => readStoredWidth('waku.diffTreeWidth', 184, 140, 360))
-  const root = session && project ? sessionCwd(session, project) : undefined
+  const key = rootKey(root)
   const maxTreeWidth = Math.max(140, Math.min(360, panelWidth - 140))
   const fittedTreeWidth = clamp(treeWidth, 140, maxTreeWidth)
-  const latestTurnSource = latestReviewTurnSource(session)
-  const sourceLabel = reviewDiffSourceLabel(diffSource, latestTurnSource, t)
+  const turns = runs ? reviewTurns(runs) : undefined
+  // Turns belong to a task; a new task reviews its working tree.
+  const diffSource: DiffSource = turns || typeof requestedSource === 'string' ? requestedSource : 'uncommitted'
+  const sourceKey = diffSourceKey(diffSource)
+  const sourceLabel = reviewDiffSourceLabel(diffSource, t, turns)
+  // The whole thread's diff grows with every completed turn.
+  const latestTurn = typeof diffSource !== 'string' && diffSource.type === 'thread' ? turns?.at(-1)?.runId : undefined
   const diff = useQuery({
-    queryKey: [...daemonKeys.workspaceDiff(config?.address ?? 'disconnected', root ?? 'none', diffSource), ignoreWhitespace],
-    queryFn: () => collectWorkspaceDiff(requireClient(client), root!, diffSource, ignoreWhitespace),
-    enabled: phase === 'connected' && Boolean(client && config && root),
+    queryKey: [...daemonKeys.workspaceDiff(config?.address ?? 'disconnected', key, diffSource), ignoreWhitespace, latestTurn],
+    queryFn: () => collectWorkspaceDiff(requireConnection(connection), root, diffSource, ignoreWhitespace),
+    enabled: phase === 'connected' && Boolean(connection && config),
   })
   const reviewFiles = mergeReviewDiffFiles(files, diff.data?.numstat ?? '') as DiffSurfaceFile[]
 
@@ -992,7 +1013,7 @@ function ChangesPanel({
     setSelectedFile(null)
     setExpandedPaths(new Set())
     setFilter('')
-  }, [diffSource])
+  }, [sourceKey])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -1050,51 +1071,18 @@ function ChangesPanel({
     }
   }, [focusDiffTreeIndex, toggleDiffDirectory, treeRows])
 
-  if (!root) return <PanelMessage title={t('files.no_project_open')} detail={t('files.no_project_open_description')} />
   const stats = parseNumstat(diff.data?.numstat ?? '')
-  const selectSource = (source: ReviewDiffSource) => {
-    if (!sameReviewDiffSource(diffSource, source)) onDiffSourceChange(source)
-  }
   const sourceItems = [
-    {
-      id: 'last-turn',
-      label: t('diff.source_last_turn'),
-      disabled: !latestTurnSource,
-      selected: Boolean(latestTurnSource && sameReviewDiffSource(diffSource, latestTurnSource)),
-      onSelect: () => latestTurnSource && selectSource(latestTurnSource),
-    },
-    {
-      id: 'uncommitted',
-      label: t('diff.source_uncommitted'),
-      separatorBefore: true,
-      selected: diffSource === 'uncommitted',
-      onSelect: () => selectSource('uncommitted'),
-    },
-    {
-      id: 'unstaged',
-      label: t('diff.source_unstaged'),
-      selected: diffSource === 'unstaged',
-      onSelect: () => selectSource('unstaged'),
-    },
-    {
-      id: 'staged',
-      label: t('diff.source_staged'),
-      selected: diffSource === 'staged',
-      onSelect: () => selectSource('staged'),
-    },
-    {
-      id: 'committed',
-      label: t('diff.source_committed'),
-      separatorBefore: true,
-      selected: diffSource === 'committed',
-      onSelect: () => selectSource('committed'),
-    },
-    {
-      id: 'branch',
-      label: t('diff.source_branch'),
-      selected: diffSource === 'branch',
-      onSelect: () => selectSource('branch'),
-    },
+    ...diffSourceChoices(diffSource, turns, t).map((choice) => ({
+      id: choice.id,
+      label: choice.label,
+      selected: choice.selected,
+      disabled: choice.disabled,
+      separatorBefore: choice.separatorBefore,
+      onSelect: () => {
+        if (choice.source && !choice.selected) onDiffSourceChange(choice.source)
+      },
+    })),
     {
       id: 'ignore-whitespace',
       label: t('diff.ignore_whitespace'),
@@ -1214,7 +1202,7 @@ function ChangesPanel({
         <ControlMenu
           items={sourceItems}
           label={sourceLabel}
-          menuClassName="w-44"
+          menuClassName="max-h-[min(440px,70vh)] w-44 overflow-y-auto"
           placement="below"
           triggerClassName="h-7 max-w-44 bg-background px-2"
         />
@@ -1313,69 +1301,114 @@ function fileName(path: string): string {
 }
 
 function BackgroundWorkPanel({
-  session,
-  workKey,
+  active,
+  task,
+  workId,
   onTitle,
 }: {
-  session: AgentSession | null
-  workKey: BackgroundWorkKey
+  /** The tab is shown: only then does a process's output stream. */
+  active: boolean
+  task?: Task
+  workId: string
   onTitle: (title: string) => void
 }) {
   const { t } = useI18n()
-  const { backgroundWork, stopBackgroundWork } = useRuntime()
+  const { stopBackgroundWork, refreshBackgroundWork } = useTaskActions()
   const reportedTitle = useRef<string | null>(null)
-  const item = session
-    ? backgroundWork[session.id]?.find((candidate) => sameBackgroundWorkKey(candidate.key, workKey))
-    : undefined
+  const [stopRequested, setStopRequested] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const current = task?.backgroundWork.find((candidate) => candidate.id === workId)
+  // A process leaves the provider's pending list once it ends; keep showing
+  // it, and its stored output, instead of a blank panel.
+  const lastSeen = useRef<BackgroundWorkItem | undefined>(undefined)
+  if (current) lastSeen.current = current
+  const ended = !current && lastSeen.current?.kind !== 'subagent' ? lastSeen.current : undefined
+  const item: BackgroundWorkItem | undefined = current ?? (ended
+    ? { ...ended, status: stopRequested ? 'stopped' : 'completed', canStop: false }
+    : undefined)
+  const streamsOutput = item !== undefined && item.kind !== 'subagent' && item.itemId !== undefined
+  const commandOutput = useCommandOutput(task?.id, item?.itemId, active && streamsOutput)
 
   useEffect(() => {
     if (!item?.title) return
-    const reportKey = `${item.key.kind}:${item.key.providerId}:${item.title}`
+    const reportKey = `${item.id}:${item.title}`
     if (reportedTitle.current === reportKey) return
     reportedTitle.current = reportKey
     onTitle(item.title)
-  }, [item?.title, onTitle])
+  }, [item?.id, item?.title, onTitle])
 
-  if (!session || !item) {
+  if (!task || !item) {
     return (
       <div className="grid min-h-0 flex-1 place-items-center p-6 text-center">
         <div>
-          <WakuIcon className="mx-auto size-[22px] text-[var(--text-ghost)]" name={backgroundWorkKindIcon(workKey.kind)} />
+          <WakuIcon className="mx-auto size-[22px] text-[var(--text-ghost)]" name={backgroundWorkKindIcon(undefined)} />
           <p className="mt-2 text-[12px] text-[var(--text-secondary)]">{t('background.unavailable')}</p>
         </div>
       </div>
     )
   }
 
-  const stoppable = isStoppableBackgroundStatus(item.status) && item.canStop && item.controlId
+  const stoppable = isStoppableBackgroundStatus(item.status)
+    && item.canStop
+    && (item.kind !== 'subagent' || item.runId !== undefined)
+  const stop = () => {
+    setStopRequested(true)
+    void stopBackgroundWork(task.id, item).catch((error) => {
+      setStopRequested(false)
+      toast.error(errorMessage(error))
+    })
+  }
+  const refresh = () => {
+    setRefreshing(true)
+    void refreshBackgroundWork(task.id)
+      .catch((error) => toast.error(errorMessage(error)))
+      .finally(() => setRefreshing(false))
+  }
   const metadata = [
-    [t(item.key.kind === 'subagent' ? 'background.prompt' : 'background.command'), item.command],
-    [t('background.cwd'), item.cwd],
-    [t('background.role'), item.role],
     [t('background.model'), item.model],
-    [t('background.latest_update'), item.detail],
-    [t('background.exit_code'), item.exitCode == null ? null : String(item.exitCode)],
+    [t('background.latest_update'), item.kind === 'subagent' ? undefined : item.detail],
+    [t('background.exit_code'), commandOutput?.exitCode === undefined ? undefined : String(commandOutput.exitCode)],
   ].filter((entry): entry is [string, string] => Boolean(entry[1]))
+  const output = item.kind === 'subagent'
+    ? [item.detail, item.output].filter(Boolean).join('\n\n')
+    : commandOutput?.text || item.output
   return (
     <div className="min-h-0 flex-1 overflow-auto p-3">
       <div className="overflow-hidden rounded-[9px] border bg-card">
         <div className="flex min-h-[54px] items-center gap-2.5 px-[11px] py-2">
-          <WakuIcon className="size-[15px] text-[var(--text-secondary)]" name={backgroundWorkKindIcon(item.key.kind)} />
+          <WakuIcon className="size-[15px] text-[var(--text-secondary)]" name={backgroundWorkKindIcon(item.kind)} />
           <div className="min-w-0 flex-1">
             <div className="truncate text-[12px] font-medium">{item.title}</div>
             <div className="mt-1 flex items-center gap-1.5 text-[10px] text-[var(--text-tertiary)]">
               <BackgroundStatusIcon status={item.status} />
-              <span>{backgroundStatusLabel(item.status, t)}</span>
-              <span>·</span>
-              <span>{backgroundElapsed(item, t)}</span>
+              <span>{backgroundStatusLabel(stopRequested && stoppable ? 'stopping' : item.status, t)}</span>
+              {item.startedAt !== undefined && (
+                <>
+                  <span>·</span>
+                  <span>{backgroundElapsed(item, t)}</span>
+                </>
+              )}
             </div>
           </div>
+          {item.kind !== 'subagent' && (
+            <Button
+              aria-label={t('common.refresh')}
+              disabled={refreshing}
+              size="icon-sm"
+              title={t('common.refresh')}
+              variant="ghost"
+              onClick={refresh}
+            >
+              <WakuIcon className={cn('size-3.5', refreshing && 'motion-safe:animate-spin')} name="rotateCw" />
+            </Button>
+          )}
           {stoppable && (
             <Button
               className="h-[26px] gap-1.5 px-[9px] text-[10.5px] hover:bg-destructive/10"
+              disabled={stopRequested}
               size="sm"
               variant="outline"
-              onClick={() => void stopBackgroundWork(session.id, item).catch(() => {})}
+              onClick={stop}
             >
               <WakuIcon className="size-[11px] text-destructive" name="stopFilled" />
               {t('background.stop')}
@@ -1391,10 +1424,10 @@ function BackgroundWorkPanel({
         <div className="border-t p-2.5">
           <div className="mb-[5px] flex items-center justify-between text-[9.5px] text-[var(--text-tertiary)]">
             <span>{t('background.output')}</span>
-            {item.outputTruncated && <span>{t('background.output_truncated')}</span>}
+            {commandOutput?.truncated && <span>{t('background.output_truncated')}</span>}
           </div>
-          <pre className="max-h-80 overflow-auto rounded-md bg-[var(--inset)] p-2 font-mono text-[10.5px] leading-[15px] text-[var(--text-secondary)]">
-            {stripAnsi(item.output || t('background.no_output'))}
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--inset)] p-2 font-mono text-[10.5px] leading-[15px] text-[var(--text-secondary)]">
+            {stripAnsi(output || t('background.no_output'))}
           </pre>
         </div>
       </div>
@@ -1407,18 +1440,16 @@ function BackgroundStatusIcon({ status }: { status: BackgroundWorkStatus }) {
     ? 'check'
     : status === 'failed'
       ? 'x'
-      : status === 'lost'
-        ? 'alert'
-        : status === 'stopping' || status === 'stopped'
-          ? 'stop'
-          : 'loaderCircle'
+      : status === 'stopped'
+        ? 'stop'
+        : 'loaderCircle'
   return (
     <WakuIcon
       className={cn(
         'size-[9px]',
         isStoppableBackgroundStatus(status) && 'motion-safe:animate-spin text-ring',
         status === 'completed' && 'text-[var(--success)]',
-        (status === 'failed' || status === 'lost') && 'text-destructive',
+        status === 'failed' && 'text-destructive',
       )}
       name={icon}
     />
@@ -1426,26 +1457,34 @@ function BackgroundStatusIcon({ status }: { status: BackgroundWorkStatus }) {
 }
 
 function TerminalPanel({
-  terminalId,
-  session,
-  project,
+  root,
+  title,
   onTitle,
 }: {
-  terminalId: string
-  session: AgentSession | null
-  project?: Project
+  root: T.RootRef
+  /** Shown as the shell's title until it sets its own. */
+  title?: string
   onTitle: (title: string) => void
 }) {
   const { t } = useI18n()
-  const { client, phase } = useDaemon()
+  const { connection } = useDaemon()
   const { ref, write, focus } = useTerminal()
   const [core, setCore] = useState<GhosttyCore | null>(null)
   const ready = useRef(false)
-  const queuedOutput = useRef<Uint8Array[]>([])
+  const queuedOutput = useRef<Array<string | Uint8Array>>([])
   const titleScanner = useRef(new TerminalTitleScanner())
+  const terminal = useRef<{ id: string; handle: StreamHandle<'terminal'> } | null>(null)
+  const size = useRef({ cols: 80, rows: 24 })
   const [error, setError] = useState<string | null>(null)
   const [exited, setExited] = useState(false)
-  const cwd = session && project ? sessionCwd(session, project) : undefined
+  const rootRef = useRef(root)
+  const titleRef = useRef(title)
+  const onTitleRef = useRef(onTitle)
+  onTitleRef.current = onTitle
+  const tRef = useRef(t)
+  tRef.current = t
+  const writeRef = useRef(write)
+  writeRef.current = write
 
   useEffect(() => {
     let disposed = false
@@ -1462,30 +1501,56 @@ function TerminalPanel({
   }, [])
 
   useEffect(() => {
-    if (!client || phase !== 'connected' || !cwd) return
+    if (!connection) return
     let disposed = false
-    titleScanner.current = new TerminalTitleScanner()
-    const unsubscribe = client.subscribe(terminalId, terminalId, (event) => {
-      if (event.event.kind === 'terminalOutput') {
-        const payload = event.event.payload as { data?: string }
-        if (!payload.data) return
-        const bytes = decodeBase64(payload.data)
-        const title = titleScanner.current.feed(bytes)
-        if (title) onTitle(title)
-        if (ready.current) write(bytes)
-        else queuedOutput.current.push(bytes)
-      } else if (event.event.kind === 'terminalExited') {
-        setExited(true)
-      } else if (event.event.kind === 'terminalError') {
-        setError(typeof event.event.payload === 'string' ? event.event.payload : t('terminal.transport_failed'))
+    const output = (data: string | Uint8Array) => {
+      if (ready.current) writeRef.current(data)
+      else queuedOutput.current.push(data)
+    }
+    // The tab opens one shell and keeps it across reconnects: the stream
+    // resumes from its offset, or replays the retained tail after a reset.
+    void connection.call('terminal.open', {
+      root: rootRef.current,
+      cols: size.current.cols,
+      rows: size.current.rows,
+      ...(titleRef.current ? { title: titleRef.current } : {}),
+    }).then((opened) => {
+      if (disposed) {
+        void connection.call('terminal.close', { terminalId: opened.terminalId }).catch(() => {})
+        return
       }
-    })
-
-    void client.request(
-      { type: 'openTerminal', cwd, cols: 80, rows: 24 },
-      terminalId,
-      terminalId,
-    ).catch((cause) => {
+      titleScanner.current = new TerminalTitleScanner()
+      const handle = connection.subscribe('terminal', { terminalId: opened.terminalId, interactive: true }, {
+        item: (item) => {
+          if ((item.type === 'attached' || item.type === 'reset') && item.replay > 0) {
+            // The retained tail follows; draw it on a clean screen.
+            queuedOutput.current = []
+            output('\x1bc')
+          }
+          if (item.type === 'attached') {
+            setExited(item.exited)
+            if (item.title) onTitleRef.current(item.title)
+          } else if (item.type === 'exited') {
+            setExited(true)
+          } else if (item.type === 'error') {
+            setError(item.message || tRef.current('terminal.transport_failed'))
+          }
+        },
+        data: (bytes) => {
+          const copy = bytes.slice()
+          const scanned = titleScanner.current.feed(copy)
+          if (scanned) onTitleRef.current(scanned)
+          output(copy)
+        },
+        end: (end) => {
+          if (end.reason.type === 'error') setError(end.reason.error.message)
+          else if (end.reason.type !== 'unsubscribed' && end.reason.type !== 'completed') {
+            setError(tRef.current('terminal.transport_failed'))
+          }
+        },
+      })
+      terminal.current = { id: opened.terminalId, handle }
+    }).catch((cause) => {
       if (!disposed) setError(errorMessage(cause))
     })
 
@@ -1493,12 +1558,15 @@ function TerminalPanel({
       disposed = true
       ready.current = false
       queuedOutput.current = []
-      unsubscribe()
-      void client.notify({ type: 'closeTerminal' }, terminalId, terminalId).catch(() => {})
+      const current = terminal.current
+      terminal.current = null
+      if (current) {
+        current.handle.unsubscribe()
+        void connection.call('terminal.close', { terminalId: current.id }).catch(() => {})
+      }
     }
-  }, [client, cwd, phase, terminalId, write])
+  }, [connection])
 
-  if (!cwd) return <PanelMessage title={t('files.no_project_open')} detail={t('terminal.no_workspace_description')} />
   return (
     <div className="relative flex min-h-0 flex-1 bg-background">
       {core && (
@@ -1509,27 +1577,27 @@ function TerminalPanel({
           cursorBlink
           ref={ref}
           onData={(data) => {
-            if (!client || phase !== 'connected' || exited) return
-            void client.notify(
-              { type: 'writeTerminal', data: encodeBase64(new TextEncoder().encode(data)) },
-              terminalId,
-              terminalId,
-            ).catch((cause) => setError(errorMessage(cause)))
+            if (exited) return
+            // While reconnecting there is no channel; keystrokes are dropped
+            // rather than queued, as a terminal would over a dead link.
+            terminal.current?.handle.sendData(new TextEncoder().encode(data))
           }}
           onError={(cause) => setError(errorMessage(cause))}
           onReady={() => {
             ready.current = true
-            for (const bytes of queuedOutput.current) write(bytes)
+            for (const chunk of queuedOutput.current) write(chunk)
             queuedOutput.current = []
             focus()
           }}
           onResize={(cols, rows) => {
-            if (!client || phase !== 'connected') return
-            void client.notify(
-              { type: 'resizeTerminal', cols: clampU16(cols), rows: clampU16(rows) },
-              terminalId,
-              terminalId,
-            ).catch(() => {})
+            size.current = { cols: clampU16(cols), rows: clampU16(rows) }
+            const current = terminal.current
+            if (!connection || !current) return
+            void connection.call('terminal.resize', {
+              terminalId: current.id,
+              cols: size.current.cols,
+              rows: size.current.rows,
+            }).catch(() => {})
           }}
         />
       )}
@@ -1586,21 +1654,6 @@ function parseNumstat(numstat: string) {
     deletions += Number.parseInt(removed || '0', 10) || 0
   }
   return { files, additions, deletions }
-}
-
-function encodeBase64(bytes: Uint8Array): string {
-  let binary = ''
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
-  }
-  return btoa(binary)
-}
-
-function decodeBase64(value: string): Uint8Array {
-  const binary = atob(value)
-  const bytes = new Uint8Array(binary.length)
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
-  return bytes
 }
 
 function clampU16(value: number): number {
@@ -1662,15 +1715,13 @@ function readStoredWidth(key: string, fallback: number, min: number, max: number
   return Number.isFinite(value) ? clamp(value, min, max) : fallback
 }
 
-function absoluteParentPaths(root: string | undefined, relativePath: string) {
-  if (!root) return []
-  const separator = root.includes('\\') ? '\\' : '/'
-  const normalizedRoot = root.replace(/[\\/]+$/, '') || separator
+/** Every parent directory of a root-relative path, outermost first. */
+function parentPaths(relativePath: string) {
   const parts = relativePath.split(/[\\/]/).filter(Boolean)
   const paths: string[] = []
-  let current = normalizedRoot
+  let current = ''
   for (const part of parts.slice(0, -1)) {
-    current = current === separator ? `${current}${part}` : `${current}${separator}${part}`
+    current = current ? `${current}/${part}` : part
     paths.push(current)
   }
   return paths
@@ -1688,16 +1739,12 @@ function useViewportWidth(): number {
   return width
 }
 
-function sameBackgroundWorkKey(left: BackgroundWorkKey, right: BackgroundWorkKey) {
-  return left.kind === right.kind && left.providerId === right.providerId
-}
-
-function backgroundWorkKindIcon(kind?: BackgroundWorkKey['kind']): WakuIconName {
+function backgroundWorkKindIcon(kind?: BackgroundWorkKind): WakuIconName {
   return kind === 'subagent' ? 'bot' : 'terminalSquare'
 }
 
 function backgroundWorkKindLabel(
-  kind: BackgroundWorkKey['kind'] | undefined,
+  kind: BackgroundWorkKind | undefined,
   t: Translator,
 ) {
   return t(kind === 'subagent'
@@ -1708,25 +1755,21 @@ function backgroundWorkKindLabel(
 }
 
 function isStoppableBackgroundStatus(status: BackgroundWorkStatus) {
-  return status === 'starting' || status === 'running' || status === 'monitoring'
+  return status === 'pending' || status === 'running'
 }
 
-function backgroundStatusLabel(status: BackgroundWorkStatus, t: Translator) {
-  return t(`background.status.${status}`)
+function backgroundStatusLabel(status: BackgroundWorkStatus | 'stopping', t: Translator) {
+  return t(`background.status.${status === 'pending' ? 'starting' : status}`)
 }
 
 function backgroundElapsed(item: BackgroundWorkItem, t: Translator) {
-  const duration = item.durationMs ?? Math.max(0, Date.now() - item.startedAtMs)
-  return formatWorkingElapsed(Math.floor(duration / 1_000), t)
+  const started = item.startedAt ?? Date.now()
+  const end = isStoppableBackgroundStatus(item.status) ? Date.now() : item.updatedAt ?? Date.now()
+  return formatWorkingElapsed(Math.floor(Math.max(0, end - started) / 1_000), t)
 }
 
 function stripAnsi(value: string) {
   return value.replace(new RegExp('\\u001b\\[[0-?]*[ -/]*[@-~]', 'g'), '')
-}
-
-function requireClient<T>(client: T | null): T {
-  if (!client) throw new Error('Waku daemon is disconnected')
-  return client
 }
 
 function errorMessage(error: unknown) {

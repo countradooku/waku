@@ -1,0 +1,1 @@
+{"type":"call","id":34,"method":"vcs.stage","params":{"root":{"type":"project","projectId":"9a0ec700-0000-4000-8000-000000000003"},"paths":["src/main.rs"],"stage":true,"opId":"0b1d0000-0000-4000-8000-000000000010"}}

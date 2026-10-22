@@ -34,18 +34,27 @@ notify targeted at one pane (the pulse clock leases `window.current_view()`)
 rebuilds only that island and replays the rest.
 
 Producers that know what they changed notify islands directly instead of the
-root ([src/app/dirty.rs](../src/app/dirty.rs)). The event pump builds a
-`DirtySet { root, sidebar, transcript, right_panel }` per drain:
+root ([src/app/dirty.rs](../src/app/dirty.rs)). Since #55 the transcript and
+the sidebar come from the projection store (`waku_client::store`), which folds
+the daemon's `thread` and `shell` streams and builds render views on its own
+thread. Each published thread view carries a `ThreadChange`, and the event
+pump turns the updates of one drain into a
+`DirtySet { root, sidebar, transcript, right_panel }`
+(`threads::thread_update_dirty`, [src/app/threads.rs](../src/app/threads.rs)):
 
-- text and reasoning deltas of the selected session dirty the transcript;
-- tool activity and background work also dirty the right panel;
-- a background session's deltas dirty nothing;
-- the sidebar is dirty only when a drained session's sidebar fingerprint
-  (`sidebar_session_fingerprint`: status, title, recency, branch, last turn)
-  moved;
-- everything else (turn boundaries, permissions, errors, usage, session
-  added or removed, the other result queues) is `DirtySet::ALL`, a plain root
-  notify.
+- live text (a `delta`, or a streaming item's snapshot) of the selected
+  thread dirties the transcript;
+- tool activity also dirties the right panel;
+- a thread that is not selected dirties nothing: its sidebar row moves
+  through the shell, which the store publishes only when a row changed
+  (status, title, recency, counts — never streamed text);
+- run, request, queue and thread changes, snapshots and merged history are
+  `DirtySet::ALL`, a plain root notify, as are the other result queues.
+
+The store replaces an unconsumed view with the newer one, so the pump applies
+at most one view per thread per drain however fast the provider streams, and
+a streaming publish rebuilds only the changed row (unchanged rows are shared
+by `Arc`).
 
 `Waku::notify_dirty` notifies the named panes, or uses a plain root notify
 when all three are dirty. The root renders on every draw anyway, so root
@@ -83,16 +92,17 @@ its zero flex basis without a `size_full` flex wrapper.
 Everything during a stream happens at one of two rates, and every change to
 the pipeline must keep it that way:
 
-**Commits, ≤ ~8.3 Hz.** Provider chunks queue for a full
+**Commits, ≤ ~8.3 Hz.** Store publishes queue for a full
 `STREAM_FRAME_INTERVAL` (120 ms) and fold into one drain → one notify → one
 tail remeasure ([src/app.rs](../src/app.rs),
-[src/app/runtime.rs](../src/app/runtime.rs)).
-Two hard-won rules:
+[src/app/runtime.rs](../src/app/runtime.rs)); the store itself publishes a
+thread at most every 16 ms. Two hard-won rules:
 
 - The pump timer must **not** race the wake channel. It used to, which made
   the notify rate equal the provider's chunk rate.
-- Every *streaming* delta kind must set the flags that route the pump onto the
-  `StreamFrame` schedule. `ReasoningDelta` originally did not set
+- Every *streaming* change must route the pump onto the `StreamFrame`
+  schedule: today any update with `ThreadChange::text` of the selected
+  thread does (`Waku::drain_store`). Under the v7 driver events, `ReasoningDelta` did not set
   `markdown_changed`, so a reasoning-only drain reported `Idle`, the pump went
   back to sleeping on the wake channel, and every fast thinking chunk woke it
   for an immediate drain-and-notify — **40+ commits and full re-renders per
@@ -313,15 +323,15 @@ An idle app with its daemon must stay below 5 wakeups/s in total
 (`harness.py measure --pid <app>,<daemon>`), so nothing on either side may
 poll while nothing happens:
 
-- The daemon connection (`crates/waku-client/src/client.rs`) and the
+- The daemon connection (`crates/waku-client/src/v8.rs`) and the
   daemon's sockets are evented (#18); an idle connection costs one
   keepalive ping every few seconds.
 - The desktop's daemon supervisor (`monitor_daemon`,
   `crates/waku-client/src/process.rs`) sleeps on a channel (#178). It is
   woken by the managed child's exit (a thread blocked in
   `waitid(WNOWAIT)`, which leaves reaping to the owner of the `Child`), by
-  the connection closing (`DaemonClient::on_disconnect`, which also drives
-  the remote reconnect-with-resume), and by a failed `reconfigure`. Timers
+  the connection closing (`V8Client::on_disconnect`, which also drives
+  the remote reconnect), and by a failed `reconfigure`. Timers
   run only while the daemon is unreachable (restart and reconnect retry
   with a 100 ms to 2 s backoff) and in debug builds of the app, which pass
   `watch_for_rebuilds` and keep the 500 ms poll of the daemon binary that
@@ -331,18 +341,18 @@ poll while nothing happens:
 - A daemon terminal's output thread (`crates/waku-core/src/terminal.rs`)
   blocks on the PTY's readiness (`polling`: kqueue on macOS, epoll on Linux)
   instead of sleeping 4 ms between non-blocking reads (#178). Each wake reads
-  everything already buffered, up to 64 KiB, into one ephemeral
-  `TerminalOutput` event; closing the terminal wakes it through the poller.
+  everything already buffered, up to 64 KiB, into one live
+  `TerminalEvent::Output`; closing the terminal wakes it through the poller.
 
 ### Tracing spans and Tracy (`profiling` feature)
 
-The app, `waku-core` and `waku-daemon` carry `tracing` spans on the paths a
-streaming frame or a save reaches:
+The app carries `tracing` spans on the paths a streaming frame or a save
+reaches. The daemon's spans sat on the legacy protocol's paths and went with
+it (D6); `waku-daemon --features profiling` still installs the subscriber.
 
 | Process | Spans |
 | --- | --- |
 | App | `drain_event_pump`, `Waku::render`, `sidebar_pane`, `transcript_pane`, `right_panel_pane`, `ComposerInput::render`, `transcript_row`, `MarkdownView::set_text`, `IncrementalParser::set_text`, `md::flatten`, `Waku::save` |
-| Daemon (`waku-core`) | `Hub::emit`, `dispatch`, `handle_request`, `save_task_state`, `StateStore::save` |
 
 Spans are written with the crate-local `profile_span!` macro. Without the
 `profiling` feature it expands to nothing, so default and release builds carry
@@ -426,9 +436,9 @@ rounds of release-profile Criterion benches, plus daemon replays through
   feature, off by default until its RSS has been measured in the GUI
   harness's memory scenarios; with `perf-counters` the counting allocator
   forwards to it.
-- **ts-rs is behind `waku-protocol`'s `ts` feature**, which only
-  `export_types` needs (`bun run protocol:generate` / `protocol:check` pass
-  it). Without it `#[derive(TS)]` is a no-op stub (`crates/waku-ts-stub`).
+- **No ts-rs.** The TypeScript types come from the v8 JSON Schema through
+  `waku-codegen`; the schema derives sit behind `waku-protocol`'s `schema`
+  feature, which only the generator builds.
 - **PGO** is a script, not the default build: `scripts/bench/pgo.sh` builds
   instrumented binaries, trains them on the benches, headless timeline
   replays and `rpc-latency` (and on the GUI harness with `PGO_GUI=1`),

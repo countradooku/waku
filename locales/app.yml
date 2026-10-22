@@ -190,6 +190,8 @@ daemon.expose_description:
   en: Listen beyond this machine so another Waku client can connect. Changing this restarts only the daemon.
 daemon.status_local:
   en: Local only
+daemon.version:
+  en: "Daemon %{version}"
 daemon.status_exposed:
   en: Exposed
 daemon.status_restarting:
@@ -258,6 +260,18 @@ daemon.phase_connected:
   en: Connected
 daemon.phase_error:
   en: Error
+daemon.phase_reconnecting:
+  en: Reconnecting
+transcript.loading_earlier:
+  en: Loading earlier messages
+common.archive:
+  en: Archive
+goal.unsupported:
+  en: Goals are not supported by this daemon yet
+errors.archive_task:
+  en: "Could not archive the task: %{error}"
+files.changed_on_disk:
+  en: The file changed on disk. Reopen it to see the latest version.
 daemon.invalid_port:
   en: Enter a port from 1 to 65535
 daemon.invalid_settings:
@@ -1269,8 +1283,20 @@ terminal.starting:
 
 project.add_project:
   en: Add project
-errors.remote_project_picker:
-  en: Adding a daemon-host project needs a remote path picker, which is not available yet
+project.remote_picker_title:
+  en: Open a Folder on the Daemon Host
+project.remote_picker_open:
+  en: Open Folder
+project.remote_picker_up:
+  en: Up
+project.remote_picker_home:
+  en: Home
+project.remote_picker_loading:
+  en: Loading…
+project.remote_picker_empty:
+  en: No folders here
+project.remote_picker_hint:
+  en: Folders on the daemon host
 
 session.stopped:
   en: Stopped
@@ -1375,6 +1401,16 @@ errors.remove_task:
   en: "Could not remove the task: %{error}"
 errors.save_draft:
   en: "Could not save the draft: %{error}"
+errors.daemon_reconnecting:
+  en: Lost the connection to the Waku daemon; reconnecting…
+errors.send_message:
+  en: "Could not send the message: %{error}"
+errors.create_task:
+  en: "Could not create the task: %{error}"
+errors.daemon_command:
+  en: "The daemon refused %{command}: %{error}"
+errors.load_history:
+  en: "Could not load older messages: %{error}"
 errors.rewind_task:
   en: "Could not rewind the task: %{error}"
 errors.project_not_found:
@@ -1472,6 +1508,10 @@ session.message_unavailable:
   en: That message is no longer available
 session.select_before_rewind:
   en: Select the task before rewinding its conversation
+session.rewind_unavailable:
+  en: This message has no checkpoint to rewind to
+session.archive:
+  en: Archive
 session.stop_before_rewind:
   en: Stop the current turn before rewinding the conversation
 session.provider_cannot_rewind:
@@ -1613,6 +1653,8 @@ background.view:
   en: View
 background.stop:
   en: Stop
+background.refresh:
+  en: Refresh Background Work
 background.stop_named:
   en: Stop %{name}
 background.stop_all:
@@ -1782,6 +1824,8 @@ diff.source_last_turn:
   en: Last Turn
 diff.source_turn:
   en: Turn %{turn}
+diff.source_all_turns:
+  en: All Turns
 diff.source_uncommitted:
   en: Uncommitted
 diff.source_unstaged:
@@ -1839,6 +1883,10 @@ terminal.no_workspace_description:
   en: Select a task before opening a terminal.
 terminal.process_exited:
   en: Process exited
+terminal.clear:
+  en: Clear
+terminal.restart:
+  en: Restart Shell
 
 browser.back:
   en: Back (%{shortcut})
@@ -1889,6 +1937,8 @@ common.dismiss_notification:
 
 common.reveal_in_finder:
   en: Show in File Manager
+common.reveal_unavailable_remote:
+  en: Show in File Manager (not available for a remote daemon)
 
 attachments.close_preview:
   en: Close image preview
@@ -2215,3 +2265,158 @@ usage_error.unknown_error:
   en: unknown error
 usage_error.curl_no_status:
   en: curl returned no HTTP status line
+
+settings.storage:
+  en: "Storage"
+settings.storage_keywords:
+  en: "storage worktrees worktree cleanup delete remove disk space location folder branch merged inactive"
+storage.worktrees_title:
+  en: "Worktrees"
+storage.location:
+  en: "Worktree location"
+storage.location_description:
+  en: "Where new task worktrees are created. Worktrees in earlier locations stay managed."
+storage.location_placeholder:
+  en: "~/.waku-fork/worktrees"
+storage.location_apply:
+  en: "Apply"
+storage.location_reset:
+  en: "Use Default"
+storage.location_empty:
+  en: "Enter a folder path."
+storage.location_not_absolute:
+  en: "Use an absolute path, or one starting with ~/."
+storage.location_root:
+  en: "Choose a folder below the filesystem root."
+storage.cleanup_title:
+  en: "Automatic cleanup"
+storage.cleanup_description:
+  en: "Removes task worktrees when the daemon starts and on a schedule. A task that keeps its branch checks its worktree out again on its next turn."
+storage.inactive:
+  en: "Inactive tasks"
+storage.inactive_description:
+  en: "Remove a worktree after its tasks have had no activity for this long."
+storage.finished:
+  en: "Finished tasks"
+storage.finished_description:
+  en: "Remove a worktree this long after its tasks' last turn completed."
+storage.merged:
+  en: "Merged branches"
+storage.merged_description:
+  en: "Remove a worktree whose branch was merged into the base branch."
+storage.unchanged:
+  en: "Unchanged worktrees"
+storage.unchanged_description:
+  en: "Remove a worktree with no commits beyond the base branch."
+storage.deleted:
+  en: "Deleted tasks"
+storage.deleted_description:
+  en: "Remove the worktree of a deleted task, and its waku/ branch when no commit would be lost."
+storage.keep_when:
+  en: "Keep local changes"
+storage.keep_when_description:
+  en: "A worktree with this kind of local work is never removed."
+storage.keep_any_local_files:
+  en: "Any local files"
+storage.keep_uncommitted_changes:
+  en: "Uncommitted changes"
+storage.keep_tracked_changes:
+  en: "Tracked changes only"
+storage.unpushed:
+  en: "Remove with unpushed commits"
+storage.unpushed_description:
+  en: "Also remove worktrees whose branch has commits that exist nowhere else. The branch itself is always kept."
+storage.interval:
+  en: "Check every"
+storage.interval_description:
+  en: "How often cleanup runs automatically. It also runs when the daemon starts."
+storage.off:
+  en: "Off"
+storage.immediately:
+  en: "Immediately"
+storage.one_day:
+  en: "1 day"
+storage.days:
+  en: "%{count} days"
+storage.one_hour:
+  en: "1 hour"
+storage.hours:
+  en: "%{count} hours"
+storage.run_title:
+  en: "Cleanup"
+storage.delete_now:
+  en: "Delete Now"
+storage.deleting:
+  en: "Cleaning Up…"
+storage.last_run:
+  en: "Last run: %{time}"
+storage.never_run:
+  en: "Cleanup has not run yet"
+storage.next_run:
+  en: "Next automatic run: %{time}"
+storage.next_run_soon:
+  en: "The next automatic run starts shortly."
+storage.automatic_off:
+  en: "Automatic cleanup is off. Turn on a rule above, or delete now to see what each rule would keep."
+storage.summary:
+  en: "Removed %{removed} · Kept %{kept} · Failed %{failed}"
+storage.omitted:
+  en: "%{count} more not shown"
+storage.outcome_removed:
+  en: "Removed"
+storage.outcome_kept:
+  en: "Kept"
+storage.outcome_failed:
+  en: "Failed"
+storage.status_failed:
+  en: "Could not read cleanup status: %{error}"
+storage.run_failed:
+  en: "Cleanup failed: %{error}"
+storage.reason_task_deleted:
+  en: "Task was deleted"
+storage.reason_inactive:
+  en: "Inactive for %{duration}"
+storage.reason_finished:
+  en: "Finished %{duration} ago"
+storage.reason_merged:
+  en: "Merged into %{base}"
+storage.reason_unchanged:
+  en: "No commits beyond %{base}"
+storage.reason_no_rule:
+  en: "No enabled rule applies"
+storage.reason_task_running:
+  en: "Task is running"
+storage.reason_live_runtime:
+  en: "Agent session is open"
+storage.reason_open_terminal:
+  en: "Terminal is open"
+storage.reason_outside:
+  en: "Outside the managed worktree folder"
+storage.reason_not_waku_branch:
+  en: "Not a Waku worktree branch"
+storage.reason_not_linked:
+  en: "Not a linked worktree of its repository"
+storage.reason_branch_changed:
+  en: "A different branch is checked out"
+storage.reason_uncommitted:
+  en: "Uncommitted changes (%{count} files)"
+storage.reason_ignored:
+  en: "Has ignored files (%{example})"
+storage.reason_unpushed:
+  en: "Unpushed commits (%{count})"
+storage.reason_inactive_for:
+  en: "Inactive for %{duration} of %{limit}"
+storage.reason_finished_for:
+  en: "Finished %{duration} ago, removed after %{limit}"
+storage.reason_not_finished:
+  en: "Task has not finished"
+storage.reason_not_merged:
+  en: "Not merged into %{base}"
+storage.reason_has_commits:
+  en: "%{count} commits beyond %{base}"
+storage.reason_base_unavailable:
+  en: "Base branch is unavailable"
+storage.reason_changed:
+  en: "Changed while cleanup was running"
+storage.reason_with_branch:
+  en: "%{reason}; branch deleted"

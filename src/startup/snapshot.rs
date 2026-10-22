@@ -155,7 +155,7 @@ pub fn daemon_key() -> String {
 /// Beside the desktop's `state.json`, so the bench harness's isolated HOME
 /// isolates it too.
 pub fn default_path() -> PathBuf {
-    crate::persistence::StateStore::default_path().with_file_name(FILE_NAME)
+    crate::persistence::StateStore::default_dir().join(FILE_NAME)
 }
 
 /// Read the snapshot for `daemon`. Any failure means "no snapshot".

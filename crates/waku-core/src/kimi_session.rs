@@ -154,9 +154,8 @@ pub fn list_provider_sessions(limit: usize) -> anyhow::Result<Vec<ProviderSessio
 
 /// Where the current length of a session's wire log is read, so a later
 /// failure lookup can ignore everything an earlier turn already wrote.
-pub fn wire_offset(session_id: &str) -> u64 {
-    session_home()
-        .and_then(|home| wire_log(&home, session_id))
+pub fn wire_offset_in(home: &Path, session_id: &str) -> u64 {
+    wire_log(home, session_id)
         .and_then(|path| path.metadata().ok())
         .map_or(0, |metadata| metadata.len())
 }
@@ -165,9 +164,15 @@ pub fn wire_offset(session_id: &str) -> u64 {
 /// record a failure. Polls briefly because the record lands just after the ACP
 /// response; call it only for a turn that produced nothing, so a healthy turn
 /// never pays the wait.
-pub fn turn_failure(session_id: &str, from_offset: u64) -> Option<String> {
-    let home = session_home()?;
-    turn_failure_in(&home, session_id, from_offset, TURN_RECORD_WAIT)
+pub fn turn_failure(home: &Path, session_id: &str, from_offset: u64) -> Option<TurnFailure> {
+    turn_failure_in(home, session_id, from_offset, TURN_RECORD_WAIT)
+}
+
+/// A failed turn's `error` record: Kimi's code and its message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnFailure {
+    pub code: Option<String>,
+    pub message: String,
 }
 
 fn turn_failure_in(
@@ -175,7 +180,7 @@ fn turn_failure_in(
     session_id: &str,
     from_offset: u64,
     wait: Duration,
-) -> Option<String> {
+) -> Option<TurnFailure> {
     let deadline = Instant::now() + wait;
     loop {
         if let Some(path) = wire_log(home, session_id)
@@ -210,7 +215,7 @@ fn wire_log(home: &Path, session_id: &str) -> Option<PathBuf> {
         })
 }
 
-fn recorded_failure(path: &Path, from_offset: u64) -> Option<String> {
+fn recorded_failure(path: &Path, from_offset: u64) -> Option<TurnFailure> {
     parse_turn_failure(&read_tail(path, from_offset)?)
 }
 
@@ -229,7 +234,7 @@ fn read_tail(path: &Path, from_offset: u64) -> Option<String> {
 
 /// The last `turn.ended` record in the scanned region, when it failed. A
 /// partially flushed final line is simply skipped and retried by the caller.
-fn parse_turn_failure(tail: &str) -> Option<String> {
+fn parse_turn_failure(tail: &str) -> Option<TurnFailure> {
     tail.lines()
         .rev()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -242,7 +247,10 @@ fn parse_turn_failure(tail: &str) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|message| !message.is_empty())?;
-            Some(message.to_owned())
+            Some(TurnFailure {
+                code: error.get("code").and_then(Value::as_str).map(str::to_owned),
+                message: message.to_owned(),
+            })
         })
 }
 
@@ -260,8 +268,11 @@ mod tests {
         );
 
         assert_eq!(
-            parse_turn_failure(tail).as_deref(),
-            Some("402 membership inactive")
+            parse_turn_failure(tail),
+            Some(TurnFailure {
+                code: Some("provider.api_error".to_owned()),
+                message: "402 membership inactive".to_owned(),
+            })
         );
     }
 

@@ -1,0 +1,1 @@
+{"steps":[{"type":"message","text":"Run this exact local command: `node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"`. Do not answer until it completes, then respond exactly: interrupt fixture should not finish naturally."},{"type":"wait","until":"tool_started"},{"type":"interrupt"},{"type":"wait","until":"turn_terminal"}]}

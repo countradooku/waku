@@ -927,22 +927,12 @@ fn file_highlighter_language(relative_path: &str) -> &'static str {
 /// One unbounded `read_to_string`, so callers keep it off the UI thread; the
 /// only caller is [`Waku::read_right_panel_file_into_editor`].
 fn read_right_panel_file(
-    workspace: &waku_client::WorkspaceClient,
+    daemon_v8: &crate::daemon_v8::DaemonV8,
     project_path: &Path,
     relative_path: &str,
 ) -> (String, bool) {
-    match workspace.request(waku_client::WorkspaceOperation::ReadTextFile {
-        root: project_path.to_path_buf(),
-        relative_path: PathBuf::from(relative_path),
-    }) {
-        Ok(waku_client::WorkspaceResult::TextFile { content }) => (content, true),
-        Ok(_) => (
-            tr!(
-                "files.unable_to_edit",
-                error = "the daemon returned an invalid file response"
-            ),
-            false,
-        ),
+    match waku_client::surfaces::files::read_text(daemon_v8, project_path, relative_path) {
+        Ok(content) => (content, true),
         Err(error) => (
             tr!("files.unable_to_edit", error = error.to_string()),
             false,
@@ -2132,7 +2122,7 @@ impl Waku {
     }
 
     pub(super) fn open_turn_diff(&mut self, turn_id: Uuid, cx: &mut Context<Self>) {
-        let Some((session_id, turn_count)) = self.selected_session().and_then(|session| {
+        let Some((thread_id, turn_count)) = self.selected_session().and_then(|session| {
             session
                 .turns
                 .iter()
@@ -2141,9 +2131,9 @@ impl Waku {
         }) else {
             return;
         };
-        self.right_panel_diff_source = ReviewDiffSource::LastTurn {
-            session_id,
-            turn_id,
+        self.right_panel_diff_source = ReviewDiffSource::Turn {
+            thread_id,
+            run_id: turn_id,
             turn_count,
         };
         self.right_panel_diff_selection.clear();
@@ -2406,13 +2396,6 @@ impl Waku {
     /// the live page swaps for a frozen snapshot.
     fn any_overlay_open(&self, cx: &App) -> bool {
         self.menus.borrow().values().any(ContextMenuHandle::is_open)
-            || self.selected_runtime().is_some_and(|runtime| {
-                runtime.computer_use_previews.iter().any(|preview| {
-                    preview.visible
-                        && preview.target.is_some()
-                        && preview.phase != ComputerUsePhase::AwaitingApproval
-                })
-            })
             || self.command_palette.is_open()
             || self.task_switcher.is_open()
             || self.commit_dialog.is_some()
@@ -2457,14 +2440,9 @@ impl Waku {
         }
     }
 
+    /// Terminals run on the daemon (#60), so the workspace path is always
+    /// interpreted on the machine that owns it, local or remote.
     fn ensure_right_panel_terminal(&mut self, terminal_id: Uuid, cx: &mut Context<Self>) {
-        if self.daemon.is_remote() {
-            // A desktop PTY would interpret the daemon's cwd on the wrong
-            // machine. Keep the surface unavailable until the protocol grows
-            // a daemon-owned streaming terminal.
-            self.right_panel_terminals.remove(&terminal_id);
-            return;
-        }
         let Some(working_directory) = self
             .selected_workspace_path()
             .map(std::path::Path::to_path_buf)
@@ -2477,9 +2455,10 @@ impl Waku {
             .get(&terminal_id)
             .is_some_and(|terminal| terminal.read(cx).working_directory() == working_directory);
         if !matches_project {
+            let daemon_v8 = self.daemon_v8.clone();
             self.right_panel_terminals.insert(
                 terminal_id,
-                cx.new(|cx| TerminalView::new(working_directory.clone(), cx)),
+                cx.new(|cx| TerminalView::new(daemon_v8, working_directory.clone(), cx)),
             );
         }
     }
@@ -3209,7 +3188,7 @@ impl Waku {
         editor.reading = true;
         editor.read_epoch += 1;
         let epoch = editor.read_epoch;
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
 
         cx.spawn(async move |waku, cx| {
             let read = cx
@@ -3217,7 +3196,7 @@ impl Waku {
                 .spawn({
                     let project_path = project_path.clone();
                     let relative_path = relative_path.clone();
-                    async move { read_right_panel_file(&workspace, &project_path, &relative_path) }
+                    async move { read_right_panel_file(&daemon_v8, &project_path, &relative_path) }
                 })
                 .await;
             waku.update(cx, |waku, cx| {
@@ -3553,7 +3532,7 @@ impl Waku {
         } else {
             return;
         };
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
@@ -3562,14 +3541,13 @@ impl Waku {
                     let relative_path = relative_path.clone();
                     let content = content.clone();
                     async move {
-                        match workspace.request(waku_client::WorkspaceOperation::WriteTextFile {
-                            root: project_path,
-                            relative_path: PathBuf::from(relative_path),
+                        waku_client::surfaces::files::write_text(
+                            &daemon_v8,
+                            &project_path,
+                            &relative_path,
                             content,
-                        })? {
-                            waku_client::WorkspaceResult::Ack => Ok(()),
-                            _ => anyhow::bail!("the daemon returned an invalid file response"),
-                        }
+                        )
+                        .map(|_revision| ())
                     }
                 })
                 .await;
@@ -3684,6 +3662,13 @@ impl Waku {
         let selected = self.right_panel_diff_source;
         let ignore_whitespace = self.right_panel_diff_ignore_whitespace;
         let latest_turn = self.latest_review_turn_source();
+        // The whole thread, once any turn has a checkpoint to diff.
+        let all_turns_source = latest_turn.and_then(|source| match source {
+            ReviewDiffSource::Turn { thread_id, .. } => {
+                Some(ReviewDiffSource::AllTurns { thread_id })
+            }
+            _ => None,
+        });
         let source_label = self.review_diff_source_label(selected);
         let weak = cx.entity().downgrade();
         let handle = self.menu_handle("right-panel-diff-source", cx);
@@ -3708,6 +3693,19 @@ impl Waku {
                     })
                     .selected(latest_turn == Some(selected))
                     .disabled(latest_turn.is_none()),
+                );
+                let all_turns = all_turns_source;
+                let all_turns_weak = weak.clone();
+                items.push(
+                    MenuItem::new(tr!("diff.source_all_turns"), move |_, cx| {
+                        if let Some(source) = all_turns {
+                            let _ = all_turns_weak.update(cx, |this, cx| {
+                                this.set_right_panel_diff_source(source, cx)
+                            });
+                        }
+                    })
+                    .selected(all_turns.is_some() && all_turns == Some(selected))
+                    .disabled(all_turns.is_none()),
                 );
                 items.push(MenuItem::Separator);
                 for (choice, label) in [
@@ -4542,20 +4540,16 @@ impl Waku {
             Query::Pending => {}
             Query::Missing(token) => {
                 let expanded = self.right_panel_expanded_paths.clone();
-                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+                let daemon_v8 = self.daemon_v8.clone();
                 cx.spawn(async move |waku, cx| {
                     let entries = cx
                         .background_executor()
                         .spawn({
                             let path = project_path.clone();
                             async move {
-                                match workspace.request(waku_client::WorkspaceOperation::ListTree {
-                                    root: path,
-                                    expanded_paths: expanded.into_iter().collect(),
-                                }) {
-                                    Ok(waku_client::WorkspaceResult::WorkingTree { entries }) => {
-                                        entries
-                                            .into_iter()
+                                waku_client::surfaces::files::tree(&daemon_v8, &path, &expanded)
+                                    .map(|rows| {
+                                        rows.into_iter()
                                             .map(|entry| WorkingTreeEntry {
                                                 file_icon: (!entry.is_dir)
                                                     .then(|| file_icon_for_name(&entry.name)),
@@ -4566,10 +4560,9 @@ impl Waku {
                                                 expanded: entry.expanded,
                                                 depth: entry.depth,
                                             })
-                                            .collect()
-                                    }
-                                    Ok(_) | Err(_) => Vec::new(),
-                                }
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default()
                             }
                         })
                         .await;
@@ -4603,23 +4596,22 @@ impl Waku {
                         .as_ref()
                         .is_some_and(|checkpoint| checkpoint.status == CheckpointStatus::Ready)
             })
-            .map(|turn| ReviewDiffSource::LastTurn {
-                session_id: session.id,
-                turn_id: turn.id,
+            .map(|turn| ReviewDiffSource::Turn {
+                thread_id: session.id,
+                run_id: turn.id,
                 turn_count: turn.turn_count,
             })
     }
 
     fn review_diff_source_label(&self, source: ReviewDiffSource) -> String {
         match source {
-            ReviewDiffSource::LastTurn { .. }
-                if self.latest_review_turn_source() == Some(source) =>
-            {
+            ReviewDiffSource::Turn { .. } if self.latest_review_turn_source() == Some(source) => {
                 tr!("diff.source_last_turn")
             }
-            ReviewDiffSource::LastTurn { turn_count, .. } => {
+            ReviewDiffSource::Turn { turn_count, .. } => {
                 tr!("diff.source_turn", turn = turn_count)
             }
+            ReviewDiffSource::AllTurns { .. } => tr!("diff.source_all_turns"),
             ReviewDiffSource::Uncommitted => tr!("diff.source_uncommitted"),
             ReviewDiffSource::Unstaged => tr!("diff.source_unstaged"),
             ReviewDiffSource::Staged => tr!("diff.source_staged"),
@@ -4691,30 +4683,19 @@ impl Waku {
         self.right_panel_diff_error = None;
         cx.notify();
 
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let daemon_v8 = self.daemon_v8.clone();
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
                     let project_path = project_path.clone();
                     async move {
-                        match workspace.request(
-                            waku_client::WorkspaceOperation::CollectReviewDiff {
-                                cwd: project_path,
-                                source: crate::review_diff::wire_source(source),
-                                ignore_whitespace,
-                            },
-                        )? {
-                            waku_client::WorkspaceResult::ReviewDiff { data } => {
-                                Ok(crate::review_diff::parse_collected(
-                                    source,
-                                    &data.numstat,
-                                    &data.patch,
-                                    data.complete_context,
-                                ))
-                            }
-                            _ => anyhow::bail!("the daemon returned an invalid diff response"),
-                        }
+                        crate::review_diff::collect(
+                            &daemon_v8,
+                            &project_path,
+                            source,
+                            ignore_whitespace,
+                        )
                     }
                 })
                 .await;

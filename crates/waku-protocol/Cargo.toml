@@ -10,33 +10,21 @@ anyhow = "1.0"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6.0"
+# Protocol v8 (RFC 0003): MessagePack with named fields for native frames.
+rmp = "0.8"
+rmp-serde = "1.3"
 rust-i18n = "4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# JSON Schema export of the v8 wire types (RFC 0003 §9). Only the `schema`
+# feature builds it (`waku-codegen`), so the app and daemon never do.
+schemars = { version = "1", optional = true, features = ["uuid1"] }
 similar = "3"
-# ts-rs warns on every serde attribute it does not model. The ones used here,
-# such as `alias`, only widen what deserializes and leave the TypeScript shape
-# unchanged. Only the `ts` feature builds it; see `mod ts` in src/lib.rs.
-ts-rs = { version = "12.0.1", optional = true, features = ["chrono-impl", "no-serde-warnings", "serde-json-impl", "uuid-impl"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
-waku-ts-stub = { path = "../waku-ts-stub" }
 
 [features]
-# TypeScript bindings for the web client. Only `export_types` needs them
-# (`bun run protocol:generate` / `protocol:check`); the app and daemon build
-# without ts-rs.
-ts = ["dep:ts-rs"]
-
-[[bin]]
-name = "export_types"
-required-features = ["ts"]
-
-[dev-dependencies]
-criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
-
-[[bench]]
-name = "wire"
-harness = false
+# `schemars::JsonSchema` derives on the v8 wire types, for `waku-codegen`.
+schema = ["dep:schemars"]
 
 [target.'cfg(unix)'.dependencies]
 # `geteuid` for the per-user socket path fallback (identity.rs).

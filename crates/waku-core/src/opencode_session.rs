@@ -28,18 +28,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, anyhow, bail};
-use uuid::Uuid;
+use anyhow::Context as _;
 
-use crate::http_wire::Endpoint;
 use crate::model::{
-    AgentTurn, Message, MessageRole, ProviderAgentPreset, ProviderKind, ProviderModel,
-    ProviderResumeCursor, ProviderSessionHistory, ProviderSessionSummary, TurnStatus,
+    ProviderAgentPreset, ProviderKind, ProviderModel, ProviderResumeCursor, ProviderSessionSummary,
 };
-use crate::opencode_api::{
-    self, AgentInfo, AgentMode, AssistantContent, MessageInfo, ModelInfo, Order, SessionInfo,
-    ToolState,
-};
+use crate::opencode_api::{self, AgentInfo, AgentMode, MessageInfo, ModelInfo, Order, SessionInfo};
 use crate::opencode_service;
 
 /// Matches `acp_session`: a catalog that needs more than this many pages is
@@ -48,12 +42,6 @@ const MAX_PAGES: usize = 20;
 /// The service caps nothing, so the page size is Waku's choice. Large enough
 /// that an ordinary catalog is one round trip.
 const PAGE_SIZE: usize = 100;
-/// The largest page `GET …/message` serves.
-const MESSAGE_PAGE_SIZE: usize = 200;
-/// Every agent step is a message, so a long session runs to thousands of
-/// them. This bound only stops a cursor that never ends, and hitting it is an
-/// error: a truncated scan would fork at the wrong turn.
-const MAX_MESSAGE_PAGES: usize = 1_000;
 /// `GET /api/session` lists subagent children too. The literal string `null`
 /// is how the route asks for roots only; it is echoed back inside the opaque
 /// cursor as `"parentID":"null"`, so it survives pagination.
@@ -144,210 +132,6 @@ fn unix_seconds(millis: f64) -> u64 {
     }
 }
 
-/// Imports a native session's user-visible transcript.
-///
-/// One `GET …/export` covers the whole conversation, unlike the paged message
-/// route. It is fetched UNSANITIZED on purpose — see the module doc — and the
-/// private provider state is dropped here before anything is built from it.
-pub fn provider_session_history(
-    binary: &Path,
-    session_id: &str,
-    visible_turn_limit: usize,
-) -> anyhow::Result<ProviderSessionHistory> {
-    if session_id.trim().is_empty() || visible_turn_limit == 0 {
-        return Ok(ProviderSessionHistory::default());
-    }
-    let service = opencode_service::attached(binary)?
-        .ok_or_else(|| anyhow!("the OpenCode background service is not running"))?;
-    let mut export = opencode_api::export_session(&service.endpoint(), session_id, false)
-        .with_context(|| format!("OpenCode could not export session {session_id}"))?;
-    strip_provider_state(&mut export.messages);
-    let mut history = history_from_messages(&export.messages);
-    retain_recent_messages(&mut history, visible_turn_limit);
-    Ok(history)
-}
-
-/// Drops every private provider control marker from a decoded transcript.
-///
-/// Belt and braces. `providerState` and `providerResultState` never survive
-/// the typed decode, but a part's `state` does, and CLAUDE.md forbids ever
-/// surfacing those in the transcript. They are also the bulk of an export's
-/// memory: a single reasoning blob runs to multiple kilobytes, and the tool
-/// state carries whole tool inputs and outputs an imported transcript never
-/// renders. Doing it unconditionally means a change in what the server
-/// chooses to redact cannot leak anything into Waku.
-fn strip_provider_state(messages: &mut [MessageInfo]) {
-    for message in messages {
-        let MessageInfo::Assistant { content, .. } = message else {
-            continue;
-        };
-        for part in content {
-            match part {
-                AssistantContent::Text { state, .. }
-                | AssistantContent::Reasoning { state, .. } => *state = None,
-                AssistantContent::Tool { state, .. } => *state = ToolState::Unknown,
-                AssistantContent::Unknown => {}
-            }
-        }
-    }
-}
-
-/// Projects stored messages onto Waku's turn model.
-///
-/// Only `user` and assistant TEXT survive: reasoning is dropped from an
-/// imported transcript the way `acp_session` drops it, and every other message
-/// kind — synthetic, system, skill, shell, compaction, idle and the three
-/// `*-switched` records — is provider bookkeeping rather than conversation.
-fn history_from_messages(messages: &[MessageInfo]) -> ProviderSessionHistory {
-    let mut history = ProviderSessionHistory::default();
-    let mut boundaries = TurnBoundaries::default();
-    let mut turn_id = None;
-    // Whether the last pushed message is this turn's assistant message, and so
-    // whether the next step's text folds into it instead of starting one.
-    let mut assistant_open = false;
-
-    for message in messages {
-        let opens_turn = boundaries.observe(message).is_some();
-        match message {
-            MessageInfo::User { text, .. } => {
-                // A steer joins the turn it steered, as it did live. A prompt
-                // with no text still opens its turn, or every later turn
-                // would be numbered one short of the provider's.
-                if opens_turn {
-                    let id = Uuid::new_v4();
-                    history.turns.push(AgentTurn {
-                        id,
-                        turn_count: history.turns.len() + 1,
-                        status: TurnStatus::Completed,
-                        provider_turn_started: true,
-                        provider_resume_at: None,
-                        started_at: 0,
-                        completed_at: Some(0),
-                        checkpoint: None,
-                    });
-                    turn_id = Some(id);
-                }
-                let Some(id) = turn_id else { continue };
-                let text = text.trim();
-                if !text.is_empty() {
-                    history
-                        .messages
-                        .push(Message::new_for_turn(MessageRole::User, text, id));
-                }
-                assistant_open = false;
-            }
-            MessageInfo::Assistant { content, .. } => {
-                // Assistant activity before the first user message belongs to
-                // no visible turn; a forked session can legitimately start
-                // that way.
-                let Some(id) = turn_id else { continue };
-                for part in content {
-                    let AssistantContent::Text { text, .. } = part else {
-                        continue;
-                    };
-                    let text = text.trim();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    match history.messages.last_mut().filter(|_| assistant_open) {
-                        Some(message) => {
-                            message.content.push_str("\n\n");
-                            message.content.push_str(text);
-                        }
-                        None => {
-                            history.messages.push(Message::new_for_turn(
-                                MessageRole::Assistant,
-                                text,
-                                id,
-                            ));
-                            assistant_open = true;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    history
-}
-
-/// Keeps every turn shell so provider turn numbering stays exact, but bounds
-/// the imported display text to the most recent turns.
-fn retain_recent_messages(history: &mut ProviderSessionHistory, limit: usize) {
-    let retained = history
-        .turns
-        .iter()
-        .rev()
-        .take(limit)
-        .map(|turn| turn.id)
-        .collect::<std::collections::HashSet<_>>();
-    history
-        .messages
-        .retain(|message| message.turn_id.is_some_and(|id| retained.contains(&id)));
-}
-
-/// Branches a cold session, keeping its first `retained_turns` native turns.
-///
-/// Attach-only, like everything else here: rewinding an imported task after a
-/// relaunch must not start the daemon.
-pub fn fork_session_at_turn(
-    binary: &Path,
-    session_id: &str,
-    retained_turns: usize,
-) -> anyhow::Result<ProviderResumeCursor> {
-    let service = opencode_service::attached(binary)?
-        .ok_or_else(|| anyhow!("the OpenCode background service is not running"))?;
-    let endpoint = service.endpoint();
-    let message_ids = native_turn_message_ids(&endpoint, session_id)?;
-    fork_at_boundary(&endpoint, session_id, &message_ids, retained_turns)
-}
-
-/// Branches a session by dropping its last `turns_to_remove` native turns.
-///
-/// Deliberately NOT built on `POST …/revert/stage|commit|clear`: revert
-/// mutates the same session, writes files, and answers 409 `SessionBusyError`
-/// while a turn is running, whereas Waku's contract here is "drop the last N
-/// turns and hand back a cursor for the continuing conversation". Revert is
-/// real headroom — it survives reconnect via `Session.Info.revert` and carries
-/// per-file patches — and wants its own affordance rather than this one.
-pub(crate) fn fork_session_removing_turns(
-    endpoint: &Endpoint,
-    session_id: &str,
-    turns_to_remove: usize,
-) -> anyhow::Result<ProviderResumeCursor> {
-    let message_ids = native_turn_message_ids(endpoint, session_id)?;
-    let retained_turns = retained_turn_count(message_ids.len(), turns_to_remove)?;
-    fork_at_boundary(endpoint, session_id, &message_ids, retained_turns)
-}
-
-/// The id of the user message that opens each native turn, oldest first.
-fn native_turn_message_ids(endpoint: &Endpoint, session_id: &str) -> anyhow::Result<Vec<String>> {
-    let mut boundaries = TurnBoundaries::default();
-    let mut ids = Vec::new();
-    let mut cursor: Option<String> = None;
-    for _ in 0..MAX_MESSAGE_PAGES {
-        // Ascending: the route defaults to newest first, and a turn boundary
-        // only exists in conversation order.
-        let (messages, next) = opencode_api::list_messages(
-            endpoint,
-            session_id,
-            Order::Asc,
-            Some(MESSAGE_PAGE_SIZE),
-            cursor.as_deref(),
-        )
-        .map_err(|error| anyhow!("OpenCode could not list messages for {session_id}: {error}"))?;
-        ids.extend(
-            messages
-                .iter()
-                .filter_map(|message| boundaries.observe(message))
-                .map(str::to_owned),
-        );
-        let Some(next) = next else { return Ok(ids) };
-        cursor = Some(next);
-    }
-    bail!("OpenCode session {session_id} has too many messages to find its turns")
-}
-
 /// Finds the user message that opens each native turn, fed every stored
 /// message in conversation order.
 ///
@@ -367,7 +151,7 @@ fn native_turn_message_ids(endpoint: &Endpoint, session_id: &str) -> anyhow::Res
 /// provider stream ends, so the fallback cannot split a native turn steered
 /// before its first marker.
 #[derive(Debug, Default)]
-struct TurnBoundaries {
+pub(crate) struct TurnBoundaries {
     /// A user message opened a turn no marker has closed yet.
     open: bool,
     /// A marker was seen, so everything after it is native history.
@@ -385,7 +169,7 @@ struct MigratedStep {
 
 impl TurnBoundaries {
     /// Feeds the next message, returning its id when it opens a turn.
-    fn observe<'a>(&mut self, message: &'a MessageInfo) -> Option<&'a str> {
+    pub(crate) fn observe<'a>(&mut self, message: &'a MessageInfo) -> Option<&'a str> {
         match message {
             MessageInfo::Idle { .. } => {
                 self.open = false;
@@ -420,44 +204,6 @@ impl TurnBoundaries {
             _ => None,
         }
     }
-}
-
-fn fork_at_boundary(
-    endpoint: &Endpoint,
-    session_id: &str,
-    message_ids: &[String],
-    retained_turns: usize,
-) -> anyhow::Result<ProviderResumeCursor> {
-    let before = fork_boundary(message_ids, retained_turns)?;
-    let fork = opencode_api::fork(endpoint, session_id, before)
-        .map_err(|error| anyhow!("OpenCode could not fork session {session_id}: {error}"))?;
-    if fork.id.trim().is_empty() {
-        bail!("OpenCode returned no forked session ID");
-    }
-    Ok(ProviderResumeCursor::OpenCode {
-        session_id: fork.id,
-        directory: Some(fork.location.directory),
-    })
-}
-
-/// The fork boundary that keeps exactly `retained_turns` turns: the message
-/// that opens the first EXCLUDED one, or `None` to keep everything.
-fn fork_boundary(message_ids: &[String], retained_turns: usize) -> anyhow::Result<Option<&str>> {
-    if retained_turns > message_ids.len() {
-        bail!(
-            "OpenCode has only {} native turns, but Waku needs {retained_turns}",
-            message_ids.len()
-        );
-    }
-    Ok(message_ids.get(retained_turns).map(String::as_str))
-}
-
-fn retained_turn_count(total_turns: usize, turns_to_remove: usize) -> anyhow::Result<usize> {
-    total_turns.checked_sub(turns_to_remove).ok_or_else(|| {
-        anyhow!(
-            "OpenCode has only {total_turns} native turns, but Waku needs to remove {turns_to_remove}"
-        )
-    })
 }
 
 /// The service's model and primary-agent catalogs.
@@ -551,26 +297,6 @@ mod tests {
         serde_json::from_value(value).expect("the message list should decode")
     }
 
-    fn assistant(id: &str, content: Value) -> Value {
-        json!({
-            "id": id,
-            "type": "assistant",
-            "time": {"created": 1_785_784_477_974_u64},
-            "agent": "build",
-            "model": {"id": "muse-spark-1.3", "providerID": "opencode", "variant": "default"},
-            "content": content,
-        })
-    }
-
-    fn user(id: &str, text: &str) -> Value {
-        json!({
-            "id": id,
-            "type": "user",
-            "time": {"created": 1_785_784_473_836_u64},
-            "text": text,
-        })
-    }
-
     #[test]
     fn summaries_keep_the_stored_directory_and_convert_millis_to_seconds() {
         let project_dir = std::env::temp_dir().join("waku-opencode-project");
@@ -624,111 +350,6 @@ mod tests {
         // creation.
         assert_eq!(summaries[1].title, "OpenCode session ses_unti");
         assert_eq!(summaries[1].updated_at, summaries[1].created_at);
-    }
-
-    #[test]
-    fn consecutive_assistant_steps_fold_into_one_turn() {
-        let transcript = messages(json!([
-            user("msg_a", "draw a dog"),
-            // A three-tool turn is four assistant messages.
-            assistant(
-                "msg_b",
-                json!([{"type": "text", "text": "Loading the skill."}])
-            ),
-            assistant("msg_c", json!([{"type": "text", "text": "Now drawing."}])),
-            assistant("msg_d", json!([{"type": "text", "text": "Done."}])),
-            user("msg_e", "thanks"),
-            assistant("msg_f", json!([{"type": "text", "text": "Any time."}])),
-        ]));
-
-        let history = history_from_messages(&transcript);
-
-        assert_eq!(history.turns.len(), 2);
-        assert_eq!(history.turns[0].turn_count, 1);
-        assert_eq!(history.turns[1].turn_count, 2);
-        assert_eq!(history.messages.len(), 4);
-        assert_eq!(history.messages[1].role, MessageRole::Assistant);
-        assert_eq!(
-            history.messages[1].content,
-            "Loading the skill.\n\nNow drawing.\n\nDone."
-        );
-        assert_eq!(history.messages[1].turn_id, Some(history.turns[0].id));
-        assert_eq!(history.messages[3].turn_id, Some(history.turns[1].id));
-    }
-
-    #[test]
-    fn import_drops_reasoning_tools_and_provider_bookkeeping() {
-        let transcript = messages(json!([
-            {"id": "msg_switch", "type": "agent-switched", "time": {"created": 1.0}, "agent": "build"},
-            {"id": "msg_sys", "type": "system", "time": {"created": 1.0}, "text": "system prompt"},
-            user("msg_a", "hello"),
-            assistant(
-                "msg_b",
-                json!([
-                    {"type": "reasoning", "text": "The user wants a dog."},
-                    {"type": "tool", "id": "call_1", "name": "bash", "time": {"created": 1.0},
-                     "state": {"status": "completed", "input": {}, "content": [{"type": "text", "text": "out"}]}},
-                    {"type": "text", "text": "Hi."}
-                ])
-            ),
-            {"id": "msg_synth", "type": "synthetic", "time": {"created": 1.0}, "text": "continue"},
-            {"id": "msg_shell", "type": "shell", "time": {"created": 1.0}, "shellID": "sh_1",
-             "command": "ls", "status": "exited", "exit": "NaN"},
-        ]));
-
-        let history = history_from_messages(&transcript);
-
-        assert_eq!(history.turns.len(), 1);
-        let content = history
-            .messages
-            .iter()
-            .map(|message| (message.role, message.content.as_str()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            content,
-            vec![
-                (MessageRole::User, "hello"),
-                (MessageRole::Assistant, "Hi.")
-            ]
-        );
-    }
-
-    /// The private markers must be gone before anything is built from the
-    /// export, not merely unread.
-    #[test]
-    fn provider_state_is_stripped_from_every_part() {
-        let mut transcript = messages(json!([assistant(
-            "msg_b",
-            json!([
-                {"type": "text", "text": "Hi.", "state": {"providerMetadata": {"secret": 1}}},
-                {"type": "reasoning", "text": "think", "state": {"reasoningEncryptedContent": "blob"}},
-                {"type": "tool", "id": "call_1", "name": "bash", "time": {"created": 1.0},
-                 "state": {"status": "completed", "input": {"command": "ls"},
-                           "content": [{"type": "text", "text": "out"}],
-                           "metadata": {"private": true}}}
-            ])
-        )]));
-
-        strip_provider_state(&mut transcript);
-
-        let MessageInfo::Assistant { content, .. } = &transcript[0] else {
-            panic!("expected an assistant message");
-        };
-        assert_eq!(
-            content[0],
-            AssistantContent::Text {
-                text: "Hi.".into(),
-                state: None
-            }
-        );
-        let AssistantContent::Reasoning { state, .. } = &content[1] else {
-            panic!("expected a reasoning part");
-        };
-        assert!(state.is_none());
-        let AssistantContent::Tool { state, .. } = &content[2] else {
-            panic!("expected a tool part");
-        };
-        assert_eq!(*state, ToolState::Unknown);
     }
 
     /// A prompt or steer, written at `created` milliseconds.
@@ -872,72 +493,6 @@ mod tests {
         assert_eq!(openers, ["msg_user", "msg_user2"]);
     }
 
-    /// Waku showed a steer inside the turn it steered, so an imported one
-    /// lands there too, with its turn's numbering intact.
-    #[test]
-    fn imported_steers_join_the_turn_they_steered() {
-        let mut first = step("msg_a", "tool-calls", true, 2..10);
-        first["content"] = json!([{"type": "text", "text": "Loading the skill."}]);
-        let mut steered = step("msg_b", "stop", true, 12..20);
-        steered["content"] = json!([{"type": "text", "text": "Drawn in blue."}]);
-        let mut second = step("msg_c", "stop", true, 31..40);
-        second["content"] = json!([{"type": "text", "text": "Any time."}]);
-        let transcript = messages(json!([
-            user("msg_prompt", "draw a dog"),
-            first,
-            user("msg_steer", "make it blue"),
-            steered,
-            idle("msg_idle_1"),
-            // A prompt carrying only an attachment still opens its turn.
-            user("msg_attachment", "  "),
-            second,
-            idle("msg_idle_2"),
-        ]));
-
-        let history = history_from_messages(&transcript);
-
-        assert_eq!(history.turns.len(), 2);
-        assert_eq!(history.turns[1].turn_count, 2);
-        let content = history
-            .messages
-            .iter()
-            .map(|message| {
-                let turn = history
-                    .turns
-                    .iter()
-                    .position(|turn| Some(turn.id) == message.turn_id);
-                (turn, message.role, message.content.as_str())
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            content,
-            vec![
-                (Some(0), MessageRole::User, "draw a dog"),
-                (Some(0), MessageRole::Assistant, "Loading the skill."),
-                (Some(0), MessageRole::User, "make it blue"),
-                (Some(0), MessageRole::Assistant, "Drawn in blue."),
-                (Some(1), MessageRole::Assistant, "Any time."),
-            ]
-        );
-    }
-
-    #[test]
-    fn fork_boundary_excludes_the_next_user_turn() {
-        let ids = vec!["msg_1".to_owned(), "msg_2".to_owned(), "msg_3".to_owned()];
-        assert_eq!(fork_boundary(&ids, 0).unwrap(), Some("msg_1"));
-        assert_eq!(fork_boundary(&ids, 2).unwrap(), Some("msg_3"));
-        // Retaining everything has no first-excluded message at all.
-        assert_eq!(fork_boundary(&ids, 3).unwrap(), None);
-        assert!(fork_boundary(&ids, 4).is_err());
-    }
-
-    #[test]
-    fn rollback_count_is_converted_to_the_retained_native_prefix() {
-        assert_eq!(retained_turn_count(4, 1).unwrap(), 3);
-        assert_eq!(retained_turn_count(4, 4).unwrap(), 0);
-        assert!(retained_turn_count(4, 5).is_err());
-    }
-
     #[test]
     fn catalog_models_are_addressed_by_provider_and_id() {
         let models: Vec<ModelInfo> = serde_json::from_value(json!([
@@ -1010,21 +565,6 @@ mod tests {
         assert!(!presets[1].is_default);
     }
 
-    /// The whole point of the attach-only rule. A missing service must not
-    /// spawn one, and the picker must not fail either.
-    #[test]
-    fn a_missing_service_lists_nothing_and_starts_nothing() {
-        let binary = std::env::temp_dir().join("waku-opencode-absent");
-        assert!(list_provider_sessions(&binary, 0).unwrap().is_empty());
-        assert_eq!(
-            provider_session_history(&binary, "ses_x", 0)
-                .unwrap()
-                .messages
-                .len(),
-            0
-        );
-    }
-
     /// Exercises the real catalog against the user's own service. Read-only:
     /// it lists sessions and never creates, prompts or deletes.
     #[test]
@@ -1054,28 +594,6 @@ mod tests {
         assert!(models.iter().all(|model| model.id.contains('/')));
         let presets = presets.expect("the service should expose agents");
         assert!(presets.iter().any(|preset| preset.id == DEFAULT_AGENT));
-    }
-
-    /// Guards the sanitize trap: an unsanitized export carries real prose,
-    /// while `sanitize=true` replaces even the user's own prompt with a
-    /// `[redacted:…]` placeholder.
-    #[test]
-    #[ignore = "requires a running OpenCode background service and WAKU_OPENCODE_TEST_SESSION_ID"]
-    fn imports_a_real_transcript_without_redaction_placeholders() {
-        let binary =
-            crate::command_env::find_executable("opencode").expect("opencode is not installed");
-        let session_id = std::env::var("WAKU_OPENCODE_TEST_SESSION_ID")
-            .expect("set WAKU_OPENCODE_TEST_SESSION_ID to a completed session");
-        let history =
-            provider_session_history(&binary, &session_id, 100).expect("the import should work");
-        assert!(!history.messages.is_empty());
-        assert!(
-            history
-                .messages
-                .iter()
-                .all(|message| !message.content.contains("[redacted:")),
-            "the import must not go through the share sanitizer"
-        );
     }
 }
 

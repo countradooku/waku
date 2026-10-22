@@ -1,17 +1,6 @@
-import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { Popover } from '@base-ui/react/popover'
-import type {
-  AgentSession,
-  ComposerDraft,
-  ComposerDraftChange,
-  ComposerDrafts,
-  ComposerDraftTarget,
-  MessageAttachment,
-  Project,
-  ProviderSessionSummary,
-  ReviewDiffSource,
-} from '@waku/client'
+import type * as T from '@waku/client/v8'
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -30,42 +19,30 @@ import { StartupScreen } from '@/components/startup-screen'
 import type { SettingsPageId } from '@/components/settings-view'
 import { Transcript } from '@/components/transcript'
 import { WakuIcon } from '@/components/waku-icon'
-import {
-  useComposerDrafts,
-  useSession,
-  useSessionTurnRefs,
-  useTaskState,
-  useWorkspaceBranches,
-} from '@/hooks/use-daemon-data'
+import { useWorkspaceBranches } from '@/hooks/use-daemon-data'
+import { useDraftsStream, useShell, useTask } from '@/hooks/use-daemon-stores'
 import { useDocumentTitle } from '@/hooks/use-document-title'
 import {
-  applyComposerDraftChanges,
-  createResumedSession,
-  createSession,
-  createProject,
-  createProjectlessWorkspace,
-  daemonKeys,
-  displayTitle,
-  hydrateSession,
-  loadProviderSessionHistory,
-  persistProject,
-  removeSession,
+  projectRoot,
   selectableProjects,
-  sameProviderSession,
-  sessionCwd,
-  type TaskState,
+  taskCwd,
+  threadRoot,
+  type DiffSource,
 } from '@/lib/daemon-api'
 import {
   composerDraftFor,
   composerDraftId,
   moveComposerDraftToEmpty,
   setComposerDraft,
+  type ComposerDraftValue,
+  type DraftTarget,
 } from '@/lib/composer-drafts'
 import { useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
 import {
   browserComposerPreferenceStorage,
   readComposerPreferences,
+  rememberedSelection,
 } from '@/lib/composer-preferences'
 import {
   browserNavigationStorage,
@@ -79,16 +56,24 @@ import { transcriptLinkRoute } from '@/lib/transcript-links'
 import { shouldShowInitialDestination } from '@/lib/workspace-presentation'
 import { agentPresetIdLabel } from '@/lib/agent-preset-presentation'
 import { isProjectlessProject, projectDisplayName } from '@/lib/project-presentation'
+import { sessionHasStarted } from '@/lib/sidebar-presentation'
+import { useTaskActions } from '@/lib/task-actions'
 import {
-  useRuntime,
+  displayTitle,
+  isBusy,
   type BackgroundWorkItem,
-  type BackgroundWorkKey,
   type BackgroundWorkStatus,
-} from '@/lib/runtime-context'
+  type NewTaskDraft,
+  type Task,
+} from '@/lib/thread-model'
 
-interface RetainedPanelSession {
-  session: AgentSession
-  project?: Project
+/** What a right panel works on: a thread, or the project of a task being composed. */
+interface PanelSubject {
+  key: string
+  root: T.RootRef
+  cwd?: string
+  task?: Task
+  selection?: T.ModelSelection
 }
 
 type Translator = (key: string, params?: Record<string, string | number>) => string
@@ -97,30 +82,18 @@ export function WakuApp() {
   const { t } = useI18n()
   const navigate = useNavigate({ from: '/' })
   const search = useSearch({ from: '/' })
-  const queryClient = useQueryClient()
-  const { client, config } = useDaemon()
-  const {
-    attachSession,
-    backgroundWork,
-    closeSession,
-    forkSessionFromResponse,
-    messageRewinds,
-    responseForks,
-    rewindSessionToMessage,
-    runtimes,
-    saveSession,
-  } = useRuntime()
-  const taskState = useTaskState()
-  const loadedComposerDrafts = useComposerDrafts()
-  const selected = useSession(search.session)
-  const [displayed, setDisplayed] = useState<AgentSession | null>(null)
+  const { config, stores } = useDaemon()
+  const actions = useTaskActions()
+  const shell = useShell()
+  const drafts = useDraftsStream()
+  const selected = useTask(search.session)
   const [mobileSidebar, setMobileSidebar] = useState(false)
   const [sidebarVisible, setSidebarVisible] = useState(readSidebarVisible)
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth)
   const [rightPanelWidth, setRightPanelWidth] = useState(readRightPanelWidth)
   const [rightPanelOpenBySession, setRightPanelOpenBySession] = useState<Record<string, boolean>>({})
-  const retainedPanelSessions = useRef(new Map<string, RetainedPanelSession>())
-  const [retainedPanelSessionIds, setRetainedPanelSessionIds] = useState<string[]>([])
+  const retainedPanels = useRef(new Map<string, PanelSubject>())
+  const [retainedPanelIds, setRetainedPanelIds] = useState<string[]>([])
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [paletteInitialView, setPaletteInitialView] = useState<CommandPaletteView>('commands')
   const [focusComposerSignal, setFocusComposerSignal] = useState(0)
@@ -133,8 +106,8 @@ export function WakuApp() {
   } | null>(null)
   const [requestedPanel, setRequestedPanel] = useState<PanelSurface>('files')
   const [requestedFile, setRequestedFile] = useState<string | null>(null)
-  const [requestedDiffSource, setRequestedDiffSource] = useState<ReviewDiffSource>('uncommitted')
-  const [requestedBackgroundWorkKey, setRequestedBackgroundWorkKey] = useState<BackgroundWorkKey | null>(null)
+  const [requestedDiffSource, setRequestedDiffSource] = useState<DiffSource>('uncommitted')
+  const [requestedBackgroundWorkId, setRequestedBackgroundWorkId] = useState<string | null>(null)
   const [panelRequestSessionId, setPanelRequestSessionId] = useState<string | null>(null)
   const [panelRequestSignal, setPanelRequestSignal] = useState(0)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
@@ -143,10 +116,10 @@ export function WakuApp() {
   const projectPickerReturnFocus = useRef<HTMLElement | null>(null)
   const [projectlessPending, setProjectlessPending] = useState(false)
   const projectlessRequest = useRef(false)
-  const composerDraftState = useRef<ComposerDrafts>({})
+  const composerDraftState = useRef<T.ComposerDrafts>({})
   const composerDraftTimers = useRef(new Map<string, number>())
   const composerDraftWriteQueue = useRef<Promise<void>>(Promise.resolve())
-  const [composerDraftAddress, setComposerDraftAddress] = useState<string | null>(null)
+  const [composerDraftsLoaded, setComposerDraftsLoaded] = useState(false)
   const rememberedNavigation = useRef(config
     ? readRememberedNavigation(browserNavigationStorage(), config.address)
     : null)
@@ -157,40 +130,42 @@ export function WakuApp() {
   const [newTaskMode, setNewTaskMode] = useState(
     () => !search.session && rememberedNavigation.current?.kind === 'newTask',
   )
-  const [draft, setDraft] = useState<AgentSession | null>(null)
-  const [draftProject, setDraftProject] = useState<Project | null>(null)
-  const hydratedSelected = selected.data?.id === search.session ? selected.data : null
-  const current = newTaskMode ? null : hydratedSelected ?? displayed
+  const [draft, setDraft] = useState<NewTaskDraft | null>(null)
+  const projects = shell.projects
+  const tasks = shell.tasks
+  const draftProject = draft ? projects.find((project) => project.id === draft.projectId) : undefined
+  const current = newTaskMode ? undefined : selected.task
   useDocumentTitle(newTaskMode ? t('menu.new_task') : current ? displayTitle(current) : null)
   const currentProject = current
-    ? taskState.data?.projects.find((project) => project.id === current.project_id)
+    ? projects.find((project) => project.id === current.projectId)
     : undefined
-  const currentCwd = current && currentProject
-    ? sessionCwd(current, currentProject)
-    : undefined
-  const sessionTurnRefs = useSessionTurnRefs(currentCwd, current?.id)
-  const selectedReady = current?.id === search.session
-  const activeSession = current ?? draft
-  const activeProject = currentProject ?? draftProject ?? undefined
-  const activePanelSessionId = activeSession?.id ?? null
-  const rightPanelVisible = activePanelSessionId
-    ? rightPanelOpenBySession[activePanelSessionId] ?? false
+  const activeProject = currentProject ?? draftProject
+  const activeSubject: PanelSubject | null = current
+    ? {
+        key: current.id,
+        root: threadRoot(current.id),
+        cwd: taskCwd(current, currentProject),
+        task: current,
+        selection: current.selection,
+      }
+    : draft && draftProject
+      ? {
+          key: draft.id,
+          root: projectRoot(draftProject.id),
+          cwd: draftProject.path,
+          selection: draft.selection,
+        }
+      : null
+  const rightPanelVisible = activeSubject
+    ? rightPanelOpenBySession[activeSubject.key] ?? false
     : false
-  const choosingInitialDestination = Boolean(
-    taskState.data && !search.session && !newTaskMode,
-  )
+  const draftsSettled = drafts.ready || drafts.store?.status === 'ended'
+  const choosingInitialDestination = Boolean(shell.ready && !search.session && !newTaskMode)
   const restoringNewTask = Boolean(
-    taskState.data
-      && newTaskMode
-      && taskState.data.projects.length
-      && (!draft || !draftProject),
+    shell.ready && newTaskMode && projects.length && (!draft || !draftProject),
   )
   const hydratingInitialSession = Boolean(
-    search.session
-      && !newTaskMode
-      && !displayed
-      && !hydratedSelected
-      && selected.isPending,
+    search.session && !newTaskMode && !selected.task && selected.loading,
   )
   const hasPresentedWorkspace = Boolean(
     config && presentedWorkspaceFor.current === config.address,
@@ -203,68 +178,6 @@ export function WakuApp() {
       hydratingSession: hydratingInitialSession,
     },
   )
-
-  useEffect(() => {
-    if (!client || !config || !taskState.data) return
-    let cancelled = false
-    const candidates = new Set(
-      taskState.data.sessions
-        .filter((session) => ['connecting', 'working', 'waiting', 'background'].includes(session.status))
-        .map((session) => session.id),
-    )
-    if (current?.id) candidates.add(current.id)
-
-    for (const sessionId of candidates) {
-      if (runtimes[sessionId]) continue
-      const loaded = current?.id === sessionId
-        ? Promise.resolve(current)
-        : queryClient.fetchQuery({
-            queryKey: daemonKeys.session(config.address, sessionId),
-            queryFn: () => hydrateSession(client, sessionId),
-            staleTime: 1_000,
-          })
-      void loaded
-        .then((session) => {
-          if (!cancelled && session) return attachSession(session)
-        })
-        .catch(() => {
-          // Connection state owns visible errors. A catalog revision or the
-          // next selected-session hydration will retry an attachment race.
-        })
-    }
-    return () => {
-      cancelled = true
-    }
-  }, [attachSession, client, config, current, queryClient, runtimes, taskState.data])
-
-  useEffect(() => {
-    if (!config || !current || !taskState.data) return
-    const summary = taskState.data.sessions.find((session) => session.id === current.id)
-    if (!summary) return
-    queryClient.setQueryData<AgentSession>(
-      daemonKeys.session(config.address, current.id),
-      (session) => {
-        if (!session) return session
-        const status = runtimes[current.id] ? session.status : summary.status
-        if (
-          session.title === summary.title
-          && session.auto_title === summary.auto_title
-          && session.model === summary.model
-          && session.status === status
-          && session.last_reply_at === summary.last_reply_at
-        ) return session
-        return {
-          ...session,
-          title: summary.title,
-          auto_title: summary.auto_title,
-          model: summary.model,
-          status,
-          last_reply_at: summary.last_reply_at,
-          updated_at: Math.max(session.updated_at, summary.updated_at),
-        }
-      },
-    )
-  }, [config, current, queryClient, runtimes, taskState.data])
 
   useEffect(() => {
     const preload = () => {
@@ -284,10 +197,10 @@ export function WakuApp() {
   }, [])
 
   useEffect(() => {
-    if (!config || !taskState.data || composerDraftAddress !== config.address) return
+    if (!config || !shell.ready || !composerDraftsLoaded) return
     if (showingInitialDestination) return
     presentedWorkspaceFor.current = config.address
-  }, [composerDraftAddress, config, showingInitialDestination, taskState.data])
+  }, [composerDraftsLoaded, config, shell.ready, showingInitialDestination])
 
   useEffect(() => {
     const transition = routeDestinationTransition(
@@ -303,11 +216,9 @@ export function WakuApp() {
     if (transition !== 'newTask') return
 
     enteringNewTask.current = true
-    const project = currentProject ?? draftProject ?? taskState.data?.projects[0]
-    setDisplayed(null)
+    const project = currentProject ?? draftProject ?? projects[0]
     setNewTaskMode(true)
-    setDraftProject(project ?? null)
-    setDraft(project ? createRememberedSession(project.id) : null)
+    setDraft(project ? createRememberedDraft(project.id) : null)
     rememberNavigation({ kind: 'newTask', projectId: project?.id })
   }, [search.session])
 
@@ -316,20 +227,13 @@ export function WakuApp() {
   }, [newTaskMode, search.session])
 
   useEffect(() => {
-    const hydrated = selected.data
-    if (search.session && hydrated?.id === search.session) {
-      setDisplayed(hydrated)
-      // A click from New Task keeps that complete surface mounted while the
-      // transcript is fetched. Commit the activation only when hydration has
-      // succeeded, just like the desktop pending-session transition.
-      if (newTaskMode && !enteringNewTask.current) {
-        setNewTaskMode(false)
-        setDraft(null)
-        setDraftProject(null)
-      }
+    // A click from New Task keeps that surface mounted while the thread's
+    // snapshot arrives; switch once it has.
+    if (search.session && selected.task?.id === search.session && newTaskMode && !enteringNewTask.current) {
+      setNewTaskMode(false)
+      setDraft(null)
     }
-    else if (selected.isSuccess) setDisplayed(null)
-  }, [newTaskMode, search.session, selected.data, selected.isSuccess])
+  }, [newTaskMode, search.session, selected.task?.id])
 
   useEffect(() => {
     if (!current || pendingPaletteFocusSession.current !== current.id) return
@@ -337,20 +241,13 @@ export function WakuApp() {
     setFocusComposerSignal((value) => value + 1)
   }, [current?.id])
 
-  const daemonAddress = config?.address
+  // The composer keeps its own copy of the drafts; local edits are sent to
+  // the daemon a moment after typing stops.
   useEffect(() => {
-    if (!daemonAddress || !loadedComposerDrafts.data) return
-    for (const timer of new Set(composerDraftTimers.current.values())) {
-      window.clearTimeout(timer)
-    }
-    composerDraftTimers.current.clear()
-    composerDraftWriteQueue.current = Promise.resolve()
-    composerDraftState.current = {
-      new_sessions: { ...loadedComposerDrafts.data.new_sessions },
-      sessions: { ...loadedComposerDrafts.data.sessions },
-    }
-    setComposerDraftAddress(daemonAddress)
-  }, [daemonAddress, loadedComposerDrafts.data])
+    if (composerDraftsLoaded || !draftsSettled) return
+    composerDraftState.current = structuredClone(drafts.drafts)
+    setComposerDraftsLoaded(true)
+  }, [composerDraftsLoaded, drafts.drafts, draftsSettled])
 
   useEffect(() => () => {
     for (const timer of new Set(composerDraftTimers.current.values())) {
@@ -378,52 +275,42 @@ export function WakuApp() {
   }, [rightPanelWidth])
 
   useEffect(() => {
-    if (!activeSession) return
-    if (!retainedPanelSessionIds.includes(activeSession.id)) return
-    retainedPanelSessions.current.set(activeSession.id, {
-      session: activeSession,
-      project: activeProject,
-    })
-  }, [activeProject, activeSession, retainedPanelSessionIds])
+    if (!activeSubject || !retainedPanelIds.includes(activeSubject.key)) return
+    retainedPanels.current.set(activeSubject.key, activeSubject)
+  })
 
   useEffect(() => {
-    if (!taskState.data) return
+    if (!shell.ready) return
     if (search.session) return
     if (enteringNewTask.current && !newTaskMode) return
     if (newTaskMode) {
       const rememberedProjectId = rememberedNavigation.current?.kind === 'newTask'
         ? rememberedNavigation.current.projectId
         : undefined
-      const project = taskState.data.projects.find((item) => item.id === rememberedProjectId)
-        ?? taskState.data.projects[0]
+      const project = projects.find((item) => item.id === rememberedProjectId) ?? projects[0]
       if (!project) {
         setDraft(null)
-        setDraftProject(null)
         return
       }
-      setDraft((currentDraft) => currentDraft?.project_id === project.id
+      setDraft((currentDraft) => currentDraft?.projectId === project.id
         ? currentDraft
-        : createRememberedSession(project.id))
-      setDraftProject(project)
+        : createRememberedDraft(project.id))
       return
     }
     const remembered = rememberedNavigation.current
-    const rememberedSession = remembered?.kind === 'session'
-      ? taskState.data.sessions.find((session) => session.id === remembered.sessionId)
+    const rememberedTask = remembered?.kind === 'session'
+      ? tasks.find((task) => task.id === remembered.sessionId)
       : undefined
-    const newest = rememberedSession ?? [...taskState.data.sessions]
-      .filter((session) => session.last_reply_at || session.turns.length || session.messages.length)
-      .sort((a, b) => (b.last_reply_at ?? b.created_at) - (a.last_reply_at ?? a.created_at))[0]
+    const newest = rememberedTask ?? [...tasks]
+      .filter(sessionHasStarted)
+      .sort((a, b) => (b.lastReplyAt ?? b.createdAt) - (a.lastReplyAt ?? a.createdAt))[0]
     if (newest) void navigate({ search: { session: newest.id }, replace: true })
-    else startNewTask(taskState.data.projects[0])
-  }, [taskState.data, search.session, newTaskMode, navigate])
+    else startNewTask(projects[0])
+  }, [shell.ready, projects, tasks, search.session, newTaskMode, navigate])
 
   useEffect(() => {
     if (!config || !search.session) return
-    rememberNavigation({
-      kind: 'session',
-      sessionId: search.session,
-    })
+    rememberNavigation({ kind: 'session', sessionId: search.session })
   }, [config, search.session])
 
   useEffect(() => {
@@ -451,7 +338,7 @@ export function WakuApp() {
         setSidebarVisible((value) => !value)
         return
       }
-      if (!taskState.data) return
+      if (!shell.ready) return
       if (key === 'n') {
         event.preventDefault()
         startNewTask()
@@ -473,21 +360,22 @@ export function WakuApp() {
     return () => window.removeEventListener('keydown', keyDown)
   })
 
-  const composerDraftsReady = Boolean(config && composerDraftAddress === config.address)
-  if (!taskState.data || !composerDraftsReady) {
-    const startupError = taskState.error ?? loadedComposerDrafts.error
-    return <StartupScreen error={startupError ? errorMessage(startupError) : undefined} onRetry={() => {
-      void taskState.refetch()
-      void loadedComposerDrafts.refetch()
-    }} />
+  if (!shell.ready || !composerDraftsLoaded) {
+    const startupError = shell.error
+    return <StartupScreen error={startupError ? errorMessage(startupError) : undefined} />
   }
 
   if (showingInitialDestination) {
     return <StartupScreen />
   }
 
-  if (search.session && !newTaskMode && !displayed && !hydratedSelected && selected.error) {
-    return <StartupScreen error={errorMessage(selected.error)} onRetry={() => void selected.refetch()} />
+  if (search.session && !newTaskMode && !selected.task && selected.error) {
+    return (
+      <StartupScreen
+        error={errorMessage(selected.error)}
+        onRetry={() => startNewTask()}
+      />
+    )
   }
 
   function openProjectPicker() {
@@ -528,24 +416,21 @@ export function WakuApp() {
 
   function openPanel(
     surface: PanelSurface,
-    source: ReviewDiffSource = 'uncommitted',
+    source: DiffSource = 'uncommitted',
     file: string | null = null,
   ) {
-    if (!activeSession) return
-    retainPanelSession(activeSession, activeProject)
+    if (!activeSubject) return
+    retainPanel(activeSubject)
     setRequestedPanel(surface)
     setRequestedFile(surface === 'files' ? file : null)
     if (surface === 'changes') setRequestedDiffSource(source)
-    setPanelRequestSessionId(activeSession.id)
+    setPanelRequestSessionId(activeSubject.key)
     setPanelRequestSignal((value) => value + 1)
-    setRightPanelForSession(activeSession.id, true)
+    setRightPanelForSession(activeSubject.key, true)
   }
 
   function openTranscriptLink(target: string) {
-    const workspace = activeSession && activeProject
-      ? sessionCwd(activeSession, activeProject)
-      : undefined
-    const route = transcriptLinkRoute(target, workspace)
+    const route = transcriptLinkRoute(target, activeSubject?.cwd)
     if (route.kind === 'external') return false
     if (route.kind === 'remoteFile') {
       toast.error(t('errors.path_outside_workspace'))
@@ -555,76 +440,66 @@ export function WakuApp() {
     return true
   }
 
-  function openBackgroundWork(key: BackgroundWorkKey) {
-    if (!activeSession) return
-    retainPanelSession(activeSession, activeProject)
-    setRequestedBackgroundWorkKey(key)
+  function openBackgroundWork(id: string) {
+    if (!activeSubject) return
+    retainPanel(activeSubject)
+    setRequestedBackgroundWorkId(id)
     setRequestedPanel('backgroundWork')
-    setPanelRequestSessionId(activeSession.id)
+    setPanelRequestSessionId(activeSubject.key)
     setPanelRequestSignal((value) => value + 1)
-    setRightPanelForSession(activeSession.id, true)
+    setRightPanelForSession(activeSubject.key, true)
   }
 
-  function retainPanelSession(session: AgentSession, project?: Project) {
-    retainedPanelSessions.current.set(session.id, { session, project })
-    setRetainedPanelSessionIds((currentIds) => currentIds.includes(session.id)
+  function retainPanel(subject: PanelSubject) {
+    retainedPanels.current.set(subject.key, subject)
+    setRetainedPanelIds((currentIds) => currentIds.includes(subject.key)
       ? currentIds
-      : [...currentIds, session.id])
+      : [...currentIds, subject.key])
   }
 
   function setRightPanelForSession(
-    sessionId: string,
+    key: string,
     next: boolean | ((current: boolean) => boolean),
   ) {
     setRightPanelOpenBySession((current) => {
-      const previous = current[sessionId] ?? false
+      const previous = current[key] ?? false
       const value = typeof next === 'function' ? next(previous) : next
-      return value === previous ? current : { ...current, [sessionId]: value }
+      return value === previous ? current : { ...current, [key]: value }
     })
   }
 
   function setActiveRightPanel(next: boolean | ((current: boolean) => boolean)) {
-    if (!activeSession) return
-    retainPanelSession(activeSession, activeProject)
-    setRightPanelForSession(activeSession.id, next)
+    if (!activeSubject) return
+    retainPanel(activeSubject)
+    setRightPanelForSession(activeSubject.key, next)
   }
 
   function toggleRightPanel() {
-    setActiveRightPanel((current) => !current)
+    setActiveRightPanel((value) => !value)
   }
 
-  function forgetRightPanelSession(sessionId: string) {
-    retainedPanelSessions.current.delete(sessionId)
-    setRetainedPanelSessionIds((current) => current.filter((id) => id !== sessionId))
-    setRightPanelOpenBySession((current) => {
-      if (!(sessionId in current)) return current
-      const next = { ...current }
-      delete next[sessionId]
+  function forgetRightPanelSession(key: string) {
+    retainedPanels.current.delete(key)
+    setRetainedPanelIds((currentIds) => currentIds.filter((id) => id !== key))
+    setRightPanelOpenBySession((value) => {
+      if (!(key in value)) return value
+      const next = { ...value }
+      delete next[key]
       return next
     })
-    setPanelRequestSessionId((current) => current === sessionId ? null : current)
+    setPanelRequestSessionId((value) => value === key ? null : value)
   }
 
-  function startNewTask(preferred?: Project | null) {
+  function startNewTask(preferred?: T.Project | null) {
     const project = preferred === null
       ? undefined
-      : preferred ?? currentProject ?? draftProject ?? taskState.data?.projects[0]
+      : preferred ?? currentProject ?? draftProject ?? projects[0]
     if (newTaskMode && draft) forgetRightPanelSession(draft.id)
-    const nextDraft = project
-      ? createRememberedSession(project.id)
-      : null
     enteringNewTask.current = true
     pendingPaletteFocusSession.current = null
     setFocusComposerSignal((value) => value + 1)
     setNewTaskMode(true)
-    setDisplayed(null)
-    if (project) {
-      setDraftProject(project)
-      setDraft(nextDraft)
-    } else {
-      setDraft(null)
-      setDraftProject(null)
-    }
+    setDraft(project ? createRememberedDraft(project.id) : null)
     rememberNavigation({ kind: 'newTask', projectId: project?.id })
     void navigate({ search: { session: undefined }, replace: false })
   }
@@ -633,79 +508,43 @@ export function WakuApp() {
     if (sessionId === search.session && !newTaskMode) return
     if (newTaskMode && draft && draft.id !== sessionId) forgetRightPanelSession(draft.id)
     enteringNewTask.current = false
-    if (!newTaskMode) {
-      setDraft(null)
-      setDraftProject(null)
-    }
+    if (!newTaskMode) setDraft(null)
     rememberNavigation({ kind: 'session', sessionId })
     void navigate({ search: { session: sessionId } })
   }
 
-  async function resumeProviderSession(summary: ProviderSessionSummary) {
-    if (!client || !config || !taskState.data) {
-      throw new Error(t('errors.daemon_disconnected'))
-    }
-    const existing = taskState.data.sessions.find((session) =>
-      session.provider_cursor
-        ? sameProviderSession(session.provider_cursor, summary.cursor)
-        : false)
-    if (existing) {
-      pendingPaletteFocusSession.current = existing.id
-      selectSession(existing.id)
-      return
-    }
-
-    const history = await loadProviderSessionHistory(client, summary)
-    const existingProject = taskState.data.projects.find((project) => project.path === summary.cwd)
-    const project = existingProject ?? createProject(summary.cwd)
-    const session = createResumedSession(
-      project.id,
+  async function resumeProviderSession(summary: T.ProviderSessionSummary) {
+    const project = projects.find((candidate) => candidate.path === summary.cwd)
+      ?? await actions.addProject(summary.cwd)
+    const threadId = await actions.importSession(
       summary,
-      history,
-      activeSession?.runtime_mode ?? 'fullAccess',
+      project.id,
+      current?.runtimeMode ?? draft?.runtimeMode ?? 'full_access',
     )
-    const saved = await saveSession(session, existingProject ? undefined : project)
-    pendingPaletteFocusSession.current = saved.id
-    selectSession(saved.id)
+    pendingPaletteFocusSession.current = threadId
+    selectSession(threadId)
   }
 
-  async function forkResponse(session: AgentSession, turnCount: number) {
+  async function forkResponse(task: Task, runId: string) {
     try {
-      const result = await forkSessionFromResponse(session, turnCount)
-      selectSession(result.session.id)
-      if (result.checkpointWarning) {
-        toast.warning(t('session.forked_with_checkpoint_warning', {
-          error: result.checkpointWarning,
-        }))
-      } else {
-        toast.success(t('session.forked_from_response'))
-      }
+      const threadId = await actions.forkFromRun(task, runId)
+      selectSession(threadId)
+      toast.success(t('session.forked_from_response'))
     } catch (error) {
       toast.error(t('errors.fork_task', { error: errorMessage(error) }))
     }
   }
 
   async function rewindMessage(
-    session: AgentSession,
-    turnCount: number,
+    task: Task,
+    runId: string,
     prompt: string,
-    attachments: MessageAttachment[],
+    attachments: T.Attachment[],
   ) {
+    const ordinal = task.runs.find((run) => run.id === runId)?.ordinal ?? 0
     try {
-      const result = await rewindSessionToMessage(
-        session,
-        turnCount,
-        prompt,
-        attachments,
-      )
-      if (result.cleanupWarning) {
-        toast.warning(t('session.rewound_with_stale_refs', {
-          turn: turnCount,
-          error: result.cleanupWarning,
-        }))
-      } else {
-        toast(t('session.rewound', { turn: turnCount }))
-      }
+      await actions.rewindToRun(task, runId, { text: prompt, attachments })
+      toast(t('session.rewound', { turn: ordinal }))
     } catch (error) {
       toast.error(t('errors.rewind_task', { error: errorMessage(error) }))
       throw error
@@ -713,128 +552,77 @@ export function WakuApp() {
   }
 
   async function renameSession(sessionId: string, title: string) {
-    if (!client || !config) throw new Error(t('errors.daemon_disconnected'))
-    const stateKey = daemonKeys.taskState(config.address)
-    const sessionKey = daemonKeys.session(config.address, sessionId)
-    const previousState = queryClient.getQueryData<TaskState>(stateKey)
-    const previousSummary = previousState?.sessions.find((session) => session.id === sessionId)
-    const previousHydrated = queryClient.getQueryData<AgentSession>(sessionKey)
-    const updatedAt = Math.floor(Date.now() / 1_000)
-    queryClient.setQueryData<TaskState>(stateKey, (currentState) => currentState && ({
-      ...currentState,
-      sessions: currentState.sessions.map((session) => session.id === sessionId
-        ? { ...session, title, updated_at: updatedAt }
-        : session),
-    }))
-    queryClient.setQueryData<AgentSession>(sessionKey, (session) => session
-      ? { ...session, title, updated_at: updatedAt }
-      : session)
     try {
-      const hydrated = await hydrateSession(client, sessionId)
-      if (!hydrated) throw new Error(t('errors.task_not_found'))
-      await saveSession({ ...hydrated, title, updated_at: updatedAt })
+      await actions.renameTask(sessionId, title)
     } catch (error) {
-      if (previousSummary) {
-        queryClient.setQueryData<TaskState>(stateKey, (currentState) => currentState && ({
-          ...currentState,
-          sessions: currentState.sessions.map((session) => session.id === sessionId
-            ? {
-                ...session,
-                title: previousSummary.title,
-                updated_at: previousSummary.updated_at,
-              }
-            : session),
-        }))
-      }
-      if (previousHydrated) {
-        queryClient.setQueryData<AgentSession>(sessionKey, (session) => session && ({
-          ...session,
-          title: previousHydrated.title,
-          updated_at: previousHydrated.updated_at,
-        }))
-      }
       toast.error(t('errors.rename_task', { error: errorMessage(error) }))
       throw error
     }
   }
 
+  /** After a task leaves the list, go where the desktop would. */
+  async function leaveTask(removedId: string) {
+    const removed = tasks.find((task) => task.id === removedId)
+    removeStoredComposerDraft({ type: 'thread', threadId: removedId })
+    forgetRightPanelSession(removedId)
+    if (search.session !== removedId) return
+    if (!removed) {
+      startNewTask(null)
+      return
+    }
+    const destination = taskRemovalDestination(
+      projects,
+      projects,
+      tasks.filter((task) => task.id !== removedId),
+      removed,
+    )
+    if (destination.kind === 'session') selectSession(destination.sessionId)
+    else if (destination.kind === 'newTask') startNewTask(destination.project)
+    else if (destination.kind === 'projectless') {
+      startNewTask(null)
+      await createProjectlessTask()
+    } else startNewTask(null)
+  }
+
   async function removeSessionById(sessionId: string) {
-    if (!client || !config) throw new Error(t('errors.daemon_disconnected'))
-    const stateKey = daemonKeys.taskState(config.address)
-    const previousState = queryClient.getQueryData<TaskState>(stateKey)
-    const removedIndex = previousState?.sessions.findIndex((session) => session.id === sessionId) ?? -1
-    const removed = removedIndex >= 0 ? previousState?.sessions[removedIndex] : undefined
-    queryClient.setQueryData<TaskState>(stateKey, (currentState) => currentState && ({
-      ...currentState,
-      sessions: currentState.sessions.filter((session) => session.id !== sessionId),
-    }))
     try {
-      await closeSession(sessionId)
-      const next = await removeSession(client, sessionId)
-      queryClient.setQueryData(stateKey, next)
-      queryClient.removeQueries({ queryKey: daemonKeys.session(config.address, sessionId) })
-      removeStoredComposerDraft({ type: 'session', sessionId })
-      forgetRightPanelSession(sessionId)
-      if (search.session === sessionId && removed && previousState) {
-        const destination = taskRemovalDestination(
-          previousState.projects,
-          next.projects,
-          next.sessions,
-          removed,
-        )
-        if (destination.kind === 'session') {
-          selectSession(destination.sessionId)
-        } else if (destination.kind === 'newTask') {
-          startNewTask(destination.project)
-        } else if (destination.kind === 'projectless') {
-          startNewTask(null)
-          await createProjectlessTask()
-        } else {
-          startNewTask(null)
-        }
-      } else if (search.session === sessionId) {
-        startNewTask(null)
-      }
+      await actions.deleteTask(sessionId)
+      await leaveTask(sessionId)
     } catch (error) {
-      if (removed) {
-        queryClient.setQueryData<TaskState>(stateKey, (currentState) => {
-          if (!currentState || currentState.sessions.some((session) => session.id === sessionId)) {
-            return currentState
-          }
-          const sessions = [...currentState.sessions]
-          sessions.splice(Math.min(removedIndex, sessions.length), 0, removed)
-          return { ...currentState, sessions }
-        })
-      }
       toast.error(t('errors.remove_task', { error: errorMessage(error) }))
       throw error
     }
   }
 
-  function chooseProject(project: Project) {
+  async function archiveSessionById(sessionId: string) {
+    try {
+      await actions.archiveTask(sessionId)
+      await leaveTask(sessionId)
+    } catch (error) {
+      toast.error(t('errors.archive_task', { error: errorMessage(error) }))
+      throw error
+    }
+  }
+
+  function chooseProject(project: T.Project) {
     if (draftProject && draftProject.id !== project.id) {
       moveStoredComposerDraft(
-        { type: 'newSession', projectId: draftProject.id },
-        { type: 'newSession', projectId: project.id },
+        { type: 'newThread', projectId: draftProject.id },
+        { type: 'newThread', projectId: project.id },
       )
     }
     enteringNewTask.current = true
-    setDisplayed(null)
-    setDraftProject(project)
     setDraft((currentDraft) => currentDraft
-      ? { ...currentDraft, project_id: project.id, workspace: { kind: 'local' } }
-      : createRememberedSession(project.id))
+      ? { ...currentDraft, projectId: project.id, isolated: false, baseRef: undefined }
+      : createRememberedDraft(project.id))
     setNewTaskMode(true)
     rememberNavigation({ kind: 'newTask', projectId: project.id })
     void navigate({ search: { session: undefined }, replace: false })
   }
 
-  async function persistAndChooseProject(project: Project): Promise<boolean> {
-    if (!client || !config) return false
+  async function addRemoteProject(path: string): Promise<boolean> {
     try {
-      const saved = await persistProject(client, project)
-      queryClient.setQueryData(daemonKeys.taskState(config.address), saved.taskState)
-      chooseProject(saved.project)
+      chooseProject(await actions.addProject(path))
       return true
     } catch (error) {
       toast.error(errorMessage(error))
@@ -842,22 +630,12 @@ export function WakuApp() {
     }
   }
 
-  async function addRemoteProject(path: string): Promise<boolean> {
-    try {
-      return await persistAndChooseProject(createProject(path))
-    } catch (error) {
-      toast.error(errorMessage(error))
-      return false
-    }
-  }
-
   async function createProjectlessTask() {
-    if (!client || projectlessRequest.current) return
+    if (projectlessRequest.current) return
     projectlessRequest.current = true
     setProjectlessPending(true)
     try {
-      const path = await createProjectlessWorkspace(client)
-      await persistAndChooseProject({ ...createProject(path), name: 'No project' })
+      chooseProject(await actions.projectlessProject())
     } catch (error) {
       toast.error(errorMessage(error))
     } finally {
@@ -866,25 +644,23 @@ export function WakuApp() {
     }
   }
 
-  function createRememberedSession(projectId: string): AgentSession {
+  function createRememberedDraft(projectId: string): NewTaskDraft {
     const preferences = readComposerPreferences(
       browserComposerPreferenceStorage(),
       config?.address ?? 'disconnected',
     )
     return {
-      ...createSession(projectId, preferences.lastProvider, false),
-      model: preferences.lastModel,
-      reasoning_effort: preferences.lastReasoningEffort,
-      service_tier: preferences.lastServiceTier,
-      context_window: preferences.lastContextWindow,
+      id: crypto.randomUUID(),
+      projectId,
+      selection: rememberedSelection(preferences),
+      runtimeMode: 'full_access',
+      interactionMode: 'default',
+      isolated: false,
     }
   }
 
-  function updateStoredComposerDraft(
-    target: ComposerDraftTarget,
-    draft: ComposerDraft,
-  ) {
-    const change = setComposerDraft(composerDraftState.current, target, draft)
+  function updateStoredComposerDraft(target: DraftTarget, value: ComposerDraftValue) {
+    const change = setComposerDraft(composerDraftState.current, target, value)
     if (!change) return
     const id = composerDraftId(target)
     const pending = composerDraftTimers.current.get(id)
@@ -898,21 +674,14 @@ export function WakuApp() {
     composerDraftTimers.current.set(id, timer)
   }
 
-  function removeStoredComposerDraft(target: ComposerDraftTarget) {
-    const change = setComposerDraft(
-      composerDraftState.current,
-      target,
-      { text: '', attachments: [] },
-    )
+  function removeStoredComposerDraft(target: DraftTarget) {
+    const change = setComposerDraft(composerDraftState.current, target, { text: '', attachments: [] })
     if (!change) return
     cancelComposerDraftTimer(target)
     enqueueComposerDraftChanges([change])
   }
 
-  function moveStoredComposerDraft(
-    source: ComposerDraftTarget,
-    destination: ComposerDraftTarget,
-  ) {
+  function moveStoredComposerDraft(source: DraftTarget, destination: DraftTarget) {
     const changes = moveComposerDraftToEmpty(composerDraftState.current, source, destination)
     if (!changes.length) return
     cancelComposerDraftTimer(source)
@@ -920,18 +689,19 @@ export function WakuApp() {
     enqueueComposerDraftChanges(changes)
   }
 
-  function cancelComposerDraftTimer(target: ComposerDraftTarget) {
+  function cancelComposerDraftTimer(target: DraftTarget) {
     const id = composerDraftId(target)
     const timer = composerDraftTimers.current.get(id)
     if (timer !== undefined) window.clearTimeout(timer)
     composerDraftTimers.current.delete(id)
   }
 
-  function enqueueComposerDraftChanges(changes: ComposerDraftChange[]) {
-    if (!client || !changes.length) return
+  function enqueueComposerDraftChanges(changes: T.DraftChange[]) {
+    const store = stores?.drafts
+    if (!store || !changes.length) return
     composerDraftWriteQueue.current = composerDraftWriteQueue.current
       .catch(() => {})
-      .then(() => applyComposerDraftChanges(client, changes))
+      .then(() => store.apply(changes))
       .catch((error) => {
         toast.error(t('errors.save_draft', { error: errorMessage(error) }))
       })
@@ -963,21 +733,27 @@ export function WakuApp() {
     resumeProviderSession,
   }
 
+  const activeSelection = current?.selection ?? draft?.selection
   const palette = (
     <CommandPalette
       actions={paletteActions}
-      canChooseModel={Boolean(activeSession && !['connecting', 'working', 'waiting', 'background'].includes(activeSession.status))}
-      canToggleUsage={Boolean(activeSession)}
-      currentProvider={activeSession?.provider ?? 'codex'}
+      canChooseModel={Boolean(current ? !isBusy(current.status) : draft)}
+      canToggleUsage={Boolean(current ?? draft)}
+      currentProvider={activeSelection?.instance ?? 'codex'}
       initialView={paletteInitialView}
       open={paletteOpen}
+      projects={projects}
       rightPanelVisible={rightPanelVisible}
       selectedSessionId={search.session}
       sidebarVisible={sidebarVisible}
-      taskState={taskState.data}
+      tasks={tasks}
       onOpenChange={setPaletteOpen}
     />
   )
+
+  const panelSubjects = (activeSubject && !retainedPanelIds.includes(activeSubject.key)
+    ? [...retainedPanelIds, activeSubject.key]
+    : retainedPanelIds)
 
   return (
     <div className="flex h-dvh w-full overflow-hidden bg-background">
@@ -985,6 +761,7 @@ export function WakuApp() {
         <Sidebar
           mobileOpen={mobileSidebar}
           onAddProject={openProjectPicker}
+          onArchiveSession={archiveSessionById}
           onMobileOpenChange={setMobileSidebar}
           onNewTask={() => startNewTask()}
           onRemoveSession={removeSessionById}
@@ -994,8 +771,9 @@ export function WakuApp() {
           onSettings={() => openSettings('general')}
           onToggleSidebar={hideSidebar}
           onWidthChange={setSidebarWidth}
+          projects={projects}
           selectedSessionId={search.session}
-          taskState={taskState.data}
+          tasks={tasks}
           width={sidebarWidth}
         />
       )}
@@ -1011,70 +789,62 @@ export function WakuApp() {
           onMenu={showSidebar}
           onOpenChanges={() => openPanel('changes', 'uncommitted')}
           onTogglePanel={toggleRightPanel}
-          project={activeProject}
-          session={activeSession}
+          root={activeSubject?.root}
+          task={current}
           sidebarVisible={sidebarVisible}
           title={newTaskMode ? t('menu.new_task') : current ? displayTitle(current) : 'Waku'}
         />
 
         {newTaskMode ? (
-          activeSession && activeProject ? (
+          draft && draftProject ? (
             <>
               <NewTaskCanvas
-                project={activeProject}
-                projects={taskState.data.projects}
+                project={draftProject}
+                projects={projects}
                 onAddProject={openProjectPicker}
                 onProject={(project) => chooseProject(project)}
                 onProjectless={() => void createProjectlessTask()}
               />
               <Composer
-                draft
                 focusSignal={focusComposerSignal}
                 initialComposerDraft={composerDraftFor(composerDraftState.current, {
-                  type: 'newSession',
-                  projectId: activeProject.id,
+                  type: 'newThread',
+                  projectId: draftProject.id,
                 })}
-                key={composerDraftId({
-                  type: 'newSession',
-                  projectId: activeProject.id,
-                })}
+                key={composerDraftId({ type: 'newThread', projectId: draftProject.id })}
                 modelPickerSignal={modelPickerSignal}
+                newTask={draft}
                 onAddProject={openProjectPicker}
                 onFocusSignalHandled={() => setFocusComposerSignal(0)}
                 onModelPickerSignalHandled={() => setModelPickerSignal(0)}
                 onProjectless={() => void createProjectlessTask()}
                 onResume={() => openCommandPalette('resume')}
                 onUsagePanelSignalHandled={() => setUsagePanelSignal(0)}
-                project={activeProject}
-                projects={selectableProjects(taskState.data.projects, activeProject)}
-                session={activeSession}
+                project={draftProject}
+                projects={selectableProjects(projects, draftProject)}
                 usagePanelSignal={usagePanelSignal}
-                onComposerDraftChange={(nextDraft) => updateStoredComposerDraft(
-                  { type: 'newSession', projectId: activeProject.id },
-                  nextDraft,
+                onComposerDraftChange={(value) => updateStoredComposerDraft(
+                  { type: 'newThread', projectId: draftProject.id },
+                  value,
                 )}
                 onComposerDraftSubmitted={() => removeStoredComposerDraft({
-                  type: 'newSession',
-                  projectId: activeProject.id,
+                  type: 'newThread',
+                  projectId: draftProject.id,
                 })}
-                onActivated={(session) => {
-                  setDisplayed(session)
-                  setNewTaskMode(false)
-                  setDraft(null)
-                  setDraftProject(null)
-                  rememberNavigation({ kind: 'session', sessionId: session.id })
-                  void navigate({ search: { session: session.id } })
+                onActivated={(threadId) => {
+                  forgetRightPanelSession(draft.id)
+                  enteringNewTask.current = false
+                  rememberNavigation({ kind: 'session', sessionId: threadId })
+                  void navigate({ search: { session: threadId } })
                 }}
-                onDraftChange={(next) => {
-                  if (next.project_id !== activeProject.id) {
+                onNewTaskChange={(next) => {
+                  if (next.projectId !== draft.projectId) {
                     moveStoredComposerDraft(
-                      { type: 'newSession', projectId: activeProject.id },
-                      { type: 'newSession', projectId: next.project_id },
+                      { type: 'newThread', projectId: draft.projectId },
+                      { type: 'newThread', projectId: next.projectId },
                     )
                   }
                   setDraft(next)
-                  const project = taskState.data?.projects.find((item) => item.id === next.project_id)
-                  if (project) setDraftProject(project)
                 }}
               />
             </>
@@ -1088,35 +858,41 @@ export function WakuApp() {
         ) : current ? (
           <>
             <Transcript
-              backgroundWork={backgroundWork[current.id] ?? []}
-              forkingTurnCount={responseForks[current.id]}
-              rewindingTurnCount={messageRewinds[current.id]}
-              rewindTurnCounts={sessionTurnRefs.data ?? []}
-              session={current}
+              forkingRunId={actions.forking[current.id]}
+              loadingOlder={selected.store?.loadingHistory ?? false}
+              rewindingRunId={actions.rewinding[current.id]}
+              task={current}
               onCopyToComposer={(text) => setComposerPrefill((previous) => ({
                 sessionId: current.id,
                 text,
                 signal: (previous?.signal ?? 0) + 1,
               }))}
+              onForkResponse={(runId) => void forkResponse(current, runId)}
+              onLoadOlder={() => {
+                void selected.store?.loadOlder().catch((error) => toast.error(errorMessage(error)))
+              }}
               onOpenBackgroundWork={openBackgroundWork}
               onOpenLink={openTranscriptLink}
-              onForkResponse={(turnCount) => void forkResponse(current, turnCount)}
-              onRewindMessage={(turnCount, prompt, attachments) =>
-                rewindMessage(current, turnCount, prompt, attachments)}
               onReviewChanges={(source) => openPanel('changes', source)}
+              onRewindMessage={(runId, prompt, attachments) =>
+                rewindMessage(current, runId, prompt, attachments)}
             />
             {currentProject && (
-              <div aria-busy={!selectedReady} className="shrink-0" inert={!selectedReady}>
+              <div aria-busy={!current.synchronized} className="shrink-0">
                 <Composer
                   focusSignal={focusComposerSignal}
                   initialComposerDraft={composerDraftFor(composerDraftState.current, {
-                    type: 'session',
-                    sessionId: current.id,
+                    type: 'thread',
+                    threadId: current.id,
                   })}
-                  key={composerDraftId({ type: 'session', sessionId: current.id })}
+                  key={composerDraftId({ type: 'thread', threadId: current.id })}
                   modelPickerSignal={modelPickerSignal}
                   prefillSignal={composerPrefill?.sessionId === current.id ? composerPrefill.signal : 0}
                   prefillText={composerPrefill?.sessionId === current.id ? composerPrefill.text : undefined}
+                  project={currentProject}
+                  projects={projects}
+                  task={current}
+                  usagePanelSignal={usagePanelSignal}
                   onAddProject={openProjectPicker}
                   onFocusSignalHandled={() => setFocusComposerSignal(0)}
                   onModelPickerSignalHandled={() => setModelPickerSignal(0)}
@@ -1125,27 +901,25 @@ export function WakuApp() {
                   onProjectless={() => void createProjectlessTask()}
                   onResume={() => openCommandPalette('resume')}
                   onUsagePanelSignalHandled={() => setUsagePanelSignal(0)}
-                  project={currentProject}
-                  projects={taskState.data.projects}
-                  session={current}
-                  usagePanelSignal={usagePanelSignal}
-                  onComposerDraftChange={(nextDraft) => updateStoredComposerDraft(
-                    { type: 'session', sessionId: current.id },
-                    nextDraft,
+                  onComposerDraftChange={(value) => updateStoredComposerDraft(
+                    { type: 'thread', threadId: current.id },
+                    value,
                   )}
                   onComposerDraftSubmitted={() => removeStoredComposerDraft({
-                    type: 'session',
-                    sessionId: current.id,
+                    type: 'thread',
+                    threadId: current.id,
                   })}
                 />
               </div>
             )}
-            {selected.error && selectedReady && (
+            {selected.error && (
               <div role="alert" className="absolute left-1/2 top-14 z-20 -translate-x-1/2 rounded-lg bg-destructive px-3 py-2 text-xs text-white shadow-lg">
                 {errorMessage(selected.error)}
               </div>
             )}
           </>
+        ) : search.session && selected.loading ? (
+          <div className="min-h-0 flex-1" />
         ) : (
           <NoProjectState
             projectlessPending={projectlessPending}
@@ -1153,56 +927,40 @@ export function WakuApp() {
             onProjectless={() => void createProjectlessTask()}
           />
         )}
-
-        {newTaskMode && search.session && selected.error && (
-          <div
-            className="absolute left-1/2 top-14 z-20 flex -translate-x-1/2 items-center gap-2 rounded-lg bg-destructive px-3 py-2 text-xs text-white shadow-lg"
-            role="alert"
-          >
-            <span>{errorMessage(selected.error)}</span>
-            <button
-              className="rounded px-1.5 py-0.5 font-medium hover:bg-white/15 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white"
-              type="button"
-              onClick={() => void selected.refetch()}
-            >
-              {t('common.retry')}
-            </button>
-          </div>
-        )}
       </main>
 
-      {panelSessionIds(activeSession, retainedPanelSessionIds).map((sessionId) => {
-        const isActive = activeSession?.id === sessionId
-        const retained = retainedPanelSessions.current.get(sessionId)
-        const panelSession = isActive ? activeSession : retained?.session
-        const panelProject = isActive ? activeProject : retained?.project
-        if (!panelSession) return null
+      {panelSubjects.map((key) => {
+        const isActive = activeSubject?.key === key
+        const subject = isActive ? activeSubject : retainedPanels.current.get(key)
+        if (!subject) return null
         return (
           <RightPanel
             active={isActive}
-            key={sessionId}
-            open={isActive && (rightPanelOpenBySession[sessionId] ?? false)}
+            cwd={subject.cwd}
+            key={key}
+            open={isActive && (rightPanelOpenBySession[key] ?? false)}
+            panelKey={key}
             panelWidth={rightPanelWidth}
-            project={panelProject}
+            requestedBackgroundWorkId={requestedBackgroundWorkId}
             requestedDiffSource={requestedDiffSource}
-            requestedBackgroundWorkKey={requestedBackgroundWorkKey}
             requestedFile={requestedFile}
             requestedSurface={requestedPanel}
-            requestSignal={panelRequestSessionId === sessionId ? panelRequestSignal : 0}
-            session={panelSession}
+            requestSignal={panelRequestSessionId === key ? panelRequestSignal : 0}
+            root={subject.root}
             sidebarWidth={sidebarVisible ? sidebarWidth : 0}
-            onOpenChange={(open) => setRightPanelForSession(sessionId, open)}
+            task={subject.task}
+            onOpenChange={(open) => setRightPanelForSession(key, open)}
             onPanelWidthChange={setRightPanelWidth}
           />
         )
       })}
 
       <CommitDialog
-        key={`${config?.address}:${activeSession?.id}`}
+        key={`${config?.address}:${activeSubject?.key}`}
         open={commitDialogOpen}
-        project={activeProject}
         returnFocus={commitDialogReturnFocus}
-        session={activeSession}
+        root={activeSubject?.root}
+        selection={activeSubject?.selection}
         onOpenChange={setCommitDialogOpen}
       />
 
@@ -1241,18 +999,10 @@ function readRightPanelWidth(): number {
   return Number.isFinite(stored) ? Math.min(1_000, Math.max(280, stored)) : 460
 }
 
-function panelSessionIds(
-  activeSession: AgentSession | null,
-  retainedSessionIds: string[],
-): string[] {
-  if (!activeSession || retainedSessionIds.includes(activeSession.id)) return retainedSessionIds
-  return [...retainedSessionIds, activeSession.id]
-}
-
 function TaskHeader({
   title,
-  session,
-  project,
+  task,
+  root,
   onMenu,
   onOpenChanges,
   onCommit,
@@ -1262,21 +1012,20 @@ function TaskHeader({
   sidebarVisible,
 }: {
   title: string
-  session: AgentSession | null
-  project?: Project
+  task?: Task
+  root?: T.RootRef
   onMenu: () => void
   onOpenChanges: () => void
   onCommit: (returnFocus: HTMLElement | null) => void
   onCompareBranch: () => void
-  onOpenBackgroundWork: (key: BackgroundWorkKey) => void
+  onOpenBackgroundWork: (id: string) => void
   onTogglePanel: () => void
   sidebarVisible: boolean
 }) {
   const { t } = useI18n()
-  const cwd = session && project ? sessionCwd(session, project) : undefined
-  const branches = useWorkspaceBranches(cwd)
-  const preset = session?.provider === 'deepSeek' && session.messages.length
-    ? agentPresetIdLabel(session.agent_preset || 'standard', t)
+  const branches = useWorkspaceBranches(root)
+  const preset = task?.selection.instance === 'deepseek' && task.runs.length
+    ? agentPresetIdLabel(task.selection.agentPreset || 'standard', t)
     : null
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 px-3 lg:px-3.5">
@@ -1306,9 +1055,9 @@ function TaskHeader({
           <span className="text-destructive">-{branches.data.deletions}</span>
         </button>
       )}
-      {session && (
+      {task && (
         <EnvironmentPopover
-          sessionId={session.id}
+          task={task}
           onCommit={onCommit}
           onCompareBranch={onCompareBranch}
           onOpenBackgroundWork={onOpenBackgroundWork}
@@ -1322,42 +1071,38 @@ function TaskHeader({
 }
 
 function EnvironmentPopover({
-  sessionId,
+  task,
   onCommit,
   onCompareBranch,
   onOpenBackgroundWork,
 }: {
-  sessionId: string
+  task: Task
   onCommit: (returnFocus: HTMLElement | null) => void
   onCompareBranch: () => void
-  onOpenBackgroundWork: (key: BackgroundWorkKey) => void
+  onOpenBackgroundWork: (id: string) => void
 }) {
   const { t } = useI18n()
-  const { backgroundWork, refreshBackgroundWork, stopBackgroundWork } = useRuntime()
+  const { stopBackgroundWork } = useTaskActions()
   const [open, setOpen] = useState(false)
   const popup = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   function focusTrigger() {
     requestAnimationFrame(() => trigger.current?.focus())
   }
-  useEffect(() => {
-    if (!open) return
-    void refreshBackgroundWork(sessionId).catch(() => {})
-    const interval = window.setInterval(() => {
-      void refreshBackgroundWork(sessionId).catch(() => {})
-    }, 2_000)
-    return () => window.clearInterval(interval)
-  }, [open, refreshBackgroundWork, sessionId])
 
-  const items = [...(backgroundWork[sessionId] ?? [])].reverse()
-  const processes = items.filter((item) => item.key.kind !== 'subagent')
-  const agents = items.filter((item) => item.key.kind === 'subagent')
+  const items = [...task.backgroundWork].reverse()
+  const processes = items.filter((item) => item.kind !== 'subagent')
+  const agents = items.filter((item) => item.kind === 'subagent')
   const hasBackgroundWork = processes.length > 0 || agents.length > 0
+  const stop = (item: BackgroundWorkItem) => {
+    if (!item.canStop) return
+    void stopBackgroundWork(task.id, item).catch((error) => toast.error(errorMessage(error)))
+  }
 
   function focusMenuItem(position: 'first' | 'last') {
     requestAnimationFrame(() => {
-      const items = popup.current?.querySelectorAll<HTMLElement>('[role="menuitem"]')
-      const target = position === 'first' ? items?.[0] : items?.[Math.max(0, (items?.length ?? 1) - 1)]
+      const menuItems = popup.current?.querySelectorAll<HTMLElement>('[role="menuitem"]')
+      const target = position === 'first' ? menuItems?.[0] : menuItems?.[Math.max(0, (menuItems?.length ?? 1) - 1)]
       target?.focus()
     })
   }
@@ -1396,14 +1141,14 @@ function EnvironmentPopover({
               if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
               const menuItems = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')]
               if (!menuItems.length) return
-              const current = menuItems.indexOf(document.activeElement as HTMLElement)
+              const index = menuItems.indexOf(document.activeElement as HTMLElement)
               const target = event.key === 'Home'
                 ? 0
                 : event.key === 'End'
                   ? menuItems.length - 1
                   : event.key === 'ArrowDown'
-                    ? (current + 1 + menuItems.length) % menuItems.length
-                    : (current - 1 + menuItems.length) % menuItems.length
+                    ? (index + 1 + menuItems.length) % menuItems.length
+                    : (index - 1 + menuItems.length) % menuItems.length
               event.preventDefault()
               menuItems[target]?.focus()
             }}
@@ -1434,12 +1179,12 @@ function EnvironmentPopover({
               <EnvironmentWorkSection
                 items={processes}
                 label={t('background.processes')}
-                onOpen={(key) => {
+                onOpen={(id) => {
                   setOpen(false)
-                  onOpenBackgroundWork(key)
+                  onOpenBackgroundWork(id)
                   focusTrigger()
                 }}
-                onStop={(item) => void stopBackgroundWork(sessionId, item).catch(() => {})}
+                onStop={stop}
                 t={t}
               />
             )}
@@ -1447,12 +1192,12 @@ function EnvironmentPopover({
               <EnvironmentWorkSection
                 items={agents}
                 label={t('background.agents')}
-                onOpen={(key) => {
+                onOpen={(id) => {
                   setOpen(false)
-                  onOpenBackgroundWork(key)
+                  onOpenBackgroundWork(id)
                   focusTrigger()
                 }}
-                onStop={(item) => void stopBackgroundWork(sessionId, item).catch(() => {})}
+                onStop={stop}
                 t={t}
               />
             )}
@@ -1472,7 +1217,7 @@ function EnvironmentWorkSection({
 }: {
   label: string
   items: BackgroundWorkItem[]
-  onOpen: (key: BackgroundWorkKey) => void
+  onOpen: (id: string) => void
   onStop: (item: BackgroundWorkItem) => void
   t: Translator
 }) {
@@ -1481,33 +1226,33 @@ function EnvironmentWorkSection({
       <div className="px-2 text-[13px] text-[var(--text-tertiary)]">{label}</div>
       <div className="flex flex-col gap-0.5">
         {items.map((item) => {
-          const stoppable = isStoppableBackgroundStatus(item.status) && item.canStop && item.controlId
+          const stoppable = isLiveBackgroundStatus(item.status) && item.canStop
           return (
             <div
               className="group flex h-8 w-full cursor-default items-center gap-[9px] rounded-[8px] px-2 outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
-              key={`${item.key.kind}:${item.key.providerId}`}
+              key={`${item.kind}:${item.id}`}
               role="menuitem"
               tabIndex={0}
-              onClick={() => onOpen(item.key)}
+              onClick={() => onOpen(item.id)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
-                  onOpen(item.key)
+                  onOpen(item.id)
                 }
               }}
             >
               <WakuIcon
                 className="size-3.5 text-[var(--text-secondary)]"
-                name={item.key.kind === 'subagent' ? 'bot' : 'terminalSquare'}
+                name={item.kind === 'subagent' ? 'bot' : 'terminalSquare'}
               />
-              <span className={item.key.kind === 'subagent'
+              <span className={item.kind === 'subagent'
                 ? 'min-w-0 flex-1 truncate text-left text-[13.5px]'
                 : 'min-w-0 flex-1 truncate text-left text-[12px] text-[var(--text-secondary)]'}>
                 {item.title}
               </span>
-              {(item.key.kind !== 'subagent' || stoppable) && (
+              {(item.kind !== 'subagent' || stoppable) && (
                 <span className="relative grid size-6 shrink-0 place-items-center">
-                  {item.key.kind !== 'subagent' && (
+                  {item.kind !== 'subagent' && (
                     <EnvironmentWorkStatus
                       className={stoppable ? 'group-hover:invisible group-focus-within:invisible' : undefined}
                       status={item.status}
@@ -1538,27 +1283,25 @@ function EnvironmentWorkSection({
 }
 
 function EnvironmentWorkStatus({ status, className }: { status: BackgroundWorkStatus; className?: string }) {
-  const live = status === 'starting' || status === 'running' || status === 'monitoring'
+  const live = isLiveBackgroundStatus(status)
   const icon = live
     ? 'loaderCircle'
     : status === 'completed'
       ? 'check'
       : status === 'failed'
         ? 'x'
-        : status === 'lost'
-          ? 'alert'
-          : 'stop'
+        : 'stop'
   return (
     <WakuIcon
-      className={`${className ?? ''} size-3 ${live ? 'text-ring motion-safe:animate-spin' : status === 'completed' ? 'text-[var(--success)]' : status === 'failed' || status === 'lost' ? 'text-destructive' : 'text-[var(--text-tertiary)]'}`}
+      className={`${className ?? ''} size-3 ${live ? 'text-ring motion-safe:animate-spin' : status === 'completed' ? 'text-[var(--success)]' : status === 'failed' ? 'text-destructive' : 'text-[var(--text-tertiary)]'}`}
       name={icon}
     />
   )
 }
 
 function backgroundWorkCountSummary(items: BackgroundWorkItem[], t: Translator) {
-  const processes = items.filter((item) => item.key.kind !== 'subagent' && isLiveBackgroundStatus(item.status)).length
-  const agents = items.filter((item) => item.key.kind === 'subagent' && isLiveBackgroundStatus(item.status)).length
+  const processes = items.filter((item) => item.kind !== 'subagent' && isLiveBackgroundStatus(item.status)).length
+  const agents = items.filter((item) => item.kind === 'subagent' && isLiveBackgroundStatus(item.status)).length
   const parts = []
   if (processes) parts.push(t(processes === 1 ? 'background.process_count_one' : 'background.process_count', { count: processes }))
   if (agents) parts.push(t(agents === 1 ? 'background.agent_count_one' : 'background.agent_count', { count: agents }))
@@ -1566,11 +1309,7 @@ function backgroundWorkCountSummary(items: BackgroundWorkItem[], t: Translator) 
 }
 
 function isLiveBackgroundStatus(status: BackgroundWorkStatus) {
-  return isStoppableBackgroundStatus(status) || status === 'stopping'
-}
-
-function isStoppableBackgroundStatus(status: BackgroundWorkStatus) {
-  return status === 'starting' || status === 'running' || status === 'monitoring'
+  return status === 'pending' || status === 'running'
 }
 
 function EnvironmentAction({
@@ -1605,9 +1344,9 @@ function NewTaskCanvas({
   onAddProject,
   onProjectless,
 }: {
-  project: Project
-  projects: Project[]
-  onProject: (project: Project) => void
+  project: T.Project
+  projects: T.Project[]
+  onProject: (project: T.Project) => void
   onAddProject: () => void
   onProjectless: () => void
 }) {
