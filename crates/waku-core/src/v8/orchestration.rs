@@ -539,26 +539,33 @@ pub(crate) async fn dispatch(
         .await
         .map_err(|_| Error::new(ErrorCode::Internal, "the dispatch failed"))?
         .map_err(dispatch_error)?;
-    if orchestration.hub.routed_through(receipt.sequence).await {
-        for barrier in conn.barriers() {
-            // A stream that already ended has nothing left to queue.
-            let Some(barrier) = barrier.upgrade() else {
-                continue;
-            };
-            let (done, wait) = oneshot::channel();
-            let queued = tokio::time::timeout(READ_YOUR_WRITES_TIMEOUT, async {
-                barrier.send(HubMessage::Barrier(done)).await.ok()?;
-                drop(barrier);
-                wait.await.ok()
-            })
-            .await;
-            let _ = queued;
-        }
-    }
+    queue_through(&orchestration, conn, receipt.sequence).await;
     Ok(DispatchResult {
         sequence: receipt.sequence,
         duplicate: receipt.duplicate,
     })
+}
+
+/// Waits until every `thread` and `shell` stream of `conn` has queued the
+/// events through `sequence` (each wait bounded).
+pub(crate) async fn queue_through(orchestration: &Orchestration, conn: &Conn, sequence: Sequence) {
+    if !orchestration.hub.routed_through(sequence).await {
+        return;
+    }
+    for barrier in conn.barriers() {
+        // A stream that already ended has nothing left to queue.
+        let Some(barrier) = barrier.upgrade() else {
+            continue;
+        };
+        let (done, wait) = oneshot::channel();
+        let queued = tokio::time::timeout(READ_YOUR_WRITES_TIMEOUT, async {
+            barrier.send(HubMessage::Barrier(done)).await.ok()?;
+            drop(barrier);
+            wait.await.ok()
+        })
+        .await;
+        let _ = queued;
+    }
 }
 
 /// The `threads.*` reads. `None` for methods this module does not serve.

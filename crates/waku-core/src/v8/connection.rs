@@ -954,6 +954,16 @@ pub(crate) async fn serve<S>(
     tokio::select! {
         () = read_loop(&mut reader, &conn, &context) => {}
         () = context.shutdown.triggered() => {
+            // What was committed before the shutdown goes out first, so a
+            // subscriber sees the end of the run that the shutdown follows.
+            if let Some(orchestration) = &context.orchestration {
+                let head = orchestration.orchestrator.last_sequence();
+                let _ = tokio::time::timeout(
+                    CLOSE_GRACE,
+                    orchestration::queue_through(orchestration, &conn, head),
+                )
+                .await;
+            }
             conn.goodbye(GoodbyeCode::ShuttingDown, "the daemon is shutting down", true);
         }
         // The writer failed (a write stall or a dead socket).
