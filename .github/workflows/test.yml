@@ -19,7 +19,9 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # A slow macOS or Windows runner needs over an hour for clippy, the
+    # replay suites and the bench daemon.
+    timeout-minutes: 90
 
     steps:
       - name: Check out repository
