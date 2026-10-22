@@ -130,11 +130,14 @@ fn host_name() -> String {
         .unwrap_or_else(|| "localhost".into())
 }
 
-/// The daemon settings as clients see them, published to `bus`.
+/// The daemon settings as clients see them, published to `bus`. Reading and
+/// publishing are one step, so a load that read before a concurrent update
+/// cannot publish after it and roll the stream back to the old document.
 pub(crate) fn load_settings(
     backend: &dyn Backend,
     bus: &SettingsBus,
 ) -> anyhow::Result<Arc<SettingsState>> {
+    let _load = bus.load.lock();
     Ok(bus.publish(wire_settings(&backend.settings()?)))
 }
 
@@ -171,12 +174,15 @@ impl SettingsState {
 #[derive(Clone)]
 pub(crate) struct SettingsBus {
     sender: Arc<watch::Sender<Option<Arc<SettingsState>>>>,
+    /// Held by `load_settings` across its read and publish.
+    load: Arc<parking_lot::Mutex<()>>,
 }
 
 impl Default for SettingsBus {
     fn default() -> Self {
         Self {
             sender: Arc::new(watch::channel(None).0),
+            load: Arc::default(),
         }
     }
 }

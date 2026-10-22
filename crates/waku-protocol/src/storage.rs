@@ -309,6 +309,15 @@ mod tests {
     use super::*;
     use crate::settings::DaemonSettings;
 
+    /// `path` made absolute on this host: Windows needs a drive.
+    fn absolute(path: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{path}"))
+        } else {
+            PathBuf::from(path)
+        }
+    }
+
     #[test]
     fn settings_without_storage_get_safe_defaults() {
         let settings: DaemonSettings =
@@ -344,12 +353,12 @@ mod tests {
 
     #[test]
     fn normalization_clamps_rules_and_drops_invalid_locations() {
-        let home = Path::new("/home/user");
+        let home = &absolute("/home/user");
         let storage = StorageSettings {
             worktrees_directory: Some(PathBuf::from("relative/path")),
             previous_worktrees_directories: vec![
-                PathBuf::from("/old"),
-                PathBuf::from("/old"),
+                absolute("/old"),
+                absolute("/old"),
                 PathBuf::from("/"),
                 PathBuf::from("~/elsewhere"),
             ],
@@ -364,7 +373,7 @@ mod tests {
         assert_eq!(storage.worktrees_directory, None);
         assert_eq!(
             storage.previous_worktrees_directories,
-            vec![PathBuf::from("/old"), home.join("elsewhere")]
+            vec![absolute("/old"), home.join("elsewhere")]
         );
         assert_eq!(storage.worktree_cleanup.inactive_after_days, Some(1));
         assert_eq!(
@@ -379,7 +388,7 @@ mod tests {
 
     #[test]
     fn worktree_locations_expand_home_and_refuse_roots() {
-        let home = Path::new("/home/user");
+        let home = &absolute("/home/user");
         assert_eq!(
             validate_worktrees_directory(" ~/trees ", Some(home)),
             Ok(home.join("trees"))
