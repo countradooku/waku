@@ -772,22 +772,6 @@ fn reducer_fixture() {
             ..SeedOptions::default()
         },
     );
-    events.truncate(3);
-    ingest(&served, thread_id, events);
-    ingest(
-        &served,
-        thread_id,
-        vec![streaming(2, "He", ItemStatus::Running)],
-    );
-    dispatch(
-        "fixture-rename",
-        Command::ThreadRename {
-            thread_id,
-            title: "Fixture, renamed".into(),
-        },
-    );
-    // Deltas travel apart from events, so pin the order the fixture records:
-    // every event so far, then the deltas, then the persisted snapshot.
     let last_own = |served: &Served| {
         served
             .orchestrator()
@@ -801,12 +785,36 @@ fn reducer_fixture() {
             })
             .unwrap() as u64
     };
-    let renamed = last_own(&served);
-    collect_thread_until(
-        &thread,
-        &mut thread_seen,
-        |item| matches!(item, ThreadItem::Event { seq, .. } if *seq == renamed),
+    // The hub reads a shell row when it routes an event, so a hub that lags
+    // behind ingestion labels a later row with an earlier sequence. A
+    // dispatch waits for its routing; an ingest does not, so wait for it on
+    // the thread stream (routed in the same pass) before the next change.
+    let routed = |thread_seen: &mut Vec<ThreadItem>, served: &Served| {
+        let last = last_own(served);
+        collect_thread_until(
+            &thread,
+            thread_seen,
+            |item| matches!(item, ThreadItem::Event { seq, .. } if *seq == last),
+        );
+    };
+    events.truncate(3);
+    ingest(&served, thread_id, events);
+    ingest(
+        &served,
+        thread_id,
+        vec![streaming(2, "He", ItemStatus::Running)],
     );
+    routed(&mut thread_seen, &served);
+    dispatch(
+        "fixture-rename",
+        Command::ThreadRename {
+            thread_id,
+            title: "Fixture, renamed".into(),
+        },
+    );
+    // Deltas travel apart from events, so pin the order the fixture records:
+    // every event so far, then the deltas, then the persisted snapshot.
+    routed(&mut thread_seen, &served);
     for (rev, text) in [(3, "ll"), (4, "o,"), (6, " skipped")] {
         served.orchestration.live.deltas.publish(LiveDelta {
             thread_id,
@@ -824,6 +832,7 @@ fn reducer_fixture() {
         thread_id,
         vec![streaming(5, "Hello, world", ItemStatus::Completed)],
     );
+    routed(&mut thread_seen, &served);
     let second = ThreadId(waku_orchestrator::ids::derived_id("fixture", "second"));
     dispatch(
         "fixture-second",
@@ -844,13 +853,8 @@ fn reducer_fixture() {
     );
     let head = served.orchestrator().last_sequence();
 
-    // Collect until each stream delivered its last event.
-    let last_own = last_own(&served);
-    collect_thread_until(
-        &thread,
-        &mut thread_seen,
-        |item| matches!(item, ThreadItem::Event { seq, .. } if *seq == last_own),
-    );
+    // The thread stream is complete (the second thread is another stream);
+    // collect the shell until it delivered the last event.
     loop {
         let StreamEvent::Item(StreamItem::Shell(item)) = next(&shell) else {
             panic!();
