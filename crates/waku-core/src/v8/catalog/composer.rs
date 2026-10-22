@@ -355,12 +355,18 @@ pub(super) async fn drafts_stream(
     context: Arc<V8Context>,
     after: Option<StreamCursor>,
 ) {
-    let mut changes = context.catalog.drafts.sender.subscribe();
     let mut after = after;
     loop {
         let task_context = context.clone();
-        let snapshot = match tokio::task::spawn_blocking(move || load_drafts(&task_context)).await {
-            Ok(Ok(snapshot)) => snapshot,
+        // Load and subscribe under the apply lock: the stream then carries
+        // exactly the applies after its snapshot, never one already in it.
+        let load = move || {
+            let bus = &task_context.catalog.drafts;
+            let _apply = bus.apply.lock();
+            load_drafts(&task_context).map(|snapshot| (snapshot, bus.sender.subscribe()))
+        };
+        let (snapshot, mut changes) = match tokio::task::spawn_blocking(load).await {
+            Ok(Ok(loaded)) => loaded,
             Ok(Err(error)) => {
                 sink.end(EndReason::Error { error });
                 return;
@@ -392,10 +398,6 @@ pub(super) async fn drafts_stream(
         loop {
             match changes.recv().await {
                 Ok((next, applied)) => {
-                    // Already part of the snapshot.
-                    if next == revision {
-                        continue;
-                    }
                     revision = next;
                     let item = DraftsItem::Changed {
                         revision,

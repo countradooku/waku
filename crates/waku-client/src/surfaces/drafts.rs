@@ -26,7 +26,7 @@ use waku_protocol::persistence::{
 
 /// A lost drafts stream is resubscribed after this.
 const RESUBSCRIBE_INTERVAL: Duration = Duration::from_secs(1);
-/// Revisions this client applied, remembered to recognize their echoes.
+/// Revisions this client applied whose echo the stream has not delivered.
 const OWN_REVISIONS: usize = 32;
 
 /// One draft set (`Some`) or removed (`None`).
@@ -179,7 +179,10 @@ struct StoreState {
     /// The drafts as the daemon holds them, as far as this client knows.
     snapshot: ComposerDrafts,
     latest_generation: u64,
-    /// Revisions of this client's own applies, newest last.
+    /// Revisions of this client's own applies the stream has not echoed
+    /// yet, oldest first. A revision is a content hash, so another client
+    /// can produce one this client produced earlier: each is matched once,
+    /// in order.
     own_revisions: VecDeque<u64>,
 }
 
@@ -299,7 +302,7 @@ impl DraftStore {
                     StreamEvent::Item(StreamItem::Drafts(item)) => match item {
                         DraftsItem::Snapshot { revision, drafts } => {
                             after = Some(v8::StreamCursor::Revision { revision });
-                            self.remote_snapshot(domain_drafts(drafts))
+                            self.remote_snapshot(revision, domain_drafts(drafts))
                         }
                         DraftsItem::Changed { revision, changes } => {
                             after = Some(v8::StreamCursor::Revision { revision });
@@ -319,8 +322,15 @@ impl DraftStore {
         }
     }
 
-    fn remote_snapshot(&self, drafts: ComposerDrafts) -> Vec<RemoteDraftChange> {
+    fn remote_snapshot(&self, revision: u64, drafts: ComposerDrafts) -> Vec<RemoteDraftChange> {
         let mut state = self.state.lock();
+        if let Some(echo) = state.own_revisions.iter().position(|own| *own == revision) {
+            state.own_revisions.drain(..=echo);
+        } else if !state.own_revisions.is_empty() {
+            // Taken before this client's latest applies, whose echoes follow;
+            // the baseline is already newer.
+            return Vec::new();
+        }
         let changes = diff_drafts(&state.snapshot, &drafts)
             .into_iter()
             .map(|(key, draft)| RemoteDraftChange {
@@ -335,7 +345,8 @@ impl DraftStore {
 
     fn remote_changes(&self, revision: u64, changes: Vec<DraftChange>) -> Vec<RemoteDraftChange> {
         let mut state = self.state.lock();
-        if state.own_revisions.contains(&revision) {
+        if let Some(echo) = state.own_revisions.iter().position(|own| *own == revision) {
+            state.own_revisions.drain(..=echo);
             return Vec::new();
         }
         let changes = changes
@@ -473,10 +484,51 @@ mod tests {
         assert!(store.remote_changes(43, vec![change]).is_empty());
         // A snapshot without it removes it.
         assert_eq!(
-            store.remote_snapshot(ComposerDrafts::default()),
+            store.remote_snapshot(44, ComposerDrafts::default()),
             vec![RemoteDraftChange {
                 key: ComposerDraftKey::Session(thread),
                 previous: Some(draft("remote")),
+                draft: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_own_revision_echoes_once() {
+        let store = DraftStore::new(DaemonV8::fixed(super::super::Endpoint {
+            address: "unix:/nonexistent".into(),
+            token: String::new(),
+        }));
+        let thread = Uuid::from_u128(9);
+        let set = DraftChange {
+            target: DraftTarget::Thread { thread_id: thread },
+            draft: Some(wire_draft(&draft("mine"))),
+        };
+        let clear = DraftChange {
+            target: DraftTarget::Thread { thread_id: thread },
+            draft: None,
+        };
+        store
+            .state
+            .lock()
+            .snapshot
+            .set(ComposerDraftKey::Session(thread), draft("mine"));
+        store.state.lock().own_revisions.extend([1, 2]);
+        // A snapshot from before both applies is older than the baseline.
+        assert!(
+            store
+                .remote_snapshot(0, ComposerDrafts::default())
+                .is_empty()
+        );
+        assert!(store.remote_changes(1, vec![]).is_empty());
+        assert!(store.remote_changes(2, vec![set]).is_empty());
+        // Another client returns the drafts to revision 1: its content hash
+        // matches an echo already consumed, so it is remote.
+        assert_eq!(
+            store.remote_changes(1, vec![clear]),
+            vec![RemoteDraftChange {
+                key: ComposerDraftKey::Session(thread),
+                previous: Some(draft("mine")),
                 draft: None,
             }]
         );
