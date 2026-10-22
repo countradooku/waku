@@ -178,6 +178,25 @@ fn thread_items(subscription: &waku_client::v8::Subscription) -> Vec<ThreadItem>
     }
 }
 
+/// Appends thread items to `seen` up to and including the first that
+/// satisfies `last`.
+fn collect_thread_until(
+    subscription: &waku_client::v8::Subscription,
+    seen: &mut Vec<ThreadItem>,
+    last: impl Fn(&ThreadItem) -> bool,
+) {
+    loop {
+        let StreamEvent::Item(StreamItem::Thread(item)) = next(subscription) else {
+            panic!();
+        };
+        let done = last(&item);
+        seen.push(item);
+        if done {
+            return;
+        }
+    }
+}
+
 fn subscribe_thread(
     client: &V8Client,
     thread_id: ThreadId,
@@ -767,6 +786,27 @@ fn reducer_fixture() {
             title: "Fixture, renamed".into(),
         },
     );
+    // Deltas travel apart from events, so pin the order the fixture records:
+    // every event so far, then the deltas, then the persisted snapshot.
+    let last_own = |served: &Served| {
+        served
+            .orchestrator()
+            .reader()
+            .with(|connection| {
+                connection.query_row(
+                    "SELECT MAX(sequence) FROM events WHERE thread_id = ?1",
+                    [thread_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap() as u64
+    };
+    let renamed = last_own(&served);
+    collect_thread_until(
+        &thread,
+        &mut thread_seen,
+        |item| matches!(item, ThreadItem::Event { seq, .. } if *seq == renamed),
+    );
     for (rev, text) in [(3, "ll"), (4, "o,"), (6, " skipped")] {
         served.orchestration.live.deltas.publish(LiveDelta {
             thread_id,
@@ -776,8 +816,9 @@ fn reducer_fixture() {
             text: text.into(),
         });
     }
-    // Let the deltas land before the final snapshot.
-    std::thread::sleep(Duration::from_millis(100));
+    collect_thread_until(&thread, &mut thread_seen, |item| {
+        matches!(item, ThreadItem::Delta { rev: 6, .. })
+    });
     ingest(
         &served,
         thread_id,
@@ -804,27 +845,12 @@ fn reducer_fixture() {
     let head = served.orchestrator().last_sequence();
 
     // Collect until each stream delivered its last event.
-    let last_own = served
-        .orchestrator()
-        .reader()
-        .with(|connection| {
-            connection.query_row(
-                "SELECT MAX(sequence) FROM events WHERE thread_id = ?1",
-                [thread_id.to_string()],
-                |row| row.get::<_, i64>(0),
-            )
-        })
-        .unwrap() as u64;
-    loop {
-        let StreamEvent::Item(StreamItem::Thread(item)) = next(&thread) else {
-            panic!();
-        };
-        let done = matches!(&item, ThreadItem::Event { seq, .. } if *seq == last_own);
-        thread_seen.push(item);
-        if done {
-            break;
-        }
-    }
+    let last_own = last_own(&served);
+    collect_thread_until(
+        &thread,
+        &mut thread_seen,
+        |item| matches!(item, ThreadItem::Event { seq, .. } if *seq == last_own),
+    );
     loop {
         let StreamEvent::Item(StreamItem::Shell(item)) = next(&shell) else {
             panic!();

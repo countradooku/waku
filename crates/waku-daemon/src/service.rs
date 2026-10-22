@@ -720,20 +720,28 @@ mod tests {
         assert_eq!(actual, expected, "{name} changed (WAKU_UPDATE_SNAPSHOTS=1)");
     }
 
+    /// `spec` for a Unix home, with `/` separators whatever the host.
+    fn unix_spec(platform: Platform, root: &str) -> ServiceSpec {
+        ServiceSpec {
+            launcher: PathBuf::from(format!("{root}/.waku-fork/bin/waku-daemon-service")),
+            log: PathBuf::from(format!("{root}/.waku-fork/logs/daemon.log")),
+            ..spec(platform, Path::new(root))
+        }
+    }
+
     #[test]
     fn generated_definitions_match_their_snapshots() {
-        let root = Path::new("/Users/dev");
         snapshot(
             "launchd.plist",
-            &launchd_plist(&spec(Platform::Launchd, root)),
+            &launchd_plist(&unix_spec(Platform::Launchd, "/Users/dev")),
         );
         snapshot(
             "systemd.service",
-            &systemd_unit(&spec(Platform::Systemd, Path::new("/home/dev"))),
+            &systemd_unit(&unix_spec(Platform::Systemd, "/home/dev")),
         );
         snapshot(
             "launcher.sh",
-            &launcher_script(&spec(Platform::Launchd, root)),
+            &launcher_script(&unix_spec(Platform::Launchd, "/Users/dev")),
         );
         let mut windows = spec(Platform::WindowsTask, Path::new(r"C:\Users\dev"));
         windows.executable = PathBuf::from(r"C:\Program Files\Waku\waku-daemon.exe");
